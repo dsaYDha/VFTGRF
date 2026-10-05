@@ -23,6 +23,7 @@ import { HUD } from '../ui/HUD.js';
 import { Screens } from '../ui/Screens.js';
 import { ScreenFX } from '../ui/ScreenFX.js';
 import { DebugOverlay } from '../ui/DebugOverlay.js';
+import { ViewPoints } from '../ui/ViewPoints.js';
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 const _fwd = new THREE.Vector3();
@@ -85,6 +86,8 @@ export class Game {
     this.hud = new HUD(this);
     this.screenFx = new ScreenFX(this);
     this.debug = new DebugOverlay(this);
+    this.viewPoints = new ViewPoints(this);
+    this.freezeSim = false;
 
     this.events.on(EV.MISSION_END, (r) => this.onMissionEnd(r));
     this.input.onLockChange = (locked, failed) => this.onLockChange(locked, failed);
@@ -234,8 +237,14 @@ export class Game {
     const input = this.input;
     input.pollLock();
     if (input.wasPressed('F3')) this.debug.toggle();
+    // 점검용 고정 시점 순환 (디버그 모드에서만)
+    if (input.wasPressed('F4') && this.debug.enabled && this.state === 'playing') this.viewPoints.next();
 
-    if (this.state === 'playing') {
+    if (this.state === 'playing' && this.freezeSim) {
+      // 개발용: 시뮬레이션을 멈추고 화면만 그린다 (점검 스크린샷)
+      this.player.updateCamera(0);
+      this.player.updateBody(0);
+    } else if (this.state === 'playing') {
       this.stepSim(dt);
     } else if (this.state === 'briefing') {
       // 브리핑 뒤 배경: 천천히 둘러보는 시점

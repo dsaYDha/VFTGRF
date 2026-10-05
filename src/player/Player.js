@@ -57,6 +57,7 @@ export class Player {
     this.transDur = 0.4;
     this.eyeHeight = CONFIG.player.eyeHeights.stand;
     this.bodyShift = 0; // 몸 모델 앞뒤 보정 (updateBody)
+    this.forceAds = false; // 점검 시점에서 조준 상태 고정
     this.lean = 0;
     this.stamina = CONFIG.player.stamina.max;
     this.breath = 0;
@@ -149,7 +150,8 @@ export class Player {
 
     // 조준 (우클릭)
     const reloading = this.weapon.reloading;
-    const adsTarget = canAct && input.buttons.right && !this.sprinting && !reloading ? 1 : 0;
+    if (input.clicked.right) this.forceAds = false; // 점검 시점(F4)의 고정 조준은 우클릭으로 해제
+    const adsTarget = canAct && (input.buttons.right || this.forceAds) && !this.sprinting && !reloading ? 1 : 0;
     this.ads = damp(this.ads, adsTarget, 1 / CONFIG.render.adsTransitionTime * 2.3, dt);
 
     // 스태미나·숨참

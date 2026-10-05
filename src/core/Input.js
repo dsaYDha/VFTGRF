@@ -15,7 +15,7 @@ export class Input {
 
     window.addEventListener('keydown', (e) => {
       // F3 (디버그), Tab 등 브라우저 기본 동작 막기
-      if (e.code === 'F3' || e.code === 'Tab' || (this.locked && e.code === 'Space')) e.preventDefault();
+      if (e.code === 'F3' || e.code === 'F4' || e.code === 'Tab' || (this.locked && e.code === 'Space')) e.preventDefault();
       if (!this.down.has(e.code)) this.pressed.add(e.code);
       this.down.add(e.code);
     });

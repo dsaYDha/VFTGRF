@@ -31,6 +31,20 @@ export function installDevTools(game) {
       p.updateCamera(0);
       return [p.yaw, p.pitch];
     },
+    // 점검 시점 i (0~5) 로 이동. freeze=true 면 시뮬레이션을 멈춘다 (스크린샷용)
+    view(i, freeze = true) {
+      game.freezeSim = freeze;
+      game.viewPoints.apply(i);
+      return { i, pos: [game.player.pos.x, game.player.pos.y, game.player.pos.z].map((v) => +v.toFixed(2)), posture: game.player.posture };
+    },
+    freeze(v = true) {
+      game.freezeSim = v;
+    },
+    // 렌더 통계 (마지막 프레임)
+    renderInfo() {
+      const i = game.renderer.info;
+      return { calls: i.render.calls, triangles: i.render.triangles, geometries: i.memory.geometries, textures: i.memory.textures, pixelRatio: game.renderer.getPixelRatio() };
+    },
     enemy(i) {
       return game.director.ais[i];
     },

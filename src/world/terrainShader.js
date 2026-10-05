@@ -293,6 +293,10 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   float sheen = T_SHEEN[i1] * b1 + T_SHEEN[i2] * b2;
   float bMud = (i1 == 3 ? b1 : 0.0) + (i2 == 3 ? b2 : 0.0);
   float hMud = i1 == 3 ? n1.z : n2.z;
+#ifndef T_FAR
+  // 진흙 물기: 타일 텍스처 높이만 쓰면 3m 격자 무늬가 되므로 월드 좌표 노이즈로 흩뜨린다
+  hMud += (macB.r - 0.5) * 0.45;
+#endif
 
 #ifndef T_FAR
   // ---- 근거리 디테일 (흙 알갱이)

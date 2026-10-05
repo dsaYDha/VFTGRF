@@ -305,6 +305,53 @@ class GroundLayer {
     this.blob(x, y, rx, ry, rot, rgb, h, rough, 1);
   }
 
+  // 불규칙한 흙덩이: 꼭짓점 반지름을 흔든 다각형 + 빛 방향(-x,-y)으로 밝아지는 기울기.
+  // 매끈한 타원 lump 는 가까이서 동전·조약돌처럼 보이므로 흙에는 이것을 쓴다
+  clod(x, y, rx, ry, rot, rgb, shade, h, rough = 1) {
+    const { rng, k } = this;
+    const n = 6 + Math.floor(rng.next() * 4);
+    const a0 = rng.next() * Math.PI * 2;
+    const cr = Math.cos(rot);
+    const sr = Math.sin(rot);
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const a = a0 + ((i + (rng.next() - 0.5) * 0.6) / n) * Math.PI * 2;
+      const m = 0.62 + rng.next() * 0.5;
+      const lx = Math.cos(a) * rx * m;
+      const ly = Math.sin(a) * ry * m;
+      pts.push([lx * cr - ly * sr, lx * sr + ly * cr]);
+    }
+    const r = Math.max(rx, ry) * 1.15;
+    const shape = (ctx, ox, oy, sc) => {
+      ctx.beginPath();
+      ctx.moveTo(ox + pts[0][0] * sc, oy + pts[0][1] * sc);
+      for (let i = 1; i < n; i++) ctx.lineTo(ox + pts[i][0] * sc, oy + pts[i][1] * sc);
+      ctx.closePath();
+    };
+    const lit = [rgb[0] * 1.12, rgb[1] * 1.12, rgb[2] * 1.12];
+    const dim = [rgb[0] * 0.8, rgb[1] * 0.8, rgb[2] * 0.8];
+    this.wrap(x, y, r + 2 * k, (px, py) => {
+      const c = this.cc;
+      c.fillStyle = css(shade, 0.45);
+      shape(c, px + 1.1 * k, py + 1.3 * k, 1.04);
+      c.fill();
+      const g = c.createLinearGradient(px - r * 0.7, py - r * 0.7, px + r * 0.7, py + r * 0.7);
+      g.addColorStop(0, css(lit));
+      g.addColorStop(1, css(dim));
+      c.fillStyle = g;
+      shape(c, px, py, 1);
+      c.fill();
+      const hc = this.hc;
+      const hg = hc.createRadialGradient(px - r * 0.15, py - r * 0.15, 0, px, py, r);
+      hg.addColorStop(0, hcss(h, rough, 1));
+      hg.addColorStop(0.55, hcss(h, rough, 0.7));
+      hg.addColorStop(1, hcss(h, rough, 0));
+      hc.fillStyle = hg;
+      shape(hc, px, py, 1);
+      hc.fill();
+    });
+  }
+
   // 배열 텍스처 데이터로 옮긴다 (노멀은 높이에서 중앙차분)
   pack(alb, nrm, li, tile, hRange) {
     const S = this.S;
@@ -335,26 +382,31 @@ class GroundLayer {
 // 0 젖은 갈아엎은 흑토: 검정이 아니라 진한 회갈색, 고랑 방향으로 길쭉한 흙덩이·물기 고인 틈
 function gPlowed(L) {
   const { rng, S, k } = L;
-  const clod = rectFbm(L.seed + 1, 7, 4, 5);
-  const fine = rectFbm(L.seed + 2, 40, 40, 2);
-  const wet = rectFbm(L.seed + 3, 3, 3, 2);
-  const crev = [34, 30, 27];
+  // 흙덩이 크기(10~25cm)의 높이장. 타일(2.2m) 규모의 큰 얼룩은 넣지 않는다 — 반복되어 낮은 시선에서 빗살 무늬가 됨.
+  // 큰 규모 밝기·물기 변화는 셰이더의 월드 좌표 노이즈가 맡는다.
+  const clod = rectFbm(L.seed + 1, 16, 11, 4);
+  const fine = rectFbm(L.seed + 2, 48, 48, 2);
+  const crev = [38, 34, 30];
   const mid = [62, 55, 48];
-  const top = [88, 79, 68];
+  const top = [86, 77, 66];
   L.base((u, v, o) => {
-    const h = sat(0.5 + (clod(u, v, 0.55) - 0.5) * 1.8 + (fine(u, v) - 0.5) * 0.45);
-    let c = mix3(crev, mid, smooth(0.2, 0.55, h));
-    c = mix3(c, top, smooth(0.6, 0.9, h));
-    const w = 0.86 + 0.26 * wet(u, v);
-    o[0] = c[0] * w;
-    o[1] = c[1] * w;
-    o[2] = c[2] * w;
+    const h = sat(0.52 + (clod(u, v, 0.5) - 0.5) * 1.5 + (fine(u, v) - 0.5) * 0.45);
+    let c = mix3(crev, mid, smooth(0.18, 0.5, h));
+    c = mix3(c, top, smooth(0.62, 0.92, h));
+    o[0] = c[0];
+    o[1] = c[1];
+    o[2] = c[2];
     o[3] = h;
     o[4] = 0.7 + 0.3 * smooth(0.2, 0.55, h);
   });
-  for (let i = 0; i < 460; i++) {
-    const rx = rng.range(4, 13) * k;
-    L.lump(rng.next() * S, rng.next() * S, rx, rx * rng.range(1.1, 1.8), Math.PI / 2 + rng.range(-0.35, 0.35), L.jit(mix3(mid, top, rng.range(0.25, 0.95))), crev, rng.range(0.65, 0.95), rng.range(0.9, 1));
+  // 쟁기가 넘긴 흙덩이: 고랑 방향(v)으로 조금 길쭉. 큰 덩이 사이에 부스러기
+  for (let i = 0; i < 420; i++) {
+    const rx = rng.range(5, 12) * k;
+    L.clod(rng.next() * S, rng.next() * S, rx, rx * rng.range(1.1, 1.6), rng.range(-0.4, 0.4), L.jit(mix3(mid, top, rng.range(0.2, 0.85))), crev, rng.range(0.65, 0.95), rng.range(0.9, 1));
+  }
+  for (let i = 0; i < 520; i++) {
+    const rx = rng.range(1.5, 4) * k;
+    L.clod(rng.next() * S, rng.next() * S, rx, rx * rng.range(0.8, 1.3), rng.next() * 3, L.jit(mix3(mid, top, rng.range(0.1, 0.7))), crev, rng.range(0.55, 0.8), 1);
   }
   for (let i = 0; i < 55; i++) {
     const x = rng.next() * S;
@@ -372,9 +424,9 @@ function gPlowed(L) {
 // 1 그루터기 밭: 마른 흙 위에 줄지어 선 짧은 그루터기 + 쓰러진 지푸라기
 function gStubble(L) {
   const { rng, S, k } = L;
-  const soil = rectFbm(L.seed + 1, 6, 6, 4);
+  const soil = rectFbm(L.seed + 1, 10, 10, 4);
   const fine = rectFbm(L.seed + 2, 32, 32, 2);
-  const moss = rectFbm(L.seed + 3, 3, 3, 3);
+  const moss = rectFbm(L.seed + 3, 7, 7, 3);
   L.base((u, v, o) => {
     const h = sat(0.35 + (soil(u, v) - 0.5) * 0.6 + (fine(u, v) - 0.5) * 0.35);
     let c = mix3([60, 54, 46], [84, 76, 64], smooth(0.2, 0.6, h));
@@ -429,10 +481,10 @@ function gGrass(L) {
     o[3] = 0.25 + n * 0.25;
   });
   const pal = [
-    [[136, 124, 95], 0.35],
-    [[154, 143, 113], 0.13],
-    [[96, 100, 82], 0.27],
-    [[92, 80, 61], 0.25],
+    [[124, 114, 90], 0.35],
+    [[140, 131, 107], 0.13],
+    [[92, 96, 80], 0.27],
+    [[86, 76, 60], 0.25],
   ];
   const pick = () => {
     let r = rng.next();
@@ -467,12 +519,12 @@ function gGrass(L) {
 // 3 진흙: 매끈하게 젖은 진흙, 오목한 곳은 물기로 광택(거칠기 낮음), 문질린 자국
 function gMud(L) {
   const { rng, S, k } = L;
-  const big = rectFbm(L.seed + 1, 4, 4, 5);
-  const mid = rectFbm(L.seed + 2, 14, 14, 3);
-  const warp = rectFbm(L.seed + 3, 3, 3, 2);
+  const big = rectFbm(L.seed + 1, 9, 9, 4);
+  const mid = rectFbm(L.seed + 2, 18, 18, 3);
+  const warp = rectFbm(L.seed + 3, 5, 5, 2);
   L.base((u, v, o) => {
     const w = (warp(u, v) - 0.5) * 0.08;
-    const h = sat(0.5 + (big(u + w, v - w) - 0.5) * 1.3 + (mid(u, v) - 0.5) * 0.35);
+    const h = sat(0.5 + (big(u + w, v - w) - 0.5) * 1.15 + (mid(u, v) - 0.5) * 0.4);
     let c = mix3([40, 35, 30], [58, 50, 43], smooth(0.2, 0.45, h));
     c = mix3(c, [76, 66, 56], smooth(0.6, 0.85, h));
     o[0] = c[0];
@@ -504,12 +556,12 @@ function gMud(L) {
 // 4 밝은 하층토: 파낸 황갈색 흙 (구덩이 분출물·참호 흉벽). 덩어리·마른 금·섞인 흑토 부스러기
 function gSubsoil(L) {
   const { rng, S, k } = L;
-  const n1 = rectFbm(L.seed + 1, 6, 6, 5);
+  const n1 = rectFbm(L.seed + 1, 10, 10, 4);
   const f1 = rectFbm(L.seed + 2, 36, 36, 2);
   L.base((u, v, o) => {
     const f = f1(u, v);
     const h = sat(0.45 + (n1(u, v) - 0.5) * 1.1 + (f - 0.5) * 0.4);
-    const c = mix3([124, 104, 76], [158, 134, 99], smooth(0.25, 0.7, h));
+    const c = mix3([120, 104, 82], [150, 131, 103], smooth(0.25, 0.7, h));
     const m = 0.95 + 0.1 * f;
     o[0] = c[0] * m;
     o[1] = c[1] * m;
@@ -518,7 +570,7 @@ function gSubsoil(L) {
   });
   for (let i = 0; i < 260; i++) {
     const r = rng.range(5, 19) * k;
-    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([160, 136, 100], 0.08), [104, 87, 63], rng.range(0.7, 0.95));
+    L.clod(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([152, 133, 104], 0.08), [106, 92, 72], rng.range(0.7, 0.95));
   }
   for (let i = 0; i < 45; i++) {
     let x = rng.next() * S;
@@ -535,9 +587,10 @@ function gSubsoil(L) {
     }
     L.path(pts, rng.range(0.8, 1.5) * k, [94, 78, 57], 0.18, 1, 0.9);
   }
-  for (let i = 0; i < 220; i++) {
-    const r = rng.range(1.5, 5) * k;
-    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([62, 54, 46]), [40, 35, 30], 0.75);
+  // 섞여 든 흑토 부스러기: 작고 성기게 (큰 검은 반점 무늬가 되지 않게)
+  for (let i = 0; i < 90; i++) {
+    const r = rng.range(1.2, 3) * k;
+    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([88, 76, 62]), [70, 60, 50], 0.75);
   }
   for (let i = 0; i < 70; i++) {
     const r = rng.range(1, 2.5) * k;

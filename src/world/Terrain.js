@@ -1198,10 +1198,11 @@ export class Terrain {
         if (c.fresh) {
           const a = Math.atan2(dz, dx);
           const ray = this.craterRay(c, a);
-          // 분출물: 줄기 방향으로 멀리, 바깥으로 갈수록 성기게
-          const out = (1 - smoothstep(1.0, ejR, t + n * 0.25)) * (0.35 + 0.65 * ray);
-          this.paint(m, k, GM.subsoil, Math.min(0.95, out * 1.15 * (0.8 + 0.2 * n)));
-          if (t < 1.25) this.paint(m, k, GM.subsoil, (1 - smoothstep(0.75, 1.25, t)) * 0.85);
+          // 분출물: 줄기 방향으로 멀리, 바깥으로 갈수록 성기게 흩뿌려진 흙덩이 (한 덩어리 모래 더미처럼 보이지 않게)
+          const clump = smoothstep(-0.35, 0.45, nz.noise(x / 0.9 + c.seed * 3.1, z / 0.9 - c.seed));
+          const out = (1 - smoothstep(1.0, ejR, t + n * 0.3)) * (0.12 + 0.88 * ray) * (0.35 + 0.65 * clump);
+          this.paint(m, k, GM.subsoil, Math.min(0.9, out * 1.2));
+          if (t < 1.25) this.paint(m, k, GM.subsoil, (1 - smoothstep(0.8, 1.25, t)) * (0.5 + 0.35 * clump));
           if (t < 0.95) this.paint(m, k, GM.mud, (1 - smoothstep(0.35, 0.9, t)) * 0.75);
           // 바깥 젖은 흙 튄 자국
           this.paint(m, k, GM.mud, smoothstep(0.55, 0.9, n) * (1 - smoothstep(1.1, 1.8, t)) * 0.4);

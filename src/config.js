@@ -70,9 +70,25 @@ export const CONFIG = {
       canalDamp: 0.3, // 수로 바로 옆 기복 배율 (canalDampDist 거리에서 1)
       canalDampDist: [6, 32],
       padDampDist: [4, 26], // 건물·차량 바닥 둘레에서 기복을 줄이는 거리
+      trenchDamp: 0, // 참호선 바로 옆 기복 배율 (흉벽 높이·참호 사격 위치 사선을 1단계와 같게)
+      trenchDampDist: [8, 30],
     },
-    // 고랑: 렌더 전용 미세 형상 (시차 매핑 + 노멀). heightAt 은 고랑의 평균면 (렌더와 차이 ±depth/2)
-    furrow: { depth: 0.18, sunflowerDepth: 0.13, pomDistance: 34 },
+    // 고랑: 깊이는 셰이더 노멀·어둡기용 (해석적, 화면에서 가늘어지면 평균). 실제 형상은 ridge (렌더 전용 얕은 골판 메시):
+    // 고랑 바닥 = 평균면 - geomDepth/2 (밭 지면 메시를 이만큼 내림), 마루 = 평균면 + geomDepth/2 → heightAt(평균면)과 ±5cm 이내
+    furrow: {
+      depth: 0.18,
+      sunflowerDepth: 0.13,
+      ridge: {
+        geomDepth: 0.1, // 실제 형상 높이차 (m)
+        lift: 0.012, // 골판을 내린 지면보다 이만큼 띄워 겹침 깜빡임 방지 (마루 높이는 그만큼 줄임)
+        alongStep: 3, // 고랑을 따라가는 정점 간격 (m)
+        chunk: 32, // 골판 묶음 크기 (m) — 묶음 중심이 카메라에서 fadeDistance[1] + 반대각선 안일 때만 그린다
+        fadeDistance: [18, 30], // 이 거리 사이에서 형상이 납작해진다 (m)
+        fadePhase: [0.2, 0.42], // 화면 1px 당 고랑 위상 변화가 이 범위면 납작하게 (= 고랑 간격 5px → 2.4px, 모아레 방지)
+        troughShade: 0.74, // 고랑 바닥 정점색 배수 (형상이 있는 곳만)
+        crestShade: 1.2,
+      },
+    },
     // 포탄 구덩이 (지름 2~8m, 테두리는 항상 솟아 있다)
     craters: {
       count: 72, // 지정 구덩이 외 무작위 수 (MAP.craterZones 가중치로 몰림)
@@ -118,7 +134,11 @@ export const CONFIG = {
     detailFade: [3, 14], // 이 거리 사이에서 디테일이 사라짐
     detailStrength: 0.6,
     antiTileScale: 1.37, // 반복 깨기: 두 번째 샘플 크기 배수
-    macroSizes: [61, 9.5, 23], // 큰 색 변화·섞기·밝기 노이즈 크기 (m)
+    antiTileDistance: 50, // 반복 깨기 두 번째 샘플을 쓰는 거리 (그 너머는 밉맵이 평균을 내 반복이 안 보임)
+    // 이방성 필터: 알베도(주 재질)는 항상 GPU 최대값. 노멀·혼합 마스크·섞이는 두 번째 재질은 이 값까지 (픽셀당 비용 절약)
+    normalAnisotropy: 4,
+    maskAnisotropy: 4,
+    macroSizes: [61, 9.5, 530], // 큰 색 변화 / 반복 깨기 섞기 / 맵 밖 밭·풀밭 얼룩 노이즈 크기 (m)
     macroStrength: [0.26, 0.1],
     heightBlend: 0.35, // 재질 경계에서 높이(돌·풀 포기)가 높은 쪽이 이기는 정도
     variation: { size: [45, 11], amp: [0.07, 0.035] }, // 정점색 밝기 변화
@@ -452,7 +472,7 @@ export const CONFIG = {
     frontPostWidth: 0.002, // 가늠쇠 기둥 폭 (눈에서 0.63m → 약 3.2mrad, 200m 에서 0.63m 를 가림)
     frontEarGap: 0.011, // 가늠쇠 보호 귀 안쪽 간격
     frontEarRise: 0.005, // 보호 귀 끝이 가늠쇠 끝보다 높은 정도
-    rearLeafWidth: 0.02, // 가늠자 판 폭
+    rearLeafWidth: 0.017, // 가늠자 판 폭 (눈에서 25cm → 약 68mrad)
     rearNotchWidth: 0.0034, // 가늠자 U홈 폭·깊이 (눈에서 25cm → 약 13.6mrad)
     rearNotchDepth: 0.003,
     rearSightBlur: 0.0007, // 가늠자 판 가장자리 흐림 폭 (눈의 초점이 가늠쇠에 있어 가까운 가늠자는 흐리다)
@@ -460,7 +480,14 @@ export const CONFIG = {
     // 조준 시 눈 바로 앞(가까운 기관부 덮개·개머리판)은 두 눈을 뜨고 볼 때처럼 흐릿하게 비친다:
     // 눈에서 adsNearFade[0]m 이내는 adsGhostAlpha 만 남고 [1]m 부터 완전히 보인다
     adsNearFade: [0.1, 0.225],
-    adsGhostAlpha: 0.5,
+    adsGhostAlpha: 0.6,
+    // 조준 시 가늠자 판 아래 ~ 화면 아래 20% 선 사이의 총몸(가늠자 받침·기관부 덮개·총열 덮개·손)은 더 옅게 비친다
+    // → 또렷한 총몸은 화면 아래 약 20% 안에만 남고, 가늠자 U홈·가늠쇠 둘레는 가리지 않는다.
+    // adsBandTop: 조준선 아래 각의 tan [흐려지기 시작, 완전히 흐림] (가늠자 판 아래 끝 ≈ 0.042)
+    // adsBandBottom: 화면 반높이 대비 비율 [흐림 끝, 다시 또렷] (0.6 = 화면 아래 20% 선)
+    adsBandTop: [0.046, 0.07],
+    adsBandBottom: [0.56, 0.76],
+    adsBandAlpha: 0.28,
     // 색: 채도 낮은 짙은 자두빛 갈색 적층목 + 무광 흑회색 금속, 장갑·위장복 소매
     colors: {
       metal: 0x343537,

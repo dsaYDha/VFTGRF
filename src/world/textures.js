@@ -621,7 +621,8 @@ export function groundTextures(size = 512, tiles = [2.2, 2.0, 2.6, 3.0, 2.4, 2.0
       t.needsUpdate = true;
       return t;
     };
-    return { albedo: mk(alb, true), normal: mk(nrm, false), layers: n };
+    // albedoLow: 같은 데이터의 낮은 이방성 사본 (혼합되는 두 번째 층용, 픽셀당 비용 절약)
+    return { albedo: mk(alb, true), albedoLow: mk(alb, true), normal: mk(nrm, false), layers: n };
   });
 }
 

@@ -386,6 +386,9 @@ export class ViewModel {
     const C = this.V.colors;
     // 조준 시 눈 바로 앞 부분을 흐릿하게 (x: 시작 거리, y: 완전히 보이는 거리, z: 남는 불투명도, w: 조준 정도)
     this.nearFade = { value: new THREE.Vector4(this.V.adsNearFade[0], this.V.adsNearFade[1], this.V.adsGhostAlpha, 0) };
+    // 조준 시 가늠자 판 아래 ~ 화면 아래 20% 선 사이(조준선 아래 각의 tan): x→y 에서 흐려지고 z→w 에서 다시 또렷해진다
+    this.adsBand = { value: new THREE.Vector4(this.V.adsBandTop[0], this.V.adsBandTop[1], 0.3, 0.4) };
+    this.adsBandAlpha = { value: this.V.adsBandAlpha };
     const std = (o) => this.withNearFade(new THREE.MeshStandardMaterial({ vertexColors: true, ...o }));
     this.mats = {
       // 무광 흑회색 금속 (부품 색은 정점 색)
@@ -401,16 +404,25 @@ export class ViewModel {
     this.tapeMat = this.withNearFade(new THREE.MeshStandardMaterial({ color: CONFIG.factions.friendly.tapeColor, roughness: 0.8 }));
   }
 
-  // 셰이더에 가까운 거리 흐림을 끼워 넣는다 (조준하지 않을 때는 불투명 그대로)
+  // 셰이더에 조준 시 흐림을 끼워 넣는다 (조준하지 않을 때는 불투명 그대로).
+  //  1) 눈 바로 앞(가까운 기관부 덮개)은 두 눈을 뜨고 볼 때처럼 반투명
+  //  2) 가늠자 판 아래 ~ 화면 아래 20% 선 사이의 총몸은 더 옅게 (가늠자·가늠쇠와 표적 주변을 가리지 않게)
   withNearFade(mat) {
     mat.transparent = true;
     const uni = this.nearFade;
+    const band = this.adsBand;
+    const bandA = this.adsBandAlpha;
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uNearFade = uni;
-      sh.fragmentShader = 'uniform vec4 uNearFade;\n' + sh.fragmentShader.replace(
+      sh.uniforms.uAdsBand = band;
+      sh.uniforms.uAdsBandAlpha = bandA;
+      sh.fragmentShader = 'uniform vec4 uNearFade;\nuniform vec4 uAdsBand;\nuniform float uAdsBandAlpha;\n' + sh.fragmentShader.replace(
         '#include <alphamap_fragment>',
         `#include <alphamap_fragment>
         float vmNear = mix(uNearFade.z, 1.0, smoothstep(uNearFade.x, uNearFade.y, length(vViewPosition)));
+        float vmTan = vViewPosition.y / max(vViewPosition.z, 1e-4);
+        float vmBand = smoothstep(uAdsBand.x, uAdsBand.y, vmTan) * (1.0 - smoothstep(uAdsBand.z, uAdsBand.w, vmTan));
+        vmNear = min(vmNear, mix(1.0, uAdsBandAlpha, vmBand));
         diffuseColor.a *= mix(1.0, vmNear, uNearFade.w);`,
       );
     };
@@ -961,6 +973,10 @@ export class ViewModel {
       this.camera.fov = cam.fov;
       this.camera.updateProjectionMatrix();
     }
+    // 흐린 띠의 아래 경계는 화면 비율로 (화면 아래 20% 선 = 반높이의 0.6)
+    const tanHalf = Math.tan((this.camera.fov * Math.PI) / 360);
+    this.adsBand.value.z = tanHalf * V.adsBandBottom[0];
+    this.adsBand.value.w = tanHalf * V.adsBandBottom[1];
   }
 
   updateZero(w) {

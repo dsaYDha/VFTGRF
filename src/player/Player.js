@@ -150,7 +150,7 @@ export class Player {
 
     // 조준 (우클릭)
     const reloading = this.weapon.reloading;
-    if (input.clicked.right) this.forceAds = false; // 점검 시점(F4)의 고정 조준은 우클릭으로 해제
+    if (input.clicked?.right) this.forceAds = false; // 점검 시점(F4)의 고정 조준은 우클릭으로 해제
     const adsTarget = canAct && (input.buttons.right || this.forceAds) && !this.sprinting && !reloading ? 1 : 0;
     this.ads = damp(this.ads, adsTarget, 1 / CONFIG.render.adsTransitionTime * 2.3, dt);
 
@@ -529,16 +529,17 @@ export class Player {
     cam.updateMatrixWorld();
   }
 
-  // 눈 위치와 그 둘레(좌우·앞뒤 probe 거리)의 지면(지형 + 밟을 수 있는 충돌체 윗면) 중 가장 높은 곳 + 여유
+  // 눈 바로 아래 지면(지형 + 발밑의 밟을 수 있는 충돌체 윗면)과 둘레(좌우·앞뒤 probe 거리)의 지형 중 가장 높은 곳 + 여유.
+  // 둘레는 지형만 본다 (옆의 모래주머니·담장 윗면으로 카메라가 떠오르지 않게, 수로·구덩이 비탈만 막는다)
   keepEyeAboveGround() {
     const V = CONFIG.viewModel;
     const col = this.game.world.collision;
+    const ter = this.game.world.terrain;
     const e = this.eye;
     const r = V.deathCamProbe;
-    const top = e.y + 0.5;
-    let g = col.groundHeight(e.x, e.z, top);
-    g = Math.max(g, col.groundHeight(e.x + r, e.z, top), col.groundHeight(e.x - r, e.z, top));
-    g = Math.max(g, col.groundHeight(e.x, e.z + r, top), col.groundHeight(e.x, e.z - r, top));
+    let g = col.groundHeight(e.x, e.z, this.pos.y + 0.3);
+    g = Math.max(g, ter.heightAt(e.x + r, e.z), ter.heightAt(e.x - r, e.z));
+    g = Math.max(g, ter.heightAt(e.x, e.z + r), ter.heightAt(e.x, e.z - r));
     const minY = g + V.deathCamClearance;
     if (e.y < minY) e.y = minY;
   }

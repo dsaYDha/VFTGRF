@@ -3,7 +3,8 @@
 // 충돌·높이 질의는 이 격자를 쓰고, 렌더 메시는 5m 청크마다 필요한 해상도로 따로 만들어
 // 100m 묶음마다 근거리/원거리 2단계 LOD 로 묶는다(해상도가 다른 청크 사이는 스커트로 틈 가림).
 // 지면 재질은 맵 배치 데이터에서 만든 혼합 마스크(0.5m)와 재질별 절차적 텍스처를 셰이더에서 섞는다.
-// 밭 고랑(0.4~0.6m 간격)은 렌더 전용 미세 형상(시차 매핑)이며 heightAt 은 고랑의 평균면이다.
+// 밭 고랑(0.4~0.6m 간격)은 셰이더 노멀·어둡기 + 플레이어 가까이의 얕은 실제 형상(골판 메시, 렌더 전용)이다.
+// heightAt 은 고랑의 평균면이고, 렌더 형상(내린 밭 지면·고랑 마루)은 평균면에서 ±geomDepth/2(5cm) 이내다.
 // =============================================================================
 import * as THREE from 'three';
 import { CONFIG, SURFACES } from '../config.js';
@@ -96,6 +97,12 @@ export class Terrain {
       return { x: f.x, z: f.z, r, reach: r + pd };
     });
     this.aoBoxes = this.buildAOBoxes();
+    // 기복을 줄일 참호선 (경계 상자로 먼저 거른다)
+    const td = CONFIG.terrain.undulation.trenchDampDist[1];
+    this.trenchDampLines = MAP.trench.lines.map((line) => {
+      const b = bbox(line);
+      return { line, x0: b.x0 - td, x1: b.x1 + td, z0: b.z0 - td, z1: b.z1 + td };
+    });
   }
 
   // ------------------------------------------------------------------ 밭 구획 (고랑 방향·간격·색)
@@ -182,7 +189,13 @@ export class Terrain {
       const d = Math.max(0, Math.hypot(dx, dz) - p.r);
       damp *= 0.15 + 0.85 * smoothstep(pd[0], pd[1], d);
     }
-    return u * damp + U.fine.amp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9);
+    const td = U.trenchDampDist;
+    let tdamp = 1;
+    for (const t of this.trenchDampLines) {
+      if (x < t.x0 || x > t.x1 || z < t.z0 || z > t.z1) continue;
+      tdamp *= U.trenchDamp + (1 - U.trenchDamp) * smoothstep(td[0], td[1], polylineDistance(t.line, x, z));
+    }
+    return u * damp * tdamp + U.fine.amp * tdamp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9);
   }
 
   heightAt(x, z) {
@@ -264,6 +277,49 @@ export class Terrain {
   furrowAt(x, z) {
     const p = this.parcelAt(x, z);
     return p ? this.parcels[p] : null;
+  }
+
+  // 혼합 마스크 쌍선형 표본 (렌더 형상용): 흑토 비율, 길 중심·궤도 띠 거리, 밭 구획(가장 가까운 텍셀)
+  maskSample(x, z, out) {
+    const m = this.buildGroundMask();
+    const N = m.N;
+    const fx = clamp((x + this.half) / m.mr - 0.5, 0, N - 1.001);
+    const fz = clamp((z + this.half) / m.mr - 0.5, 0, N - 1.001);
+    const i = fx | 0;
+    const j = fz | 0;
+    const tx = fx - i;
+    const tz = fz - j;
+    const k00 = (j * N + i) * 4;
+    const k01 = k00 + N * 4;
+    const A = m.A;
+    const B = m.B;
+    const w00 = (1 - tx) * (1 - tz);
+    const w10 = tx * (1 - tz);
+    const w01 = (1 - tx) * tz;
+    const w11 = tx * tz;
+    out.plowed = (A[k00] * w00 + A[k00 + 4] * w10 + A[k01] * w01 + A[k01 + 4] * w11) / 255;
+    out.road = ((B[k00 + 1] * w00 + B[k00 + 5] * w10 + B[k01 + 1] * w01 + B[k01 + 5] * w11) / 255) * ROAD_RANGE;
+    out.track = ((B[k00 + 2] * w00 + B[k00 + 6] * w10 + B[k01 + 2] * w01 + B[k01 + 6] * w11) / 255) * TRACK_RANGE;
+    out.parcel = m.parcel[Math.round(fz) * N + Math.round(fx)];
+    return out;
+  }
+
+  // 고랑 형상 세기 0..1 (셰이더의 fDepth 와 같은 식): 갈아엎은 흑토 비율, 바퀴·궤도 자국 밖, 구획 깊이 비율
+  furrowWeight(x, z) {
+    const s = this.maskSample(x, z, this._ms || (this._ms = {}));
+    const P = s.parcel ? this.parcels[s.parcel] : null;
+    if (!P || !P.depth) return 0;
+    const T = CONFIG.terrain;
+    const R = T.road;
+    const rut = 1 - smoothstep(R.rutFlat * 0.7, R.rutFlat + R.rutWall * 0.55, Math.abs(s.road - R.rutOffset));
+    const band = 1 - smoothstep(T.tracks.bandHalf * 0.55, T.tracks.bandHalf, s.track);
+    return smoothstep(0.3, 0.75, s.plowed) * (1 - rut) * (1 - band) * (P.depth / T.furrow.depth);
+  }
+
+  // 렌더 지면을 평균면보다 내리는 양 (밭: 고랑 바닥 높이). 충돌·heightAt 은 평균면 그대로
+  renderDrop(x, z) {
+    if (!this.mask) return 0;
+    return CONFIG.terrain.furrow.ridge.geomDepth * 0.5 * this.furrowWeight(x, z);
   }
 
   // 지형과 선분 충돌. 맞으면 out 에 t, point, normal 기록
@@ -1275,9 +1331,11 @@ export class Terrain {
     return { res, nc, cs };
   }
 
+  // material.userData.farMaterial (원거리 LOD·원경, 가벼운 변형)·ridgeMaterial (고랑 형상) 이 있으면 쓴다
   buildMesh(material) {
     this.buildGroundMask();
     const M = CONFIG.terrain.mesh;
+    const farMat = material.userData.farMaterial || material;
     const half = this.half;
     const { res, nc, cs } = this.chunkResolutions();
     const gc = Math.max(1, Math.round(M.group / cs));
@@ -1306,7 +1364,7 @@ export class Terrain {
         lod.updateMatrix();
         lod.matrixAutoUpdate = false;
         lod.addLevel(this.makeMesh(near, material, lod.position), 0, 0);
-        lod.addLevel(this.makeMesh(far, material, lod.position), M.lodDistance, M.lodHysteresis);
+        lod.addLevel(this.makeMesh(far, farMat, lod.position), M.lodDistance, M.lodHysteresis);
         this.lods.push(lod);
         root.add(lod);
       }
@@ -1314,10 +1372,13 @@ export class Terrain {
     // 원경 지형
     const farRing = { pos: [], nor: [], colr: [], idx: [] };
     const ringTris = this.buildFar(farRing);
-    const farMesh = this.makeMesh(farRing, material);
+    const farMesh = this.makeMesh(farRing, farMat);
     farMesh.receiveShadow = false;
     farMesh.name = 'terrainFar';
     root.add(farMesh);
+    // 밭 고랑 형상 (근거리 골판)
+    this.ridgeTriangleCount = 0;
+    if (material.userData.ridgeMaterial) root.add(this.buildRidges(material.userData.ridgeMaterial));
     this.triangleCount = tris + ringTris;
     this.farLodTriangleCount = farTris;
     return root;
@@ -1326,6 +1387,201 @@ export class Terrain {
   // 그래픽 품질 프리셋용: 근거리 → 원거리 LOD 전환 거리 (m)
   setLodDistance(d) {
     for (const lod of this.lods) if (lod.levels[1]) lod.levels[1].distance = d;
+  }
+
+  // ------------------------------------------------------------------ 밭 고랑 실제 형상 (근거리 골판 메시, 렌더 전용)
+  // 고랑 하나 = 바닥 → 마루 → 바닥의 두 비탈(평평한 음영). 정점 위치는 내린 밭 지면(바닥) + lift 이고,
+  // 마루 높이(aRidge.x)는 정점 셰이더가 카메라 거리·화면 고랑 간격에 맞춰 줄인다 (먼 곳·낮은 시선은 셰이더 노멀만).
+  // 플레이어가 갈 수 있는 구역 근처의 밭만, chunk 크기 묶음마다 LOD(가까울 때만 그림)로 만든다.
+  buildRidges(material) {
+    const RG = CONFIG.terrain.furrow.ridge;
+    const PA = CONFIG.world.playArea;
+    const C = RG.chunk;
+    const reach = RG.fadeDistance[1] + 2;
+    const half = this.half;
+    const root = new THREE.Group();
+    root.name = 'furrowRidges';
+    const chunks = new Map();
+    for (let p = 1; p < this.parcels.length; p++) {
+      const P = this.parcels[p];
+      if (!P.depth) continue;
+      const x0 = Math.max(P.x0, PA.minX - reach, -half + 1);
+      const x1 = Math.min(P.x1, PA.maxX + reach, half - 1);
+      const z0 = Math.max(P.z0, PA.minZ - reach, -half + 1);
+      const z1 = Math.min(P.z1, PA.maxZ + reach, half - 1);
+      if (x0 >= x1 || z0 >= z1) continue;
+      for (let ci = Math.floor((x0 + half) / C); ci * C - half < x1; ci++) {
+        for (let cj = Math.floor((z0 + half) / C); cj * C - half < z1; cj++) {
+          const key = ci * 1000 + cj;
+          if (!chunks.has(key)) chunks.set(key, { ci, cj, pos: [], nor: [], colr: [], rid: [], rg: [], idx: [] });
+          const g = chunks.get(key);
+          const bx0 = Math.max(x0, ci * C - half);
+          const bx1 = Math.min(x1, (ci + 1) * C - half);
+          const bz0 = Math.max(z0, cj * C - half);
+          const bz1 = Math.min(z1, (cj + 1) * C - half);
+          if (bx0 < bx1 && bz0 < bz1) this.buildRidgePatch(g, P, bx0, bz0, bx1, bz1);
+        }
+      }
+    }
+    const visDist = RG.fadeDistance[1] + C * 0.71;
+    let tris = 0;
+    for (const g of chunks.values()) {
+      if (!g.idx.length) continue;
+      tris += g.idx.length / 3;
+      const cx = -half + (g.ci + 0.5) * C;
+      const cz = -half + (g.cj + 0.5) * C;
+      const lod = new THREE.LOD();
+      lod.name = 'furrowChunk';
+      lod.position.set(cx, this.heightAt(cx, cz), cz);
+      lod.updateMatrix();
+      lod.matrixAutoUpdate = false;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(g.pos, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(g.nor, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(g.colr, 3));
+      geo.setAttribute('aRidge', new THREE.Float32BufferAttribute(g.rid, 4));
+      geo.setAttribute('aRidgeG', new THREE.Float32BufferAttribute(g.rg, 2));
+      const vcount = g.pos.length / 3;
+      geo.setIndex(vcount > 65535 ? new THREE.Uint32BufferAttribute(g.idx, 1) : new THREE.Uint16BufferAttribute(g.idx, 1));
+      geo.computeBoundingSphere();
+      // 마루가 솟을 자리까지 경계 구를 넓힌다 (절두체 컬링)
+      geo.boundingSphere.radius += RG.geomDepth;
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.receiveShadow = true;
+      // 지형보다 먼저 그려 그 아래 지형 픽셀은 깊이 검사에서 바로 버려지게
+      mesh.renderOrder = -1;
+      mesh.position.set(-lod.position.x, -lod.position.y, -lod.position.z);
+      mesh.updateMatrix();
+      mesh.matrixAutoUpdate = false;
+      if (material.userData.onTerrainRender) mesh.onBeforeRender = material.userData.onTerrainRender;
+      lod.addLevel(mesh, 0, 0);
+      lod.addLevel(new THREE.Object3D(), visDist, 0.05);
+      root.add(lod);
+    }
+    this.ridgeTriangleCount = tris;
+    return root;
+  }
+
+  // 칸 안 지형이 평평한지 (구덩이 테두리·바퀴 자국·배수로 위에는 골판을 얹지 않는다)
+  ridgeSmooth(x, z, ax, az, bx, bz) {
+    const h = (s, t) => this.heightAt(x + ax * s + bx * t, z + az * s + bz * t);
+    const c00 = h(-1, -1);
+    const c10 = h(1, -1);
+    const c01 = h(-1, 1);
+    const c11 = h(1, 1);
+    const tol = CONFIG.terrain.furrow.ridge.lift * 1.25;
+    if (Math.abs(h(0, 0) - (c00 + c10 + c01 + c11) * 0.25) > tol) return false;
+    if (Math.abs(h(0, -1) - (c00 + c10) * 0.5) > tol) return false;
+    if (Math.abs(h(0, 1) - (c01 + c11) * 0.5) > tol) return false;
+    if (Math.abs(h(-1, 0) - (c00 + c01) * 0.5) > tol) return false;
+    return Math.abs(h(1, 0) - (c10 + c11) * 0.5) <= tol;
+  }
+
+  // 구획 P 의 고랑 골판 중 칸 중심이 상자 [x0,x1)×[z0,z1) 안인 것을 g 에 더한다.
+  // u = 고랑 가로 좌표 (바닥 = 간격의 정수배, 셰이더 해석적 고랑과 같은 위상), v = 고랑 방향 좌표
+  buildRidgePatch(g, P, x0, z0, x1, z1) {
+    const RG = CONFIG.terrain.furrow.ridge;
+    const sp = P.spacing;
+    const L = RG.alongStep;
+    const px = P.dirZ;
+    const pz = -P.dirX;
+    const dx = P.dirX;
+    const dz = P.dirZ;
+    let u0 = Infinity;
+    let u1 = -Infinity;
+    let v0 = Infinity;
+    let v1 = -Infinity;
+    for (const [x, z] of [[x0, z0], [x1, z0], [x0, z1], [x1, z1]]) {
+      const u = x * px + z * pz;
+      const v = x * dx + z * dz;
+      u0 = Math.min(u0, u);
+      u1 = Math.max(u1, u);
+      v0 = Math.min(v0, v);
+      v1 = Math.max(v1, v);
+    }
+    // 이웃 칸까지 (끝 마루를 낮추는 판정용)
+    const k0 = Math.floor(u0 / sp) - 1;
+    const k1 = Math.ceil(u1 / sp) + 1;
+    const j0 = Math.floor(v0 / L) - 1;
+    const j1 = Math.ceil(v1 / L) + 1;
+    const nK = k1 - k0;
+    const nJ = j1 - j0;
+    const at = (u, v) => [u * px + v * dx, u * pz + v * dz];
+    // 칸 유효성 (상자와 무관하게 위치만으로 정해 묶음 경계에서 이어진다)
+    const valid = new Uint8Array(nK * nJ);
+    const inBox = new Uint8Array(nK * nJ);
+    let any = false;
+    for (let k = k0; k < k1; k++) {
+      for (let j = j0; j < j1; j++) {
+        const [x, z] = at((k + 0.5) * sp, (j + 0.5) * L);
+        const c = (k - k0) * nJ + (j - j0);
+        if (this.furrowWeight(x, z) < 0.08) continue;
+        if (!this.ridgeSmooth(x, z, px * sp * 0.5, pz * sp * 0.5, dx * L * 0.5, dz * L * 0.5)) continue;
+        valid[c] = 1;
+        if (x >= x0 && x < x1 && z >= z0 && z < z1) {
+          inBox[c] = 1;
+          any = true;
+        }
+      }
+    }
+    if (!any) return;
+    const isValid = (k, j) => k >= k0 && k < k1 && j >= j0 && j < j1 && valid[(k - k0) * nJ + (j - j0)] === 1;
+    const half = RG.geomDepth * 0.5;
+    const gx = px / sp;
+    const gz = pz / sp;
+    // 정점 하나: 위치 = 내린 지면(평균면 - half * 고랑 세기) + lift, 법선 = 지형 법선.
+    // 비탈 기울기(마루 높이 / 반 간격, sgn = 오르막 +1 / 내리막 -1)는 aRidge.zw 로 셰이더에서 더한다 (비탈마다 평평한 음영)
+    const vert = (u, v, rise, slopeRise, shade, w, sgn) => {
+      const [x, z] = at(u, v);
+      const hm = this.heightAt(x, z);
+      g.pos.push(x, hm - half * w + RG.lift, z);
+      const n = this.normalAt(x, z);
+      g.nor.push(n.x, n.y, n.z);
+      this.vertexColor(x, z, hm, false, g.colr);
+      const slope = (slopeRise / (sp * 0.5)) * sgn;
+      g.rid.push(rise, shade, px * slope, pz * slope);
+      g.rg.push(gx, gz);
+      return g.pos.length / 3 - 1;
+    };
+    // 한 행(v): 오르막 비탈(바닥, 마루), 내리막 비탈(마루, 바닥) 정점 4개
+    const row = (k, j) => {
+      const v = j * L;
+      const uT = k * sp;
+      const uC = uT + sp * 0.5;
+      const [cx, cz] = at(uC, v);
+      const wc = this.furrowWeight(cx, cz);
+      // 이 마루에 닿는 칸(앞·뒤)이 모두 유효할 때만 솟는다 → 골판 끝은 바닥 높이로 닫힘
+      const taper = isValid(k, j - 1) && isValid(k, j) ? 1 : 0;
+      const rise = Math.max(0, RG.geomDepth * wc - RG.lift) * taper;
+      const [tx0, tz0] = at(uT, v);
+      const [tx1, tz1] = at(uT + sp, v);
+      const wt0 = this.furrowWeight(tx0, tz0);
+      const wt1 = this.furrowWeight(tx1, tz1);
+      const crestShade = 1 + (RG.crestShade - 1) * wc * taper;
+      return [
+        vert(uT, v, 0, rise, 1 + (RG.troughShade - 1) * wt0, wt0, 1),
+        vert(uC, v, rise, rise, crestShade, wc, 1),
+        vert(uC, v, rise, rise, crestShade, wc, -1),
+        vert(uT + sp, v, 0, rise, 1 + (RG.troughShade - 1) * wt1, wt1, -1),
+      ];
+    };
+    const idx = g.idx;
+    for (let k = k0 + 1; k < k1 - 1; k++) {
+      let prev = null;
+      for (let j = j0 + 1; j < j1 - 1; j++) {
+        const c = (k - k0) * nJ + (j - j0);
+        if (!valid[c] || !inBox[c]) {
+          prev = null;
+          continue;
+        }
+        const a = prev || row(k, j);
+        const b = row(k, j + 1);
+        // 위에서 볼 때 반시계 (u, v 좌표계는 x, z 와 같은 방향)
+        idx.push(a[0], b[0], a[1], a[1], b[0], b[1]);
+        idx.push(a[2], b[2], a[3], a[3], b[2], b[3]);
+        prev = b;
+      }
+    }
   }
 
   makeMesh(g, material, offset = null) {
@@ -1363,7 +1619,8 @@ export class Terrain {
       for (let i = 0; i < nvx; i++) {
         const x = x0 + i * rx;
         const h = this.gridHeight(x, z);
-        g.pos.push(x, h, z);
+        // 밭은 고랑 바닥 높이로 내려 그린다 (고랑 형상 메시가 그 위에 얹힌다)
+        g.pos.push(x, h - this.renderDrop(x, z), z);
         // 법선 (청크 해상도 간격의 중앙차분)
         const sx = (this.gridHeight(x + rx, z) - this.gridHeight(x - rx, z)) / (2 * rx);
         const sz = (this.gridHeight(x, z + rz) - this.gridHeight(x, z - rz)) / (2 * rz);
@@ -1458,6 +1715,8 @@ export class Terrain {
 }
 
 // 지형 재질: 표준(PBR) 재질 + 혼합 셰이더. 조명·그림자·안개·톤매핑은 Three.js 표준 경로 그대로.
+// 근거리(기본) / 원거리 LOD·원경(userData.farMaterial, 가벼운 변형) / 고랑 형상(userData.ridgeMaterial) 세 변형이
+// 같은 유니폼·텍스처를 함께 쓴다.
 export function createTerrainMaterial(terrain) {
   const G = CONFIG.ground;
   const tex = groundTextures(G.textureSize, [...G.layerTile, G.detailTile]);
@@ -1472,43 +1731,69 @@ export function createTerrainMaterial(terrain) {
     tSplatA: { value: mask.a },
     tSplatB: { value: mask.b },
     tGAlb: { value: tex.albedo },
+    tGAlbLo: { value: tex.albedoLow },
     tGNrm: { value: tex.normal },
     tMacro: { value: macro },
     uParcel: { value: parcels },
     // 물·젖은 흙에 비치는 흐린 하늘 (지평선 색). 대기 쪽에서 바꾸면 여기 값을 갱신하면 된다
     uSkyRefl: { value: new THREE.Color(CONFIG.atmosphere.skyHorizon) },
-    uPomDist: { value: CONFIG.terrain.furrow.pomDistance },
+    // 화면 높이의 절반 (px) — 고랑 형상이 화면 간격에 맞춰 납작해지는 계산용, 매 프레임 갱신
+    uHalfH: { value: 360 },
   };
-  const parts = terrainShaderParts({ maskN: mask.N, half: terrain.half });
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
-  mat.name = 'terrain';
-  mat.userData.terrainUniforms = uniforms;
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${parts.vertPars}`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${parts.vertBegin}`)
-      .replace('#include <project_vertex>', `#include <project_vertex>\n${parts.vertProject}`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${parts.fragPars}`)
-      .replace('#include <color_fragment>', `#include <color_fragment>\n${parts.fragMain}`)
-      .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = tRough;')
-      .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz);')
-      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += tEmis;');
-  };
-  mat.customProgramCacheKey = () => 'terrainSplat';
-  // 첫 렌더 직전에 텍스처 이방성 필터를 GPU 최대값으로 (밉맵 + 이방성: 먼 바닥이 길게 번지지 않게)
+  // 첫 렌더 직전에 이방성 필터 설정: 알베도는 GPU 최대값 (밉맵 + 이방성: 먼 바닥이 길게 번지지 않게),
+  // 노멀·혼합 마스크는 낮게(비용 절약, 낮은 각도에선 어차피 평평해짐), 큰 규모 노이즈는 1
   let anisoDone = false;
-  mat.userData.onTerrainRender = (renderer) => {
+  const size = new THREE.Vector2();
+  const onTerrainRender = (renderer) => {
+    uniforms.uHalfH.value = renderer.getDrawingBufferSize(size).y * 0.5;
     if (anisoDone) return;
     anisoDone = true;
     const a = renderer.capabilities.getMaxAnisotropy();
-    for (const t of [tex.albedo, tex.normal, mask.a, mask.b, macro]) {
-      if (t.anisotropy !== a) {
-        t.anisotropy = a;
+    const want = [
+      [tex.albedo, a],
+      [tex.albedoLow, Math.min(a, G.normalAnisotropy)],
+      [tex.normal, Math.min(a, G.normalAnisotropy)],
+      [mask.a, Math.min(a, G.maskAnisotropy)],
+      [mask.b, Math.min(a, G.maskAnisotropy)],
+      [macro, 1],
+    ];
+    for (const [t, v] of want) {
+      if (t.anisotropy !== v) {
+        t.anisotropy = v;
         t.needsUpdate = true;
       }
     }
   };
+  const make = (variant) => {
+    const parts = terrainShaderParts({ maskN: mask.N, half: terrain.half, variant });
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+    mat.name = variant === 'near' ? 'terrain' : 'terrain_' + variant;
+    mat.userData.terrainUniforms = uniforms;
+    mat.userData.onTerrainRender = onTerrainRender;
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>\n${parts.vertPars}`)
+        .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>\n${parts.vertNormal}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${parts.vertBegin}`)
+        .replace('#include <project_vertex>', `#include <project_vertex>\n${parts.vertProject}`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\n${parts.fragPars}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${parts.fragMain}`)
+        .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = tRough;')
+        .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz);')
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += tEmis;');
+    };
+    mat.customProgramCacheKey = () => 'terrainSplat_' + variant;
+    return mat;
+  };
+  const mat = make('near');
+  mat.userData.farMaterial = make('far');
+  const ridge = make('ridge');
+  // 고랑 바닥이 내린 지면과 거의 겹치므로 앞으로 당겨 그린다
+  ridge.polygonOffset = true;
+  ridge.polygonOffsetFactor = -1;
+  ridge.polygonOffsetUnits = -1;
+  mat.userData.ridgeMaterial = ridge;
   return mat;
 }

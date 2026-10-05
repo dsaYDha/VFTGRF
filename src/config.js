@@ -189,7 +189,7 @@ export const CONFIG = {
       adsMul: 0.85,
       transitionMul: 2.0,
     },
-    rest: { probeDist: [0.35, 0.75], bandBelowBore: [0.02, 0.24], sideProbe: 0.3 },
+    rest: { probeDist: [0.35, 0.75], bandBelowBore: [0.02, 0.3], sideProbe: 0.3 },
     wounded: { speedMul: 0.6, noSprint: true },
     knockdownTime: [2.6, 4.0],
   },
@@ -234,7 +234,7 @@ export const CONFIG = {
     rifleman: {
       weapon: 'ak545',
       spareMags: 14,
-      aimDispersionMrad: 2.9, // 조준 사격 기본 분산 (표준편차)
+      aimDispersionMrad: 3.4, // 조준 사격 기본 분산 (표준편차)
       blindFireDispersionMrad: 45,
       reactionTime: [0.35, 0.8],
       colors: { uniform: 0x5c5a45, uniform2: 0x48463a, vest: 0x4a4a3a, helmet: 0x3f4234, skin: 0x8a6e5a, boots: 0x1c1a17, gear: 0x2d2b25 },
@@ -270,13 +270,15 @@ export const CONFIG = {
     turnRate: 3.5,
     // 탐지 (적 → 플레이어)
     perceptionInterval: 0.2,
-    detectBaseRate: 0.4, // 100m, 완전 노출·정지 상태일 때 초당 발견률
+    detectBaseRate: 0.22, // 100m, 완전 노출·정지 상태일 때 초당 발견률
     detectRangeExp: 1.5,
     detectPostureMul: { stand: 1.0, crouch: 0.6, prone: 0.35 },
     detectMotionMul: { still: 1.0, walk: 2.0, sprint: 3.5 },
     flashDetectChance: 0.75, // 관측 중 플레이어 총구 화염을 볼 확률
     soundErrorPerMeter: 0.1, // 총성만 들었을 때 위치 추정 오차 (거리 비례)
     flashErrorBase: 1.5,
+    flashErrorMin: 2.2, // 화염·총성만으로는 이보다 정확해지지 않는다
+    soundErrorMin: 6,
     flashErrorPerMeter: 0.01,
     visualErrorBase: 0.25,
     visualErrorPerMeter: 0.002,
@@ -288,7 +290,8 @@ export const CONFIG = {
     shareDelay: [2.0, 4.0],
     shareErrorMul: 2.5,
     aimPointSpreadMul: 0.55, // 점사마다 추정 위치 주변 어디를 노릴지
-    trackingError: 0.3,
+    trackingError: 0.35,
+    firingDetectMul: 2.0, // 플레이어가 방금 쐈으면 눈에 띄기 쉬움
     burstClimbMul: 0.55, // 점사 n발째 분산 증가
     coveringFireDispersionMul: 1.35,
     lightFactor: { outdoor: 1.0, trench: 0.72, building: 0.45, crater: 0.85 },
@@ -299,6 +302,7 @@ export const CONFIG = {
     duration: 300, // 5분
     maxAdvances: 3,
     advanceInterval: [20, 40],
+    quietBetweenAttempts: [10, 18], // 이전 시도가 끝난 뒤 최소 대기
     firstAdvanceDelay: [16, 24],
     coveringFireLead: [3, 5], // 출발 3~5초 전부터 엄호사격
     departQuietTime: 3, // 최근 3초간 근처에 탄이 없어야 출발

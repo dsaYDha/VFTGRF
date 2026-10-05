@@ -83,7 +83,7 @@ export class Perception {
     const fd = CONFIG.atmosphere.fogDensity * d;
     rate *= Math.exp(-fd * fd);
     rate *= frac * rateMul;
-    if (now - pl.lastShotTime < 1.0) rate *= 3;
+    if (now - pl.lastShotTime < 1.0) rate *= A.firingDetectMul;
     const p = 1 - Math.exp(-rate * A.perceptionInterval);
     if (Math.random() < p) {
       this.lastSeen = now;
@@ -109,7 +109,10 @@ export class Perception {
         this.estimate.x += (ox - this.estimate.x) * k;
         this.estimate.z += (oz - this.estimate.z) * k;
         this.estimate.y += (oy - this.estimate.y) * k;
-        this.sigma = 1 / Math.sqrt(w1 + w2);
+        // 화염·총성을 아무리 모아도 직접 본 것만큼 정확해지지는 않는다
+        const A = CONFIG.ai;
+        const floor = source === 'sound' || source === 'shared' ? A.soundErrorMin : A.flashErrorMin;
+        this.sigma = Math.max(floor, 1 / Math.sqrt(w1 + w2));
         this.time = now;
         if (SOURCE_RANK[source] > SOURCE_RANK[this.source]) this.source = source;
         return true;

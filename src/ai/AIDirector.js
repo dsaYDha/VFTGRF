@@ -194,7 +194,8 @@ export class AIDirector {
     plan.ai.preparing = false;
     const M = CONFIG.mission;
     const now = this.game.time;
-    this.nextAttempt = Math.max(plan.start + randRange(M.advanceInterval), now + 6);
+    // 다음 시도까지 최소한의 조용한 시간을 둬서 '사격이 갑자기 늘어나는' 단서가 살아 있게
+    this.nextAttempt = Math.max(plan.start + randRange(M.advanceInterval), now + randRange(M.quietBetweenAttempts));
     for (const ai of this.ais) ai.coveringUntil = now + 1.5;
     if (silent) return;
     if (outcome === 'deterred') this.game.events.emit(EV.ADVANCE_DETERRED, { unit: plan.ai.s, to: plan.to.id, attempt: plan.id });

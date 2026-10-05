@@ -158,8 +158,10 @@ export class Effects {
   }
 
   spray(imp, count, speed, spread, o) {
+    // 멀리 있는 탄착은 기둥이 더 높이 솟아 보이게 속도도 조금 키운다
+    const vk = o.velScale || 1;
     for (let i = 0; i < count; i++) {
-      _v.copy(_n).multiplyScalar(speed[0] + Math.random() * (speed[1] - speed[0]));
+      _v.copy(_n).multiplyScalar((speed[0] + Math.random() * (speed[1] - speed[0])) * vk);
       _v.x += (Math.random() - 0.5) * spread;
       _v.y += (Math.random() - 0.5) * spread + (o.up || 0);
       _v.z += (Math.random() - 0.5) * spread;
@@ -208,25 +210,28 @@ export class Effects {
   dirt(imp, s, wet) {
     // 흙먼지 기둥 (멀리서도 보이도록 밝은 흙빛 + 어두운 흙 줄기) + 흙덩이
     const brown = wet ? 0x5a4c3e : 0x7c6b57;
-    this.spray(imp, wet ? 4 : 6, [2.5, 6.5], 2.2, {
+    const vk = 0.65 + 0.35 * s;
+    this.spray(imp, wet ? 4 : 6, [1.5, 4.5], 2.0, {
       sys: this.dust,
       life: [1.6, 3.0],
-      size: [0.3 * s, 1.45 * s],
+      size: [0.25 * s, 1.3 * s],
       color: brown,
       alpha: wet ? 0.8 : 0.95,
-      drag: 2.6,
-      gravity: 0.8,
-      up: 1.5,
+      drag: 2.8,
+      gravity: 0.6,
+      up: 0.8,
+      velScale: vk,
     });
-    this.spray(imp, 3, [7, 13], 1.2, {
+    this.spray(imp, 3, [5, 9], 1.2, {
       sys: this.dust,
-      life: [0.9, 1.5],
-      size: [0.14 * s, 0.6 * s],
+      life: [0.8, 1.3],
+      size: [0.12 * s, 0.55 * s],
       color: wet ? 0x2e2620 : 0x43382d,
       alpha: 1,
-      drag: 3.2,
-      gravity: 4,
-      up: 3,
+      drag: 3.0,
+      gravity: 6,
+      up: 1.5,
+      velScale: vk,
     });
     this.chips(imp, wet ? 9 : 6, s, wet ? 0x2a221c : 0x3a3027, 0.05, [2, 6]);
   }

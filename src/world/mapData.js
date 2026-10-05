@@ -41,7 +41,7 @@ export const MAP = {
     ],
     linedFloorHalf: 0.95,
     linedTopHalf: 1.12,
-    berm: { width: 3.2, height: 0.3, heightVar: 0.16 },
+    berm: { width: 3.2, height: 0.15, heightVar: 0.06 },
     southBank: { width: 2.6, height: 0.2 },
     // 북쪽 둔덕 중 크게 쌓인 흙무더기
     mounds: [

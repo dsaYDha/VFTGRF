@@ -118,9 +118,9 @@ export function soilDetail() {
         let n = f(u, v, 0.55);
         const clod = g(u, v, 0.5);
         // 흙덩이: 높은 주파수의 밝은/어두운 점
-        let s = 0.5 + (n - 0.5) * 0.9 + (clod - 0.5) * 0.55;
+        let s = 0.5 + (n - 0.5) * 1.25 + (clod - 0.5) * 0.75;
         // 고랑 줄무늬 (밭갈이) — 가로 방향
-        s += Math.sin(v * Math.PI * 2 * 6 + (f(u * 0.5, v, 0.5) - 0.5) * 3) * 0.06;
+        s += Math.sin(v * Math.PI * 2 * 6 + (f(u * 0.5, v, 0.5) - 0.5) * 3) * 0.1;
         const val = clamp255(s * 255);
         col[0] = val;
         col[1] = clamp255(val * 0.98);

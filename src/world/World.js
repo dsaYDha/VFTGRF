@@ -60,6 +60,58 @@ export class World {
     this.vegetation = new Vegetation({ terrain: this.terrain, col: this.collision, rng: this.rng });
     scene.add(this.vegetation.build());
     scene.add(this.buildPuddles());
+    scene.add(this.buildDistantVillages());
+  }
+
+  // 원경의 먼 마을 실루엣 (안개에 묻히지 않게 직접 흐린 색으로 칠함, 접근 불가)
+  buildDistantVillages() {
+    const rng = new Random(77);
+    const parts = [];
+    const A = CONFIG.atmosphere;
+    for (const c of MAP.distantSmoke) {
+      const a = (c.bearing * Math.PI) / 180;
+      const d = c.dist * 0.92;
+      const cx = Math.sin(a) * d;
+      const cz = -Math.cos(a) * d;
+      const n = 10 + Math.floor(rng.next() * 10);
+      for (let i = 0; i < n; i++) {
+        const w = rng.range(8, 18);
+        const h = rng.range(4, 8);
+        const g = new THREE.BoxGeometry(w, h, w * rng.range(0.6, 1.2));
+        // 지붕 (박공)
+        const roof = new THREE.ConeGeometry(w * 0.72, h * 0.5, 4);
+        roof.rotateY(Math.PI / 4);
+        roof.translate(0, h / 2 + h * 0.25, 0);
+        const off = (rng.next() - 0.5) * 260;
+        const along = (rng.next() - 0.5) * 60;
+        const px = cx + Math.cos(a) * off + Math.sin(a) * along;
+        const pz = cz + Math.sin(a) * off - Math.cos(a) * along;
+        for (const geo of [g, roof]) {
+          geo.translate(px, h / 2 - 1, pz);
+          parts.push(geo.index ? geo.toNonIndexed() : geo);
+        }
+      }
+      // 교회 탑이나 급수탑 하나
+      const tower = new THREE.CylinderGeometry(2.5, 3, rng.range(18, 26), 8);
+      tower.translate(cx + Math.cos(a) * 40, 10, cz + Math.sin(a) * 40);
+      parts.push(tower.toNonIndexed());
+    }
+    let count = 0;
+    for (const p of parts) count += p.attributes.position.count;
+    const pos = new Float32Array(count * 3);
+    let o = 0;
+    for (const p of parts) {
+      pos.set(p.attributes.position.array, o * 3);
+      o += p.attributes.position.count;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.computeBoundingSphere();
+    const col = new THREE.Color(A.fogColor).multiplyScalar(0.86);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col, fog: false }));
+    mesh.name = 'distantVillages';
+    mesh.renderOrder = -5;
+    return mesh;
   }
 
   buildPuddles() {

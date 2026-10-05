@@ -42,21 +42,27 @@ body {
   height: 46px;
   opacity: 0.85;
 }
+/* 흐린 밝은 하늘 위에서도 읽히게: 반투명 어두운 바탕 + 진한 그림자 */
 #hud-top-right {
   position: absolute;
-  top: 14px;
-  right: 18px;
+  top: 12px;
+  right: 14px;
   text-align: right;
+  padding: 3px 10px 5px 14px;
+  background: linear-gradient(to right, rgba(14, 15, 15, 0), rgba(14, 15, 15, 0.42) 28%, rgba(14, 15, 15, 0.5));
+  border-radius: 3px;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 1px 2px rgba(0, 0, 0, 0.95);
 }
 #hud-timer {
   font-size: 22px;
   font-variant-numeric: tabular-nums;
-  color: #e8e4d8;
+  color: #f0ece0;
 }
 #hud-advances {
-  margin-top: 2px;
+  margin-top: 1px;
   font-size: 13px;
-  color: #c9c3b0;
+  font-weight: 600;
+  color: #ebe5d2;
 }
 #hud-bottom-left {
   position: absolute;

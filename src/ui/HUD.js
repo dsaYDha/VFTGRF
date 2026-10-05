@@ -41,7 +41,7 @@ export class HUD {
     const ev = game.events;
     ev.on(EV.MESSAGE, (m) => this.message(m.text, m.kind));
     ev.on(EV.AMMO_CHECK, (e) => {
-      if (e.owner !== game.player.body) return;
+      if (e.owner !== game.player.body || this.playerDown()) return;
       // 탄창을 빼 보는 데 잠깐 걸린다
       this.ammoPending = { at: game.time + CONFIG.hud.ammoCheckDelay, e };
     });
@@ -49,6 +49,7 @@ export class HUD {
       if (e.owner === game.player.body) this.message(e.empty ? '재장전 (노리쇠 후퇴)' : '재장전', 'info', 1.6);
     });
     ev.on(EV.BOUNDARY, (e) => {
+      if (this.playerDown()) return;
       if (e.state === 'warn' || e.state === 'near') this.boundary.textContent = e.state === 'warn' ? '작전 구역을 벗어났다 — 돌아가라' : '작전 구역 경계';
       else this.boundary.textContent = '';
       if (e.state === 'return') this.message('작전 구역으로 되돌아왔다', 'warn');
@@ -58,6 +59,24 @@ export class HUD {
       if (e.result === 'plate') this.message('방탄판 피격 — 충격으로 쓰러졌다', 'warn');
       else if (e.result === 'wounded') this.message(`부상: ${ZONE_TEXT[e.zone] || '팔다리'}`, 'warn');
     });
+    // 전투 불능: 떠 있던 상황 메시지·경계 경고·잔탄 표시를 바로 지운다
+    ev.on(EV.UNIT_INCAPACITATED, (e) => {
+      if (e.unit === game.player.body) this.clearSituational();
+    });
+  }
+
+  // 플레이어 전투 불능 (이후 상황 메시지를 띄우지 않는다)
+  playerDown() {
+    return this.game.player.body.damage.incapacitated;
+  }
+
+  clearSituational() {
+    this.ammoPending = null;
+    this.ammoTimer = 0;
+    this.ammo.classList.remove('show');
+    this.boundary.textContent = '';
+    this.messages.textContent = '';
+    this.rested.classList.remove('show');
   }
 
   show(v) {
@@ -82,6 +101,7 @@ export class HUD {
   }
 
   message(text, kind = 'info', time = CONFIG.hud.messageTime) {
+    if (this.playerDown()) return;
     const d = document.createElement('div');
     d.className = 'msg ' + kind;
     d.textContent = text;
@@ -115,7 +135,7 @@ export class HUD {
     // 무기
     this.set(this.fireMode, 'mode', w.fireMode === 'semi' ? '단발' : '연발');
     this.set(this.sight, 'sight', `가늠자 ${w.sightRange}m`);
-    this.rested.classList.toggle('show', pl.rested && pl.restKind !== 'prone');
+    this.rested.classList.toggle('show', pl.rested && pl.restKind !== 'prone' && !dmg.incapacitated);
     // 잔탄 확인 (T)
     if (this.ammoPending && g.time >= this.ammoPending.at) {
       const e = this.ammoPending.e;

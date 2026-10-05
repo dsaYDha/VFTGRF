@@ -47,8 +47,6 @@ export const CONFIG = {
     halfSize: 300, // 맵 600x600m (원점 중심, 북쪽 = -Z, 동쪽 = +X)
     heightRes: 0.5, // 높이 격자 해상도
     surfaceRes: 1.0,
-    chunkSize: 25,
-    groupSize: 100,
     farExtent: 1500, // 맵 바깥 원경 지형 범위
     farRes: 30,
     skirtDepth: 0.6,
@@ -58,7 +56,75 @@ export const CONFIG = {
     playArea: { minX: -255, maxX: 255, minZ: 30, maxZ: 265 },
     boundaryWarnMargin: 6, // 경계 이 거리 안쪽부터 경고
     boundaryReturnTime: 4, // 경계 밖에 이 시간 이상 있으면 되돌림
-    craterCount: 46, // 무작위로 흩뿌리는 포탄 구덩이 수 (지정된 것 외)
+  },
+
+  // ---------------------------------------------------------------- 지형 형태 (기복·고랑·구덩이·농로·메시)
+  terrain: {
+    // 맵 전체의 완만한 기복: 노이즈 크기(m)·진폭(m). 파장 50~150m, 높이차 0.5~1.5m
+    undulation: {
+      large: { size: 80, amp: 0.72 },
+      medium: { size: 34, amp: 0.26 },
+      fine: { size: 12, amp: 0.05 },
+      // 수로~적 진지 사이(사격 회랑)는 솟은 곳을 ridgeMul 배로 눌러 우묵한 곳(국지 사각지대)만 남긴다 → 사선 유지
+      corridor: { x0: -265, x1: 265, z0: -228, z1: 100, fade: 35, ridgeMul: 0.25 },
+      canalDamp: 0.3, // 수로 바로 옆 기복 배율 (canalDampDist 거리에서 1)
+      canalDampDist: [6, 32],
+      padDampDist: [4, 26], // 건물·차량 바닥 둘레에서 기복을 줄이는 거리
+    },
+    // 고랑: 렌더 전용 미세 형상 (시차 매핑 + 노멀). heightAt 은 고랑의 평균면 (렌더와 차이 ±depth/2)
+    furrow: { depth: 0.18, sunflowerDepth: 0.13, pomDistance: 34 },
+    // 포탄 구덩이 (지름 2~8m, 테두리는 항상 솟아 있다)
+    craters: {
+      count: 72, // 지정 구덩이 외 무작위 수 (MAP.craterZones 가중치로 몰림)
+      radius: [1.0, 3.6],
+      bigRadius: [3.6, 4.0],
+      bigChance: 0.1,
+      freshChance: 0.42, // 최근 구덩이: 날카로운 테두리 + 밝은 하층토 분출물
+      rimFresh: [0.28, 0.48], // 테두리 높이 (m)
+      rimOld: [0.2, 0.28], // 오래된 구덩이: 무뎌지고 풀이 남
+      rimMaxNearLines: 0.3, // 참호 앞·수로 앞 구덩이 테두리 상한 (사선 유지)
+      ejecta: [1.9, 3.0], // 최근 구덩이 분출물이 퍼지는 범위 (반지름 배수)
+      waterMinDepth: 0.85, // 이보다 깊은 오래된 구덩이 바닥엔 물 (최근 구덩이는 1.25)
+    },
+    // 농로: 두 줄 바퀴 자국(물 고임) + 길가 배수로
+    road: {
+      rutOffset: 0.85, // 길 중심 → 바퀴 자국 중심
+      rutFlat: 0.17, // 바퀴 자국 바닥 반폭
+      rutWall: 0.26, // 바닥 가장자리 → 자국 끝 경사 폭
+      rutDepth: 0.17,
+      crown: 0.04, // 길 가운데 솟음
+      sink: 0.05, // 길 전체가 주변보다 꺼진 정도
+      ditchOffset: 1.15, // 길 가장자리 → 배수로 중심
+      ditchHalf: 0.8,
+      ditchDepth: 0.36,
+      puddleEvery: 7, // 바퀴 자국 물웅덩이 후보 간격 (m)
+      puddleChance: 0.55,
+    },
+    tracks: { bandHalf: 0.28, depth: 0.06 }, // 궤도 차량 자국 (MAP.vehicleTracks)
+    vehiclePadMargin: 2.5, // 차량 아래 지면을 평평하게 고르는 둘레
+    // 렌더 메시: 5m 청크마다 해상도(0.5~5m)를 고르고, 100m 묶음마다 근거리/원거리 2단계 LOD
+    mesh: { chunk: 5, group: 100, baseRes: 2.5, farBaseRes: 5, lodDistance: 150, lodHysteresis: 0.08 },
+  },
+
+  // ---------------------------------------------------------------- 지면 재질 (스플랫 혼합)
+  ground: {
+    maskRes: 0.5, // 혼합 마스크 해상도 (m/텍셀)
+    textureSize: 512, // 재질 텍스처 한 장 크기 (px)
+    // 재질 순서: 0 젖은 갈아엎은 흑토, 1 그루터기 밭, 2 마른 풀밭, 3 진흙, 4 밝은 하층토, 5 자갈 섞인 흙길
+    layerTile: [2.2, 2.0, 2.6, 3.0, 2.4, 2.0], // 텍스처 한 장이 덮는 크기 (m)
+    roughness: [0.8, 1.0, 1.0, 0.5, 0.96, 0.9], // 젖은 흙·진흙은 약한 광택, 마른 풀·흙은 무광
+    wetSheen: [0.08, 0, 0, 0.3, 0, 0.03], // 낮은 각도에서 흐린 하늘이 비치는 정도
+    detailTile: 0.55, // 근거리 디테일 한 장 크기 (m)
+    detailFade: [3, 14], // 이 거리 사이에서 디테일이 사라짐
+    detailStrength: 0.6,
+    antiTileScale: 1.37, // 반복 깨기: 두 번째 샘플 크기 배수
+    macroSizes: [61, 9.5, 23], // 큰 색 변화·섞기·밝기 노이즈 크기 (m)
+    macroStrength: [0.26, 0.1],
+    heightBlend: 0.35, // 재질 경계에서 높이(돌·풀 포기)가 높은 쪽이 이기는 정도
+    variation: { size: [45, 11], amp: [0.07, 0.035] }, // 정점색 밝기 변화
+    ao: { power: 1.2, min: 0.32, fineDists: [0.6, 1.3, 2.6, 5.0], coarseDists: [3, 7] }, // 굽는 앰비언트 오클루전
+    waterInFurrows: 0.3, // 젖은 저지대 밭: 고랑 바닥에서 이 높이(이랑 비율)까지 물
+    puddle: { deepColor: 0x262422, reflect: 0.9, opacity: 0.93, edgeSoft: 0.12 },
   },
 
   // ---------------------------------------------------------------- 탄도
@@ -123,6 +189,8 @@ export const CONFIG = {
   materials: {
     earth: { impact: 'dirt', penetrable: false, cover: true, ricochet: { maxAngleDeg: 6, chance: 0.25 } },
     mud: { impact: 'mud', penetrable: false, cover: true, ricochet: { maxAngleDeg: 4, chance: 0.15 } },
+    // 파낸 하층토 (참호 흉벽·구덩이 분출물): 흙과 같은 판정, 탄착 먼지만 밝은 황갈색
+    subsoil: { impact: 'subsoil', penetrable: false, cover: true, ricochet: { maxAngleDeg: 6, chance: 0.25 } },
     water: { impact: 'water', penetrable: false, cover: false, ricochet: { maxAngleDeg: 7, chance: 0.6 } },
     rubble: { impact: 'concrete', penetrable: false, cover: true, ricochet: { maxAngleDeg: 10, chance: 0.4 } },
     concrete: { impact: 'concrete', penetrable: false, cover: true, ricochet: { maxAngleDeg: 15, chance: 0.55 } },
@@ -158,6 +226,7 @@ export const CONFIG = {
     crater: { id: 7, speedMul: 0.82, staminaMul: 1.5, step: 'mud', material: 'earth' },
     water: { id: 8, speedMul: 0.62, staminaMul: 2.0, step: 'water', material: 'water' },
     concrete: { id: 9, speedMul: 1.0, staminaMul: 1.0, step: 'hard', material: 'concrete' },
+    subsoil: { id: 10, speedMul: 0.88, staminaMul: 1.3, step: 'mud', material: 'subsoil' }, // 흉벽·구덩이 분출물
   },
 
   // ---------------------------------------------------------------- 플레이어
@@ -372,6 +441,58 @@ export const CONFIG = {
     shakeNearMiss: 0.010,
     shakeImpact: 0.006,
     shakeDecay: 7,
+  },
+
+  // ---------------------------------------------------------------- 1인칭 뷰모델 (AK-74, 실제 치수 m)
+  // 좌표: 눈(카메라) = 원점, 조준선 = -Z 축(y=0), 총열은 ammo.sightHeight 아래.
+  // 조준 시 뷰모델은 장면 카메라와 같은 시야각으로 그려 가늠쇠 기둥이 실제 각크기(약 3mrad)로 보인다.
+  viewModel: {
+    eyeToRearSight: 0.25, // 눈 → 가늠자 U홈
+    sightRadius: 0.38, // 가늠자 → 가늠쇠
+    frontPostWidth: 0.002, // 가늠쇠 기둥 폭 (눈에서 0.63m → 약 3.2mrad, 200m 에서 0.63m 를 가림)
+    frontEarGap: 0.011, // 가늠쇠 보호 귀 안쪽 간격
+    frontEarRise: 0.005, // 보호 귀 끝이 가늠쇠 끝보다 높은 정도
+    rearLeafWidth: 0.02, // 가늠자 판 폭
+    rearNotchWidth: 0.0034, // 가늠자 U홈 폭·깊이 (눈에서 25cm → 약 13.6mrad)
+    rearNotchDepth: 0.003,
+    rearSightBlur: 0.0007, // 가늠자 판 가장자리 흐림 폭 (눈의 초점이 가늠쇠에 있어 가까운 가늠자는 흐리다)
+    dustCoverDrop: 0.012, // 기관부 덮개 뒤 끝이 앞보다 낮은 정도 (조준 시 총몸이 화면 아래로 빠지게)
+    // 조준 시 눈 바로 앞(가까운 기관부 덮개·개머리판)은 두 눈을 뜨고 볼 때처럼 흐릿하게 비친다:
+    // 눈에서 adsNearFade[0]m 이내는 adsGhostAlpha 만 남고 [1]m 부터 완전히 보인다
+    adsNearFade: [0.1, 0.225],
+    adsGhostAlpha: 0.5,
+    // 색: 채도 낮은 짙은 자두빛 갈색 적층목 + 무광 흑회색 금속, 장갑·위장복 소매
+    colors: {
+      metal: 0x343537,
+      metalDark: 0x202122,
+      furniture: 0x3d3333,
+      magazine: 0x302b2c,
+      glove: 0x34332d,
+      gloveDark: 0x26251f,
+      cuff: 0x45463a,
+    },
+    // 자세별 총 위치 p[x,y,z] / 회전 r[pitch,yaw,roll] (카메라 기준).
+    // ads 는 항상 0 이어야 한다 (가늠쇠 끝 = 화면 중앙 = 설정 거리 탄착점)
+    poses: {
+      hip: { p: [0.125, -0.095, -0.07], r: [0.045, 0.07, 0.06] },
+      sprint: { p: [0.14, -0.15, -0.18], r: [0.0, 0.7, 0.45] }, // 몸 앞에 비스듬히 낮춰 든다 (화면 아래쪽에 보임)
+      reload: { p: [0.05, -0.05, -0.26], r: [0.15, 0.3, -0.4] }, // 오른쪽으로 눕혀 탄창 삽입구가 보이게
+      bolt: { p: [0.07, -0.06, -0.25], r: [0.12, 0.2, 0.45] }, // 빈 재장전: 왼쪽으로 눕혀 장전손잡이를 당긴다
+      down: { p: [0.12, -0.34, 0.0], r: [-0.8, 0.4, 0.4] },
+    },
+    blendRates: { sprint: 7, reload: 7, down: 6 },
+    // 팔: 어깨 관절(카메라 기준)과 위팔·아래팔 길이. 손 위치에 맞춰 2관절 IK 로 팔꿈치를 정한다
+    shoulders: { right: [0.17, -0.25, 0.14], left: [-0.19, -0.27, 0.06] },
+    upperArm: 0.3,
+    foreArm: 0.27,
+    bob: { x: 0.006, y: 0.008, sprintMul: 2.2 },
+    // 장면 조명(반구광·태양광)을 매 프레임 그대로 옮겨 쓴다. 배율로 미세 조정
+    lightHemiMul: 1.0,
+    lightSunMul: 1.0,
+    flashLight: 3.5,
+    // 쓰러질 때 카메라가 지형을 뚫지 않게: 주변 지면보다 최소 이만큼 위
+    deathCamClearance: 0.22,
+    deathCamProbe: 0.3,
   },
 
   debug: {

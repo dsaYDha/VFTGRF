@@ -191,7 +191,8 @@ export class Player {
     this.shakeAmp *= Math.exp(-CONFIG.hud.shakeDecay * dt);
     this.shakeT += dt;
 
-    this.updateBoundary(dt);
+    // 전투 불능 뒤에는 경계 경고·되돌림을 하지 않는다 (상황 메시지 없음)
+    if (!incap) this.updateBoundary(dt);
     this.updateBody(dt);
     this.updateCamera(dt);
   }
@@ -510,6 +511,8 @@ export class Player {
       this.pos.y + this.eyeHeight + bobY - (Math.abs(this.lean) * 0.06) + Math.sin(st * 1.7) * sh * 0.3,
       this.pos.z + rz * (lo + bobX),
     );
+    // 쓰러지는 카메라(전투 불능·쓰러짐)가 지형·수로 비탈을 뚫지 않게: 눈 주변 지면보다 일정 높이 위
+    if (dmg.incapacitated || dmg.isKnockedDown(now)) this.keepEyeAboveGround();
     cam.position.copy(this.eye);
     const adsSway = this.ads;
     cam.rotation.order = 'YXZ';
@@ -524,6 +527,20 @@ export class Player {
       cam.updateProjectionMatrix();
     }
     cam.updateMatrixWorld();
+  }
+
+  // 눈 위치와 그 둘레(좌우·앞뒤 probe 거리)의 지면(지형 + 밟을 수 있는 충돌체 윗면) 중 가장 높은 곳 + 여유
+  keepEyeAboveGround() {
+    const V = CONFIG.viewModel;
+    const col = this.game.world.collision;
+    const e = this.eye;
+    const r = V.deathCamProbe;
+    const top = e.y + 0.5;
+    let g = col.groundHeight(e.x, e.z, top);
+    g = Math.max(g, col.groundHeight(e.x + r, e.z, top), col.groundHeight(e.x - r, e.z, top));
+    g = Math.max(g, col.groundHeight(e.x, e.z + r, top), col.groundHeight(e.x, e.z - r, top));
+    const minY = g + V.deathCamClearance;
+    if (e.y < minY) e.y = minY;
   }
 
   // ------------------------------------------------------------------ 다른 시스템용

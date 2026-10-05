@@ -1,6 +1,9 @@
 // =============================================================================
-// Terrain — 높이장(0.5m 격자)에 수로·참호·포탄 구덩이 등을 실제로 파낸 지형.
-// 충돌·높이 질의는 이 격자를 쓰고, 렌더 메시는 구역별 해상도로 따로 만든다.
+// Terrain — 높이장(0.5m 격자)에 완만한 기복·수로·참호·포탄 구덩이·농로를 실제로 파낸 지형.
+// 충돌·높이 질의는 이 격자를 쓰고, 렌더 메시는 5m 청크마다 필요한 해상도로 따로 만들어
+// 100m 묶음마다 근거리/원거리 2단계 LOD 로 묶는다(해상도가 다른 청크 사이는 스커트로 틈 가림).
+// 지면 재질은 맵 배치 데이터에서 만든 혼합 마스크(0.5m)와 재질별 절차적 텍스처를 셰이더에서 섞는다.
+// 밭 고랑(0.4~0.6m 간격)은 렌더 전용 미세 형상(시차 매핑)이며 heightAt 은 고랑의 평균면이다.
 // =============================================================================
 import * as THREE from 'three';
 import { CONFIG, SURFACES } from '../config.js';
@@ -8,35 +11,18 @@ import { MAP } from './mapData.js';
 import { Random } from '../core/Random.js';
 import { Noise2D } from './noise.js';
 import { clamp, smoothstep, polylineDistance } from '../core/mathUtils.js';
+import { groundTextures, groundMacroTexture } from './textures.js';
+import { terrainShaderParts, ROAD_RANGE, TRACK_RANGE, MAX_PARCELS } from './terrainShader.js';
 
 const SID = Object.fromEntries(Object.entries(SURFACES).map(([k, v]) => [k, v.id]));
 
-// 지면 기본 색 (sRGB)
-const SURFACE_COLORS = {
-  [SID.plowed]: 0x2f2721,
-  [SID.grass]: 0x6c6550,
-  [SID.road]: 0x43392f,
-  [SID.wetMud]: 0x302a24,
-  [SID.rubble]: 0x6c6760,
-  [SID.sunflower]: 0x2e2620,
-  [SID.trench]: 0x41352a,
-  [SID.crater]: 0x3d3229,
-  [SID.water]: 0x2b2a27,
-  [SID.concrete]: 0x6f6d68,
-};
-// 디테일 텍스처 선택 가중치 (soil, grass, mud)
-const SURFACE_MASK = {
-  [SID.plowed]: [1, 0, 0.15],
-  [SID.grass]: [0.25, 1, 0],
-  [SID.road]: [0.1, 0, 1],
-  [SID.wetMud]: [0.1, 0, 1],
-  [SID.rubble]: [1, 0, 0],
-  [SID.sunflower]: [1, 0.15, 0.1],
-  [SID.trench]: [1, 0, 0.35],
-  [SID.crater]: [1, 0, 0.3],
-  [SID.water]: [0, 0, 1],
-  [SID.concrete]: [0.6, 0, 0.4],
-};
+// 혼합 마스크 재질 채널 (풀 = 나머지)
+const GM = { plowed: 0, stubble: 1, mud: 2, subsoil: 3, gravel: 4, grass: -1 };
+const WHITE = [1, 1, 1];
+
+// 앰비언트 오클루전 수평선 탐색 방향 (8방향)
+const AO_DIRS = [];
+for (let q = 0; q < 8; q++) AO_DIRS.push(Math.cos((q * Math.PI) / 4), Math.sin((q * Math.PI) / 4));
 
 // 0..1 구간 비대칭 혹 (peak 위치에서 최대 1)
 function bump(t, peak = 0.5) {
@@ -44,6 +30,42 @@ function bump(t, peak = 0.5) {
   if (t < peak) return Math.sin((Math.PI / 2) * (t / peak));
   return Math.cos((Math.PI / 2) * ((t - peak) / (1 - peak)));
 }
+
+// 평평한 바닥 + 매끈한 벽 단면: d <= flat 이면 1, d >= flat + wall 이면 0
+function flatProfile(d, flat, wall) {
+  if (d <= flat) return 1;
+  if (d >= flat + wall) return 0;
+  const t = (d - flat) / wall;
+  return 1 - t * t * (3 - 2 * t);
+}
+
+// 청크 크기를 나누어떨어지게 하는 해상도 (r 이하 중 가장 큰 값)
+function snapRes(r, cs) {
+  return cs / Math.max(1, Math.ceil(cs / r - 1e-6));
+}
+
+function bbox(points) {
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let z0 = Infinity;
+  let z1 = -Infinity;
+  for (const [x, z] of points) {
+    x0 = Math.min(x0, x);
+    x1 = Math.max(x1, x);
+    z0 = Math.min(z0, z);
+    z1 = Math.max(z1, z);
+  }
+  return { x0, x1, z0, z1 };
+}
+
+// 차량 바닥 크기 (반길이·반폭, 로컬 x = 차체 길이 방향)
+const VEHICLE_HALF = {
+  apc: [3.6, 1.6],
+  tractor: [2.3, 1.3],
+  sedan: [2.3, 0.95],
+  van: [2.5, 1.05],
+  truck: [3.5, 1.3],
+};
 
 export class Terrain {
   constructor() {
@@ -60,15 +82,107 @@ export class Terrain {
     this.detailRegions = [];
     this.craters = [];
     this.puddles = [];
+    this.mask = null;
+    this.lods = [];
     this._tmp = {};
     this._n = new THREE.Vector3();
+    this.parcels = this.buildParcels();
+    this.vehiclePads = this.buildVehiclePads();
+    this.footprints = this.buildingFootprints();
+    // 기복을 줄일 바닥 (건물·차량) 경계 상자
+    const pd = CONFIG.terrain.undulation.padDampDist[1];
+    this.padBoxes = [...this.footprints, ...this.vehiclePads].map((f) => {
+      const r = Math.hypot(f.hx, f.hz);
+      return { x: f.x, z: f.z, r, reach: r + pd };
+    });
+    this.aoBoxes = this.buildAOBoxes();
+  }
+
+  // ------------------------------------------------------------------ 밭 구획 (고랑 방향·간격·색)
+  buildParcels() {
+    const F = MAP.fields;
+    const T = CONFIG.terrain.furrow;
+    const list = [null];
+    const add = (f, kind) => {
+      if (list.length >= MAX_PARCELS) return;
+      const a = ((f.furrowDeg ?? (f.rowDir === 'x' ? 90 : 0)) * Math.PI) / 180;
+      // 방위각(0 = 북) → 월드 방향 (북 = -Z)
+      list.push({
+        index: list.length,
+        kind,
+        x0: f.x0,
+        x1: f.x1,
+        z0: f.z0,
+        z1: f.z1,
+        dirX: Math.sin(a),
+        dirZ: -Math.cos(a),
+        spacing: f.spacing ?? (kind === 'stubble' ? 0.16 : 0.5),
+        depth: kind === 'plowed' ? T.depth : kind === 'sunflower' ? T.sunflowerDepth : 0,
+        tint: f.tint || WHITE,
+      });
+    };
+    for (const f of F.plowed || []) add(f, 'plowed');
+    for (const f of F.sunflower || []) add(f, 'sunflower');
+    for (const f of F.stubble || []) add(f, 'stubble');
+    return list;
+  }
+
+  buildVehiclePads() {
+    const list = [];
+    const add = (v, kind) => {
+      const [hx, hz] = VEHICLE_HALF[kind] || [2.3, 1.0];
+      list.push({ x: v.x, z: v.z, hx, hz, rot: v.rot || 0, c: Math.cos(v.rot || 0), s: Math.sin(v.rot || 0) });
+    };
+    if (MAP.apc) add(MAP.apc, 'apc');
+    if (MAP.tractor) add(MAP.tractor, 'tractor');
+    for (const c of MAP.cars || []) add(c, c.kind);
+    return list;
+  }
+
+  buildAOBoxes() {
+    const list = [];
+    for (const f of this.footprints) list.push({ x: f.x, z: f.z, hx: f.hx, hz: f.hz, c: 1, s: 0, k: 0.32, fall: 2.4 });
+    for (const v of this.vehiclePads) list.push({ x: v.x, z: v.z, hx: v.hx, hz: v.hz, c: v.c, s: v.s, k: 0.55, fall: 1.7 });
+    for (const d of MAP.dugouts || []) {
+      list.push({ x: d.x, z: d.z, hx: d.w / 2, hz: d.d / 2, c: Math.cos(d.rot), s: Math.sin(d.rot), k: 0.22, fall: 1.2 });
+    }
+    for (const b of list) b.r = Math.hypot(b.hx, b.hz) + b.fall;
+    return list;
   }
 
   // ------------------------------------------------------------------ 질의
   baseHeight(x, z) {
     const W = CONFIG.world;
     const slope = clamp((MAP.canal.z - z) * W.northRiseSlope, -1.6, 3.2);
-    return slope + 0.55 * this.noise.fbm(x / 170, z / 170, 3) + 0.13 * this.noise.fbm(x / 33 + 11, z / 33 - 5, 2);
+    return slope + this.undulation(x, z);
+  }
+
+  // 완만한 기복: 파장 50~150m, 높이차 0.5~1.5m. 수로~적 진지 사이(사격 회랑)에서는 솟은 곳을 눌러
+  // 우묵한 곳(국지 사각지대)만 남기고, 수로·건물·차량 바닥 둘레에서는 줄인다.
+  undulation(x, z) {
+    const U = CONFIG.terrain.undulation;
+    const nz = this.noise;
+    let u =
+      U.large.amp * nz.noise(x / U.large.size + 31.7, z / U.large.size - 12.3) +
+      U.medium.amp * nz.noise(x / U.medium.size - 7.1, z / U.medium.size + 44.9);
+    if (u > 0) {
+      const c = U.corridor;
+      const ox = Math.max(c.x0 - x, x - c.x1, 0);
+      const oz = Math.max(c.z0 - z, z - c.z1, 0);
+      const inC = 1 - smoothstep(0, c.fade, Math.hypot(ox, oz));
+      u *= 1 - inC * (1 - c.ridgeMul);
+    }
+    const dc = Math.abs(z - this.canalZ(x));
+    let damp = U.canalDamp + (1 - U.canalDamp) * smoothstep(U.canalDampDist[0], U.canalDampDist[1], dc);
+    const pd = U.padDampDist;
+    for (const p of this.padBoxes) {
+      const dx = Math.abs(x - p.x);
+      const dz = Math.abs(z - p.z);
+      if (dx > p.reach || dz > p.reach) continue;
+      const d = Math.max(0, Math.hypot(dx, dz) - p.r);
+      damp *= 0.15 + 0.85 * smoothstep(pd[0], pd[1], d);
+    }
+    return u * damp + U.fine.amp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9);
   }
 
   heightAt(x, z) {
@@ -111,6 +225,45 @@ export class Terrain {
   isCanalLined(x) {
     for (const [a, b] of MAP.canal.linedSections) if (x >= a && x <= b) return true;
     return false;
+  }
+
+  // 수로 바로 위(배수관 둑 제외)인지 — 길·궤도 자국을 여기서는 파지 않는다
+  nearCanal(x, z, dist = 4) {
+    const C = MAP.canal;
+    return Math.abs(z - this.canalZ(x)) < dist && Math.abs(x - C.crossing.x) > C.crossing.halfWidth + 1;
+  }
+
+  // 식생 배치·효과용: 그 지점 지면 재질 비율 (0..1)과 밭 구획·길/궤도 자국 거리
+  // { plowed, stubble, grass, mud, subsoil, gravel, parcel, road, track }
+  groundAt(x, z, out = {}) {
+    const m = this.buildGroundMask();
+    const i = clamp(Math.floor((x + this.half) / m.mr), 0, m.N - 1);
+    const j = clamp(Math.floor((z + this.half) / m.mr), 0, m.N - 1);
+    const k = (j * m.N + i) * 4;
+    out.plowed = m.A[k] / 255;
+    out.stubble = m.A[k + 1] / 255;
+    out.mud = m.A[k + 2] / 255;
+    out.subsoil = m.A[k + 3] / 255;
+    out.gravel = m.B[k] / 255;
+    out.grass = Math.max(0, 1 - out.plowed - out.stubble - out.mud - out.subsoil - out.gravel);
+    out.road = (m.B[k + 1] / 255) * ROAD_RANGE;
+    out.track = (m.B[k + 2] / 255) * TRACK_RANGE;
+    out.parcel = m.B[k + 3];
+    return out;
+  }
+
+  // 밭 구획 번호 (0 = 밭 아님)
+  parcelAt(x, z) {
+    const m = this.buildGroundMask();
+    const i = clamp(Math.floor((x + this.half) / m.mr), 0, m.N - 1);
+    const j = clamp(Math.floor((z + this.half) / m.mr), 0, m.N - 1);
+    return m.parcel[j * m.N + i];
+  }
+
+  // 고랑 방향: { dirX, dirZ (고랑 줄이 뻗은 단위 방향), spacing, depth, kind } 또는 null
+  furrowAt(x, z) {
+    const p = this.parcelAt(x, z);
+    return p ? this.parcels[p] : null;
   }
 
   // 지형과 선분 충돌. 맞으면 out 에 t, point, normal 기록
@@ -177,6 +330,8 @@ export class Terrain {
     this.applyTrenches();
     this.applyMounds();
     this.applyRoads();
+    this.applyTracks();
+    this.buildPuddleList();
     this.buildSurfaces();
   }
 
@@ -208,8 +363,9 @@ export class Terrain {
     }
   }
 
-  addDetail(x0, z0, x1, z1, resX, resZ = resX) {
-    this.detailRegions.push({ x0, z0, x1, z1, resX, resZ });
+  // 렌더 메시 해상도 지정: 근거리 resX·resZ, 원거리 LOD farX·farZ (기본: 근거리의 2.5배, 최대 2.5m)
+  addDetail(x0, z0, x1, z1, resX, resZ = resX, farX = Math.min(2.5, resX * 2.5), farZ = Math.min(2.5, resZ * 2.5)) {
+    this.detailRegions.push({ x0, z0, x1, z1, resX, resZ, farX, farZ });
   }
 
   // 건물 바닥 평탄화
@@ -232,7 +388,6 @@ export class Terrain {
   }
 
   applyPads() {
-    this.footprints = this.buildingFootprints();
     for (const f of this.footprints) {
       const target = this.baseHeight(f.x, f.z);
       const m = 3;
@@ -245,67 +400,172 @@ export class Terrain {
         this.h[k] += (target - this.h[k]) * w;
       });
     }
+    // 차량 아래: 차체가 기울어 뜨지 않게 고른다 (진흙에 약간 박힌 모습은 구조물 쪽에서)
+    const m = CONFIG.terrain.vehiclePadMargin;
+    for (const v of this.vehiclePads) {
+      const target = this.baseHeight(v.x, v.z);
+      const e = Math.hypot(v.hx, v.hz) + m;
+      this.addDetail(v.x - e, v.z - e, v.x + e, v.z + e, 1.25, 1.25, 2.5, 2.5);
+      this.stamp(v.x - e, v.z - e, v.x + e, v.z + e, (x, z, k) => {
+        const dx = x - v.x;
+        const dz = z - v.z;
+        const lx = dx * v.c - dz * v.s;
+        const lz = dx * v.s + dz * v.c;
+        const d = Math.hypot(Math.max(0, Math.abs(lx) - v.hx), Math.max(0, Math.abs(lz) - v.hz));
+        const w = 1 - smoothstep(0, m, d);
+        this.h[k] += (target - this.h[k]) * w;
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------ 포탄 구덩이
+  craterZonePoint(zone, rng) {
+    if (zone.kind === 'rect') return [rng.range(zone.x0, zone.x1), rng.range(zone.z0, zone.z1)];
+    if (zone.kind === 'ring') {
+      const a = rng.next() * Math.PI * 2;
+      const d = rng.range(zone.dist[0], zone.dist[1]);
+      return [zone.x + Math.cos(a) * d, zone.z + Math.sin(a) * d];
+    }
+    // 농로를 따라: 길 위 임의 점에서 옆으로 dist 만큼
+    const pts = MAP.roads[zone.road].points;
+    for (let tries = 0; tries < 20; tries++) {
+      const i = Math.floor(rng.next() * (pts.length - 1));
+      const [ax, az] = pts[i];
+      const [bx, bz] = pts[i + 1];
+      const t = rng.next();
+      const px = ax + (bx - ax) * t;
+      const pz = az + (bz - az) * t;
+      if (pz < zone.z0 || pz > zone.z1) continue;
+      const len = Math.hypot(bx - ax, bz - az) || 1;
+      const side = rng.chance(0.5) ? 1 : -1;
+      const d = rng.range(zone.dist[0], zone.dist[1]) * side;
+      return [px - ((bz - az) / len) * d, pz + ((bx - ax) / len) * d];
+    }
+    return [rng.range(-200, 200), rng.range(-80, 80)];
   }
 
   buildCraterList() {
+    const C = CONFIG.terrain.craters;
     const rng = this.rng;
-    for (const c of MAP.craters) this.craters.push({ ...c });
+    for (const c of MAP.craters) {
+      const cr = { ...c, fresh: !!c.fresh, seed: (c.x * 13.1 + c.z * 7.7) % 100 };
+      // AI 사격 위치가 쓰는 지정 구덩이(F1·F2)는 형상을 그대로 둔다
+      cr.legacy = !!c.tag;
+      cr.rimH = c.tag ? 0.12 * c.d + 0.06 : clamp(0.12 * c.d + (cr.fresh ? 0.2 : 0.1), 0.2, 0.42);
+      this.craters.push(cr);
+    }
     const excl = MAP.craterExclusions;
     const fps = this.footprints;
     const roads = MAP.roads;
     const solids = [MAP.apc, MAP.tractor, ...MAP.cars, ...MAP.dugouts];
-    const want = CONFIG.world.craterCount;
+    const points = [...MAP.pylons, ...MAP.trees];
+    const zones = MAP.craterZones || [{ kind: 'rect', x0: -235, x1: 235, z0: -215, z1: 90, weight: 1 }];
+    let wsum = 0;
+    for (const z of zones) wsum += z.weight;
     let tries = 0;
     let made = 0;
-    while (made < want && tries < 4000) {
+    while (made < C.count && tries < 8000) {
       tries++;
-      const south = made < 9;
-      const x = south ? rng.range(-220, 220) : rng.range(-235, 235);
-      // 북쪽(참호·건물 근처)일수록 밀도가 높다
-      const z = south ? rng.range(128, 250) : -215 + Math.pow(rng.next(), 1.35) * 305;
-      let r = rng.range(1.0, 3.7);
-      if (rng.chance(0.1)) r = rng.range(3.7, 4.1);
-      const d = clamp(r * rng.range(0.3, 0.5), 0.5, 2.0);
+      let pick = rng.next() * wsum;
+      let zone = zones[0];
+      for (const zn of zones) {
+        pick -= zn.weight;
+        if (pick <= 0) {
+          zone = zn;
+          break;
+        }
+      }
+      const [x, z] = this.craterZonePoint(zone, rng);
+      let r = rng.chance(C.bigChance) ? rng.range(C.bigRadius[0], C.bigRadius[1]) : C.radius[0] + (C.radius[1] - C.radius[0]) * Math.pow(rng.next(), 1.6);
+      const fresh = rng.chance(C.freshChance);
+      const d = clamp(r * rng.range(0.3, 0.48) * (fresh ? 1 : 0.8), 0.45, 1.9);
+      if (Math.abs(x) > this.half - r - 4 || Math.abs(z) > this.half - r - 4) continue;
       let ok = true;
       for (const e of excl) if (x > e.x0 - r && x < e.x1 + r && z > e.z0 - r && z < e.z1 + r) ok = false;
       for (const f of fps) if (Math.abs(x - f.x) < f.hx + r + 2 && Math.abs(z - f.z) < f.hz + r + 2) ok = false;
-      for (const s of solids) if (Math.hypot(x - s.x, z - s.z) < r + 6) ok = false;
-      for (const c of this.craters) if (Math.hypot(x - c.x, z - c.z) < r + c.r + 1.5) ok = false;
+      for (const s of solids) if (Math.hypot(x - s.x, z - s.z) < r + 7) ok = false;
+      for (const p of points) if (Math.hypot(x - p.x, z - p.z) < r + 3) ok = false;
+      for (const c of this.craters) if (Math.hypot(x - c.x, z - c.z) < r + c.r + 1.0) ok = false;
       if (ok) {
-        for (const rd of roads) if (polylineDistance(rd.points, x, z) < rd.width / 2 + r + 0.5) ok = false;
+        for (const rd of roads) if (polylineDistance(rd.points, x, z) < rd.width / 2 + r * 0.8 + 0.6) ok = false;
       }
+      let nearLine = !!zone.front;
       if (ok) {
-        for (const line of MAP.trench.lines) if (polylineDistance(line, x, z) < r + 4) ok = false;
+        for (const line of MAP.trench.lines) {
+          const dl = polylineDistance(line, x, z);
+          if (dl < r + 10) ok = false;
+          if (dl < r + 40) nearLine = true;
+        }
+        for (const line of MAP.trench.commLines) if (polylineDistance(line, x, z) < r + 4) ok = false;
       }
       if (!ok) continue;
-      this.craters.push({ x, z, r, d });
+      if (z > 60 && z < 140) nearLine = true;
+      let rimH = fresh ? rng.range(C.rimFresh[0], C.rimFresh[1]) * Math.pow(Math.min(1, r / 2), 0.35) : rng.range(C.rimOld[0], C.rimOld[1]);
+      rimH = Math.max(0.2, rimH);
+      if (nearLine) rimH = Math.min(rimH, C.rimMaxNearLines);
+      this.craters.push({ x, z, r, d, fresh, rimH, seed: rng.next() * 100 });
       made++;
     }
+  }
+
+  // 분출물 방사 줄기 (0..1). 각도에 대해 주기적
+  craterRay(c, a) {
+    const s = c.seed;
+    const v = 0.5 + 0.28 * Math.sin(a * 7 + s) + 0.16 * Math.sin(a * 13 + s * 1.7) + 0.1 * Math.sin(a * 23 + s * 2.3);
+    return smoothstep(0.42, 0.85, v);
   }
 
   applyCrater(c) {
     const R = c.r;
     const D = c.d;
-    const rimW = 0.55 * R;
-    const rimH = 0.12 * D + 0.06;
-    const ext = R + rimW * 1.7;
-    this.addDetail(c.x - ext, c.z - ext, c.x + ext, c.z + ext, 1.0);
+    if (c.legacy) {
+      // 지정 구덩이: 이전 형상 그대로 (적 엎드려쏴 위치의 눈높이가 테두리 마루에 맞춰져 있다)
+      const rimW = 0.55 * R;
+      const rimH = c.rimH;
+      const ext = R + rimW * 1.7;
+      this.addDetail(c.x - ext, c.z - ext, c.x + ext, c.z + ext, 0.5, 0.5, 1.25, 1.25);
+      this.stamp(c.x - ext, c.z - ext, c.x + ext, c.z + ext, (x, z, k) => {
+        const r = Math.hypot(x - c.x, z - c.z);
+        if (r > ext) return;
+        let dh = 0;
+        if (r < R) {
+          const t = r / R;
+          dh -= D * Math.pow(1 - t * t, 1.15);
+        }
+        const rr = (r - R) / (rimW * 0.6);
+        dh += rimH * Math.exp(-rr * rr);
+        dh += this.noise.noise(x * 0.9, z * 0.9) * 0.05 * (1 - r / ext);
+        this.h[k] += dh;
+      });
+      return;
+    }
+    const fresh = c.fresh;
+    const rimH = c.rimH;
+    // 최근 구덩이: 좁고 날카로운 테두리 / 오래된 구덩이: 무뎌진 넓은 테두리와 메워진 평평한 바닥
+    const rimW = Math.max(0.55 * R, 0.85) * (fresh ? 0.8 : 1.25);
+    const ext = R + rimW * 1.9 + (fresh ? 0.6 * R : 0);
+    this.addDetail(c.x - ext, c.z - ext, c.x + ext, c.z + ext, 0.5, 0.5, 1.25, 1.25);
     this.stamp(c.x - ext, c.z - ext, c.x + ext, c.z + ext, (x, z, k) => {
-      const r = Math.hypot(x - c.x, z - c.z);
-      if (r > ext) return;
+      const dx = x - c.x;
+      const dz = z - c.z;
+      const r0 = Math.hypot(dx, dz);
+      if (r0 > ext) return;
+      const a = Math.atan2(dz, dx);
+      // 둥글지 않은 윤곽
+      const Rw = R * (1 + 0.07 * Math.sin(a * 3 + c.seed) + 0.04 * Math.sin(a * 5 + c.seed * 2.1));
+      const t = r0 / Rw;
       let dh = 0;
-      if (r < R) {
-        const t = r / R;
-        dh -= D * Math.pow(1 - t * t, 1.15);
-      }
-      const rr = (r - R) / (rimW * 0.6);
+      if (t < 1) dh -= fresh ? D * Math.pow(1 - t * t, 1.1) : D * 0.95 * (1 - Math.pow(t, 2.6));
+      const rr = (r0 - Rw * (fresh ? 1.0 : 1.04)) / (rimW * 0.6);
       dh += rimH * Math.exp(-rr * rr);
-      dh += this.noise.noise(x * 0.9, z * 0.9) * 0.05 * (1 - r / ext);
+      if (fresh) {
+        // 분출물 덮개: 줄기 방향으로 조금 더 두껍다
+        const out = (r0 - Rw) / (R * 1.2);
+        if (out > 0) dh += rimH * 0.22 * Math.exp(-out * out) * (0.5 + this.craterRay(c, a));
+      }
+      dh += this.noise.noise(x * 0.9, z * 0.9) * (fresh ? 0.07 : 0.04) * (1 - r0 / ext);
       this.h[k] += dh;
     });
-    if (D >= 1.15) {
-      this.puddles.push({ type: 'disc', x: c.x, z: c.z, r: R * 0.42, y: null, crater: c });
-    }
   }
 
   applyCanal() {
@@ -351,20 +611,11 @@ export class Terrain {
   }
 
   trenchProfile(line, T, withParapet) {
-    let x0 = Infinity;
-    let x1 = -Infinity;
-    let z0 = Infinity;
-    let z1 = -Infinity;
-    for (const [x, z] of line) {
-      x0 = Math.min(x0, x);
-      x1 = Math.max(x1, x);
-      z0 = Math.min(z0, z);
-      z1 = Math.max(z1, z);
-    }
+    const { x0, x1, z0, z1 } = bbox(line);
     const ext = T.topHalf + (withParapet ? T.parapet.width : 1.6) + 0.6;
     // 참호는 플레이어에게서 항상 100m 이상 떨어져 있어 렌더 메시는 1m 격자면 충분
-    // (충돌·높이 질의는 0.5m 격자 그대로)
-    this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0);
+    // (충돌·높이 질의는 0.5m 격자 그대로). 원거리 LOD 도 흉벽 띠가 보이게 1.25m
+    this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0, 1.0, 1.25, 1.25);
     const tmp = this._tmp;
     this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
       const d = polylineDistance(line, x, z, tmp);
@@ -424,77 +675,133 @@ export class Terrain {
     }
   }
 
+  // 농로: 주변보다 조금 꺼진 길, 가운데 솟음, 깊게 팬 두 줄 바퀴 자국, 길가 흙 턱과 배수로
   applyRoads() {
-    const tmp = this._tmp;
+    const R = CONFIG.terrain.road;
     for (const rd of MAP.roads) {
-      let x0 = Infinity;
-      let x1 = -Infinity;
-      let z0 = Infinity;
-      let z1 = -Infinity;
-      for (const [x, z] of rd.points) {
-        x0 = Math.min(x0, x);
-        x1 = Math.max(x1, x);
-        z0 = Math.min(z0, z);
-        z1 = Math.max(z1, z);
-      }
+      const { x0, x1, z0, z1 } = bbox(rd.points);
       const hw = rd.width / 2;
-      const ext = hw + 1.6;
+      const ext = hw + R.ditchOffset + R.ditchHalf + 1.2;
+      this.addRoadDetail(rd.points, ext);
       this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
-        const d = polylineDistance(rd.points, x, z, tmp);
+        const d = polylineDistance(rd.points, x, z);
         if (d > ext) return;
-        // 수로 바로 위는 건드리지 않는다
-        if (Math.abs(z - this.canalZ(x)) < 4 && Math.abs(x - MAP.canal.crossing.x) > MAP.canal.crossing.halfWidth + 1) return;
+        // 수로 바로 위는 건드리지 않는다 (배수관 둑 위는 길만, 배수로는 없음)
+        if (this.nearCanal(x, z)) return;
         let dh = 0;
-        if (d < hw) {
-          dh = -0.07;
-          const rd2 = Math.abs(d - 0.85);
-          if (rd2 < 0.3) dh -= 0.1 * (1 - rd2 / 0.3);
-        } else if (d < hw + 1.2) dh = 0.05 * Math.sin((Math.PI * (d - hw)) / 1.2);
+        if (d < hw + 0.3) {
+          const inner = 1 - smoothstep(hw - 0.2, hw + 0.3, d);
+          dh -= R.sink * inner;
+          dh += R.crown * (1 - Math.min(1, (d / hw) ** 2)) * inner;
+          dh -= R.rutDepth * flatProfile(Math.abs(d - R.rutOffset), R.rutFlat, R.rutWall);
+        }
+        dh += 0.05 * bump((d - hw) / 0.7, 0.4);
+        if (Math.abs(z - this.canalZ(x)) > 6) {
+          const dd = Math.abs(d - (hw + R.ditchOffset));
+          dh -= R.ditchDepth * flatProfile(dd, R.ditchHalf * 0.35, R.ditchHalf * 0.65);
+          dh += 0.07 * bump((d - hw - R.ditchOffset - R.ditchHalf) / 1.1, 0.35);
+        }
         this.h[k] += dh;
       });
-      // 바퀴 자국 웅덩이
-      for (let i = 1; i < rd.points.length - 1; i++) {
-        const [ax, az] = rd.points[i];
-        const [bx, bz] = rd.points[i + 1];
-        const segs = Math.floor(Math.hypot(bx - ax, bz - az) / 11);
-        for (let s = 0; s < segs; s++) {
-          if (!this.rng.chance(0.42)) continue;
-          const t = (s + this.rng.next()) / Math.max(1, segs);
-          const px = ax + (bx - ax) * t;
-          const pz = az + (bz - az) * t;
-          if (Math.abs(pz - this.canalZ(px)) < 6) continue;
-          const len = Math.hypot(bx - ax, bz - az);
-          const nx = -(bz - az) / len;
-          const nz = (bx - ax) / len;
-          const side = this.rng.chance(0.5) ? 0.85 : -0.85;
-          this.puddles.push({
-            type: 'disc',
-            x: px + nx * side,
-            z: pz + nz * side,
-            r: this.rng.range(0.5, 1.3),
-            stretch: [(bx - ax) / len, (bz - az) / len, this.rng.range(1.6, 3.2)],
-          });
+    }
+  }
+
+  // 길 방향에 맞춘 렌더 해상도 (길을 가로지르는 방향만 0.5m)
+  addRoadDetail(points, ext) {
+    for (let i = 0; i < points.length - 1; i++) {
+      const [ax, az] = points[i];
+      const [bx, bz] = points[i + 1];
+      const len = Math.hypot(bx - ax, bz - az) || 1;
+      const ux = Math.abs((bx - ax) / len);
+      const uz = Math.abs((bz - az) / len);
+      const rx = ux < 0.42 ? 0.5 : uz < 0.42 ? 1.25 : 0.5;
+      const rz = ux < 0.42 ? 1.25 : 0.5;
+      const steps = Math.ceil(len / 3);
+      for (let s = 0; s <= steps; s++) {
+        const px = ax + ((bx - ax) * s) / steps;
+        const pz = az + ((bz - az) * s) / steps;
+        this.addDetail(px - ext, pz - ext, px + ext, pz + ext, rx, rz, 2.5, 2.5);
+      }
+    }
+  }
+
+  // 궤도 차량 자국: 두 줄의 얕은 띠 (지면 재질은 혼합 마스크에서)
+  applyTracks() {
+    const T = CONFIG.terrain.tracks;
+    for (const tr of MAP.vehicleTracks || []) {
+      const { x0, x1, z0, z1 } = bbox(tr.points);
+      const half = tr.gauge / 2;
+      const ext = half + T.bandHalf + 0.6;
+      this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
+        const d = polylineDistance(tr.points, x, z);
+        if (d > ext || this.nearCanal(x, z, 7)) return;
+        this.h[k] -= T.depth * flatProfile(Math.abs(d - half), T.bandHalf * 0.55, T.bandHalf * 0.6);
+      });
+    }
+  }
+
+  // 물웅덩이: 깊은 구덩이 바닥, 바퀴 자국 (모두 평평한 수면, 가장자리는 지형이 가린다)
+  buildPuddleList() {
+    const C = CONFIG.terrain.craters;
+    for (const c of this.craters) {
+      if (c.d < (c.fresh ? 1.25 : C.waterMinDepth)) continue;
+      c.water = true;
+      const bottom = this.heightAt(c.x, c.z);
+      this.puddles.push({ type: 'disc', x: c.x, z: c.z, r: c.r * 0.5, level: bottom + c.d * (c.fresh ? 0.12 : 0.2), crater: c });
+    }
+    const R = CONFIG.terrain.road;
+    const rng = new Random(CONFIG.world.seed + 31);
+    for (const rd of MAP.roads) {
+      const pts = rd.points;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, az] = pts[i];
+        const [bx, bz] = pts[i + 1];
+        const len = Math.hypot(bx - ax, bz - az);
+        const ux = (bx - ax) / len;
+        const uz = (bz - az) / len;
+        for (let s = 1.5; s < len - 1.5; s += R.puddleEvery * rng.range(0.6, 1.4)) {
+          if (!rng.chance(R.puddleChance)) continue;
+          const L = rng.range(2.5, 9);
+          const across = rng.chance(0.15);
+          const sides = across ? [-1, 1] : [rng.chance(0.5) ? 1 : -1];
+          for (const sd of sides) {
+            const line = [];
+            let minB = Infinity;
+            let bad = false;
+            for (let q = 0; q <= L; q += 0.5) {
+              const px = ax + ux * Math.min(len, s + q) - uz * sd * R.rutOffset;
+              const pz = az + uz * Math.min(len, s + q) + ux * sd * R.rutOffset;
+              if (this.nearCanal(px, pz, 7) || Math.abs(px) > this.half - 2 || Math.abs(pz) > this.half - 2) bad = true;
+              minB = Math.min(minB, this.heightAt(px, pz));
+              line.push([px, pz]);
+            }
+            if (bad || line.length < 3) continue;
+            this.puddles.push({ type: 'strip', pts: line, hw: R.rutFlat + R.rutWall * 0.75, level: minB + rng.range(0.05, 0.1) });
+          }
         }
       }
     }
   }
 
-  // ------------------------------------------------------------------ 지면 종류
+  // ------------------------------------------------------------------ 지면 종류 (발소리·탄착·이동)
   buildSurfaces() {
     const sn = this.sn;
     const half = this.half;
     const sres = this.sres;
-    const F = MAP.fields;
     const nz = this.noise;
+    const P = this.parcels;
+    const fy = MAP.fields.farmYard;
+    const kindSurf = { plowed: SID.plowed, sunflower: SID.sunflower, stubble: SID.grass };
     for (let j = 0; j < sn; j++) {
       const z = -half + j * sres;
       for (let i = 0; i < sn; i++) {
         const x = -half + i * sres;
         let s = SID.grass;
-        const edge = nz.noise(x / 9, z / 9) * 4;
-        for (const r of F.plowed) if (x > r.x0 + edge && x < r.x1 - edge && z > r.z0 + edge && z < r.z1 - edge) s = SID.plowed;
-        for (const r of F.sunflower) if (x > r.x0 + edge && x < r.x1 - edge && z > r.z0 + edge && z < r.z1 - edge) s = SID.sunflower;
-        const fy = F.farmYard;
+        const edge = nz.noise(x / 9, z / 9) * 2.5;
+        for (let p = 1; p < P.length; p++) {
+          const r = P[p];
+          if (x > r.x0 + edge && x < r.x1 - edge && z > r.z0 + edge && z < r.z1 - edge) s = kindSurf[r.kind];
+        }
         if (x > fy.x0 + edge && x < fy.x1 - edge && z > fy.z0 + edge && z < fy.z1 - edge) {
           const v = nz.noise(x / 17 + 5, z / 17 - 2);
           s = v > 0.55 ? SID.rubble : v < -0.12 ? SID.grass : SID.road;
@@ -503,11 +810,13 @@ export class Terrain {
       }
     }
     const tmp = this._tmp;
-    // 도로
+    const R = CONFIG.terrain.road;
+    // 도로·배수로
     for (const rd of MAP.roads) {
       const hw = rd.width / 2 + 0.25;
-      this.forPolylineSurf(rd.points, hw + 1, (x, z, k, d) => {
+      this.forPolylineSurf(rd.points, hw + R.ditchOffset + R.ditchHalf, (x, z, k, d) => {
         if (d < hw) this.surf[k] = SID.road;
+        else if (Math.abs(d - (rd.width / 2 + R.ditchOffset)) < R.ditchHalf * 0.7 && Math.abs(z - this.canalZ(x)) > 6) this.surf[k] = SID.wetMud;
       });
     }
     // 수로
@@ -523,29 +832,30 @@ export class Terrain {
         this.surf[k] = wet && d < C.floorHalf * 0.9 ? SID.water : SID.wetMud;
       } else if (d < th + 1.2 && z < this.canalZ(x)) this.surf[k] = SID.crater; // 파낸 흙
     });
-    // 참호
+    // 참호: 바닥·벽은 참호, 흉벽·후벽은 파낸 하층토
     const T = MAP.trench;
     for (const line of T.lines) {
       this.forPolylineSurf(line, T.topHalf + T.parapet.width, (x, z, k, d) => {
         polylineDistance(line, x, z, tmp);
         const front = tmp.side * tmp.nz > 0;
         if (d < T.topHalf + 0.2) this.surf[k] = SID.trench;
-        else if (d < T.topHalf + (front ? T.parapet.width * 0.85 : 1.2)) this.surf[k] = SID.crater;
+        else if (d < T.topHalf + (front ? T.parapet.width * 0.85 : 1.2)) this.surf[k] = SID.subsoil;
       });
     }
     for (const line of T.commLines) {
       this.forPolylineSurf(line, 2, (x, z, k, d) => {
         if (d < 0.95) this.surf[k] = SID.trench;
-        else if (d < 1.8) this.surf[k] = SID.crater;
+        else if (d < 1.8) this.surf[k] = SID.subsoil;
       });
     }
-    // 구덩이
+    // 구덩이: 안쪽 = 구덩이, 최근 구덩이 분출물 = 하층토, 깊은 바닥 = 물
     for (const c of this.craters) {
-      const ext = c.r * 1.25;
+      const ext = c.r * (c.fresh ? 1.7 : 1.25);
       this.stampSurf(c.x - ext, c.z - ext, c.x + ext, c.z + ext, (x, z, k) => {
         const r = Math.hypot(x - c.x, z - c.z);
-        if (r < c.r * (1.1 + nz.noise(x, z) * 0.15)) this.surf[k] = SID.crater;
-        if (c.d >= 1.15 && r < c.r * 0.4) this.surf[k] = SID.water;
+        if (r < c.r * (1.08 + nz.noise(x, z) * 0.12)) this.surf[k] = SID.crater;
+        else if (c.fresh && r < c.r * 1.6 && this.craterRay(c, Math.atan2(z - c.z, x - c.x)) > 0.35) this.surf[k] = SID.subsoil;
+        if (c.water && r < c.r * 0.42) this.surf[k] = SID.water;
       });
     }
     for (const m of this.rubbleMounds) {
@@ -556,7 +866,7 @@ export class Terrain {
     for (const dgt of MAP.dugouts) {
       const e = Math.max(dgt.w, dgt.d) * 0.5 + 0.8;
       this.stampSurf(dgt.x - e, dgt.z - e, dgt.x + e, dgt.z + e, (x, z, k) => {
-        this.surf[k] = SID.crater;
+        this.surf[k] = SID.subsoil;
       });
     }
     for (const f of this.footprints) {
@@ -567,52 +877,366 @@ export class Terrain {
   }
 
   forPolylineSurf(points, ext, fn) {
-    let x0 = Infinity;
-    let x1 = -Infinity;
-    let z0 = Infinity;
-    let z1 = -Infinity;
-    for (const [x, z] of points) {
-      x0 = Math.min(x0, x);
-      x1 = Math.max(x1, x);
-      z0 = Math.min(z0, z);
-      z1 = Math.max(z1, z);
-    }
+    const { x0, x1, z0, z1 } = bbox(points);
     this.stampSurf(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
       const d = polylineDistance(points, x, z);
       if (d <= ext) fn(x, z, k, d);
     });
   }
 
-  // ------------------------------------------------------------------ 메시
-  chunkResolution(x0, z0, x1, z1) {
-    let rx = 2.5;
-    let rz = 2.5;
-    for (const r of this.detailRegions) {
-      if (r.x1 < x0 || r.x0 > x1 || r.z1 < z0 || r.z0 > z1) continue;
-      rx = Math.min(rx, r.resX);
-      rz = Math.min(rz, r.resZ);
+  // ------------------------------------------------------------------ 지면 재질 혼합 마스크 (렌더·식생용, 0.5m)
+  // 채널 A = (흑토, 그루터기, 진흙, 하층토), B = (자갈길, 길 중심 거리, 궤도 띠 거리, 밭 구획 번호). 풀 = 나머지.
+  buildGroundMask() {
+    if (this.mask) return this.mask;
+    const mr = CONFIG.ground.maskRes;
+    const N = Math.round((2 * this.half) / mr);
+    const m = {
+      N,
+      mr,
+      W: new Float32Array(N * N * 5),
+      road: new Float32Array(N * N).fill(ROAD_RANGE),
+      track: new Float32Array(N * N).fill(TRACK_RANGE),
+      parcel: new Uint8Array(N * N),
+    };
+    this.mask = m;
+    this.paintBase(m);
+    this.paintFields(m);
+    this.paintRoads(m);
+    this.paintTracks(m);
+    this.paintCanal(m);
+    this.paintTrenches(m);
+    this.paintCraters(m);
+    this.paintObjects(m);
+    // 8비트로 묶기
+    const A = new Uint8Array(N * N * 4);
+    const B = new Uint8Array(N * N * 4);
+    const W = m.W;
+    for (let k = 0; k < N * N; k++) {
+      const b = k * 5;
+      const o = k * 4;
+      A[o] = clamp(W[b] * 255 + 0.5, 0, 255);
+      A[o + 1] = clamp(W[b + 1] * 255 + 0.5, 0, 255);
+      A[o + 2] = clamp(W[b + 2] * 255 + 0.5, 0, 255);
+      A[o + 3] = clamp(W[b + 3] * 255 + 0.5, 0, 255);
+      B[o] = clamp(W[b + 4] * 255 + 0.5, 0, 255);
+      B[o + 1] = clamp((m.road[k] / ROAD_RANGE) * 255 + 0.5, 0, 255);
+      B[o + 2] = clamp((m.track[k] / TRACK_RANGE) * 255 + 0.5, 0, 255);
+      B[o + 3] = m.parcel[k];
     }
-    for (const rd of MAP.roads) {
-      for (let i = 0; i < rd.points.length - 1; i++) {
-        const [ax, az] = rd.points[i];
-        const [bx, bz] = rd.points[i + 1];
-        if (Math.max(ax, bx) + 4 < x0 || Math.min(ax, bx) - 4 > x1 || Math.max(az, bz) + 4 < z0 || Math.min(az, bz) - 4 > z1) continue;
-        // 선분이 실제로 청크를 지나는지 (대략: 몇 점 샘플)
-        let hit = false;
-        for (let k = 0; k <= 20 && !hit; k++) {
-          const px = ax + ((bx - ax) * k) / 20;
-          const pz = az + ((bz - az) * k) / 20;
-          if (px > x0 - 4 && px < x1 + 4 && pz > z0 - 4 && pz < z1 + 4) hit = true;
-        }
-        if (hit) {
-          rx = Math.min(rx, 1.25);
-          rz = Math.min(rz, 1.25);
-        }
-      }
-    }
-    return [rx, rz];
+    m.A = A;
+    m.B = B;
+    m.W = null;
+    return m;
   }
 
+  // 재질 mat 을 불투명도 a 로 덧칠 (다른 재질은 (1-a) 배)
+  paint(m, k, mat, a) {
+    if (a <= 0.001) return;
+    if (a > 1) a = 1;
+    const W = m.W;
+    const b = k * 5;
+    const keep = 1 - a;
+    W[b] *= keep;
+    W[b + 1] *= keep;
+    W[b + 2] *= keep;
+    W[b + 3] *= keep;
+    W[b + 4] *= keep;
+    if (mat >= 0) W[b + mat] += a;
+  }
+
+  maskStamp(m, x0, z0, x1, z1, fn) {
+    const { N, mr } = m;
+    const half = this.half;
+    const i0 = Math.max(0, Math.floor((x0 + half) / mr - 0.5));
+    const i1 = Math.min(N - 1, Math.ceil((x1 + half) / mr - 0.5));
+    const j0 = Math.max(0, Math.floor((z0 + half) / mr - 0.5));
+    const j1 = Math.min(N - 1, Math.ceil((z1 + half) / mr - 0.5));
+    for (let j = j0; j <= j1; j++) {
+      const z = -half + (j + 0.5) * mr;
+      for (let i = i0; i <= i1; i++) fn(-half + (i + 0.5) * mr, z, j * N + i);
+    }
+  }
+
+  // 바탕: 마른 풀밭 + 드러난 흙 얼룩 + 낮은 곳 진흙
+  paintBase(m) {
+    const nz = this.noise;
+    const U = CONFIG.terrain.undulation;
+    this.maskStamp(m, -this.half, -this.half, this.half, this.half, (x, z, k) => {
+      const n1 = nz.noise(x / 27 + 5, z / 27 - 8) + 0.35 * nz.noise(x / 6 - 3, z / 6 + 1);
+      this.paint(m, k, GM.plowed, smoothstep(0.5, 0.85, n1) * 0.45);
+      const low = nz.noise(x / U.large.size + 31.7, z / U.large.size - 12.3);
+      this.paint(m, k, GM.mud, smoothstep(-0.35, -0.65, low + 0.2 * nz.noise(x / 9, z / 9)) * 0.3);
+    });
+  }
+
+  paintFields(m) {
+    const nz = this.noise;
+    const U = CONFIG.terrain.undulation;
+    for (let p = 1; p < this.parcels.length; p++) {
+      const P = this.parcels[p];
+      this.maskStamp(m, P.x0 - 4, P.z0 - 4, P.x1 + 4, P.z1 + 4, (x, z, k) => {
+        const edge = nz.noise(x / 9 + p * 13.7, z / 9 - p * 3.1) * 2.5 + nz.noise(x / 2.3, z / 2.3) * 0.6;
+        const inside = Math.min(x - P.x0, P.x1 - x, z - P.z0, P.z1 - z) + edge;
+        const a = smoothstep(-0.6, 1.0, inside);
+        if (a <= 0) return;
+        if (a > 0.5) m.parcel[k] = p;
+        if (P.kind === 'stubble') {
+          this.paint(m, k, GM.stubble, a * 0.95);
+          this.paint(m, k, GM.grass, a * smoothstep(0.35, 0.8, nz.noise(x / 11 + 3, z / 11 - 7)) * 0.55);
+          this.paint(m, k, GM.plowed, a * smoothstep(0.55, 0.9, nz.noise(x / 7 - 9, z / 7 + 2)) * 0.35);
+          return;
+        }
+        this.paint(m, k, GM.plowed, a);
+        // 잡초 얼룩 (해바라기밭은 더 많이), 밭 가장자리(머리 땅)는 풀이 섞임
+        const weeds = P.kind === 'sunflower' ? 0.3 : 0.12;
+        this.paint(m, k, GM.grass, a * (weeds + smoothstep(0.5, 0.85, nz.noise(x / 6.5 + p, z / 6.5)) * 0.45));
+        this.paint(m, k, GM.grass, a * (1 - smoothstep(1.5, 5, inside)) * 0.4);
+        // 젖은 저지대: 고랑에 물이 고인다 (셰이더에서 진흙 비율이 높은 밭 = 물)
+        const low = nz.noise(x / U.large.size + 31.7, z / U.large.size - 12.3) + 0.25 * nz.noise(x / 8 + 2, z / 8 - 6);
+        this.paint(m, k, GM.mud, a * smoothstep(-0.25, -0.55, low) * 0.7);
+      });
+    }
+    // 집단농장 마당: 자갈·벽돌 부스러기 / 짓밟힌 진흙 / 풀
+    const fy = MAP.fields.farmYard;
+    this.maskStamp(m, fy.x0 - 4, fy.z0 - 4, fy.x1 + 4, fy.z1 + 4, (x, z, k) => {
+      const edge = nz.noise(x / 9, z / 9) * 2.5;
+      const inside = Math.min(x - fy.x0, fy.x1 - x, z - fy.z0, fy.z1 - z) + edge;
+      const a = smoothstep(-0.6, 1.2, inside);
+      if (a <= 0) return;
+      const v = nz.noise(x / 17 + 5, z / 17 - 2) + 0.2 * nz.noise(x / 4, z / 4);
+      this.paint(m, k, GM.gravel, a * smoothstep(0.1, 0.55, v) * 0.85);
+      this.paint(m, k, GM.mud, a * smoothstep(-0.25, 0.1, v) * (1 - smoothstep(0.1, 0.5, v)) * 0.55);
+    });
+    for (const f of this.footprints) {
+      this.maskStamp(m, f.x - f.hx - 2, f.z - f.hz - 2, f.x + f.hx + 2, f.z + f.hz + 2, (x, z, k) => {
+        const d = Math.hypot(Math.max(0, Math.abs(x - f.x) - f.hx), Math.max(0, Math.abs(z - f.z) - f.hz));
+        this.paint(m, k, GM.gravel, (1 - smoothstep(0, 1.8, d + nz.noise(x / 2, z / 2) * 0.5)) * 0.9);
+      });
+    }
+  }
+
+  paintRoads(m) {
+    const R = CONFIG.terrain.road;
+    const nz = this.noise;
+    for (const rd of MAP.roads) {
+      const { x0, x1, z0, z1 } = bbox(rd.points);
+      const hw = rd.width / 2;
+      const ext = Math.min(ROAD_RANGE, hw + R.ditchOffset + R.ditchHalf + 1.6);
+      this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
+        const d = polylineDistance(rd.points, x, z);
+        if (d > ext) return;
+        const onCanal = this.nearCanal(x, z);
+        if (!onCanal) m.road[k] = Math.min(m.road[k], d);
+        const e = nz.noise(x / 1.7, z / 1.7) * 0.25;
+        // 자갈 섞인 흙길 (바퀴 자국 진흙은 셰이더에서 길 중심 거리로 날카롭게)
+        this.paint(m, k, GM.gravel, (1 - smoothstep(hw - 0.35, hw + 0.2, d + e)) * 0.92);
+        this.paint(m, k, GM.mud, (1 - smoothstep(0.1, 0.45, Math.abs(d - R.rutOffset))) * 0.4);
+        // 길가 풀 (밭이 길까지 갈려 있지 않게)
+        const verge = smoothstep(hw, hw + 0.4, d) * (1 - smoothstep(hw + R.ditchOffset + R.ditchHalf + 0.4, ext, d));
+        this.paint(m, k, GM.grass, verge * 0.75);
+        if (!onCanal && Math.abs(z - this.canalZ(x)) > 6) {
+          const dd = Math.abs(d - (hw + R.ditchOffset));
+          this.paint(m, k, GM.mud, (1 - smoothstep(R.ditchHalf * 0.35, R.ditchHalf, dd + e)) * 0.85);
+        }
+      });
+    }
+  }
+
+  paintTracks(m) {
+    const T = CONFIG.terrain.tracks;
+    for (const tr of MAP.vehicleTracks || []) {
+      const { x0, x1, z0, z1 } = bbox(tr.points);
+      const half = tr.gauge / 2;
+      const ext = half + TRACK_RANGE;
+      this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
+        if (this.nearCanal(x, z, 7)) return;
+        const d = polylineDistance(tr.points, x, z);
+        const bd = Math.abs(d - half);
+        if (bd < m.track[k]) m.track[k] = bd;
+        this.paint(m, k, GM.mud, (1 - smoothstep(T.bandHalf * 0.4, T.bandHalf * 1.6, bd)) * 0.3);
+      });
+    }
+  }
+
+  // 수로: 실제 형상(기본 지면보다 얼마나 낮은지)에서 칠한다 — 수로 형상이 바뀌어도 따라간다
+  paintCanal(m) {
+    const C = MAP.canal;
+    const nz = this.noise;
+    this.maskStamp(m, C.xMin, C.z - 9, C.xMax, C.z + 9, (x, z, k) => {
+      const below = this.baseHeight(x, z) - this.heightAt(x, z);
+      const above = -below;
+      const north = z < this.canalZ(x);
+      if (below > 0.15) {
+        this.paint(m, k, GM.grass, smoothstep(0.15, 0.4, below) * 0.5);
+        this.paint(m, k, GM.mud, smoothstep(0.35, 0.9, below) * (0.75 + 0.2 * nz.noise(x / 3, z / 3)));
+      } else if (north && above > 0.06) {
+        // 수로를 팔 때 나온 흙 둔덕: 풀이 덮었고 군데군데 하층토가 드러남
+        this.paint(m, k, GM.subsoil, smoothstep(0.06, 0.4, above) * smoothstep(0.1, 0.6, nz.noise(x / 4.5 + 7, z / 4.5)) * 0.6);
+      }
+    });
+  }
+
+  paintTrenches(m) {
+    const T = MAP.trench;
+    const nz = this.noise;
+    const tmp = {};
+    for (const line of T.lines) {
+      const { x0, x1, z0, z1 } = bbox(line);
+      const ext = T.topHalf + T.parapet.width + 1.2;
+      this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
+        const d = polylineDistance(line, x, z, tmp);
+        if (d > ext) return;
+        const front = tmp.side * tmp.nz > 0;
+        const n = nz.noise(x / 3.1, z / 3.1);
+        if (d < T.floorHalf + 0.1) {
+          this.paint(m, k, GM.mud, 0.9);
+          return;
+        }
+        const wallW = front ? T.parapet.width : T.parados.width * 0.9;
+        const t = (d - T.topHalf * 0.85) / wallW;
+        // 흉벽: 주변 흑토보다 밝은 황갈색 띠 (200m 에서 참호선이 읽히게), 군데군데 풀 덩이
+        const sub = d < T.topHalf ? 0.85 : (1 - smoothstep(0.75, 1.15, t + n * 0.12)) * (front ? 0.9 : 0.62);
+        this.paint(m, k, GM.subsoil, sub);
+        if (d > T.topHalf) this.paint(m, k, GM.grass, smoothstep(0.55, 0.9, nz.noise(x / 1.6 + 3, z / 1.6)) * 0.45);
+      });
+    }
+    for (const line of T.commLines) {
+      const { x0, x1, z0, z1 } = bbox(line);
+      this.maskStamp(m, x0 - 3, z0 - 3, x1 + 3, z1 + 3, (x, z, k) => {
+        const d = polylineDistance(line, x, z);
+        if (d < 0.5) this.paint(m, k, GM.mud, 0.85);
+        else this.paint(m, k, GM.subsoil, (1 - smoothstep(1.3, 2.4, d)) * 0.7);
+      });
+    }
+    for (const dgt of MAP.dugouts) {
+      const e = Math.max(dgt.w, dgt.d) * 0.5 + 2;
+      this.maskStamp(m, dgt.x - e, dgt.z - e, dgt.x + e, dgt.z + e, (x, z, k) => {
+        const r = Math.hypot(x - dgt.x, z - dgt.z) / e;
+        this.paint(m, k, GM.subsoil, (1 - smoothstep(0.6, 1.0, r)) * (0.45 + 0.25 * nz.noise(x / 2, z / 2)));
+      });
+    }
+    for (const mo of this.rubbleMounds) {
+      const e = mo.r + 1.5;
+      this.maskStamp(m, mo.x - e, mo.z - e, mo.x + e, mo.z + e, (x, z, k) => {
+        const r = Math.hypot(x - mo.x, z - mo.z);
+        this.paint(m, k, GM.gravel, (1 - smoothstep(mo.r * 0.7, e, r)) * 0.85);
+      });
+    }
+  }
+
+  // 구덩이: 최근 = 밝은 하층토 테두리 + 방사형 분출물 + 젖은 진흙 바닥 / 오래된 = 풀 덮인 테두리, 물 고인 바닥
+  paintCraters(m) {
+    const nz = this.noise;
+    const CC = CONFIG.terrain.craters;
+    for (const c of this.craters) {
+      const R = c.r;
+      const ejR = c.fresh ? CC.ejecta[0] + (CC.ejecta[1] - CC.ejecta[0]) * ((c.seed * 0.37) % 1) : 1.5;
+      const ext = R * ejR + 1;
+      this.maskStamp(m, c.x - ext, c.z - ext, c.x + ext, c.z + ext, (x, z, k) => {
+        const dx = x - c.x;
+        const dz = z - c.z;
+        const r = Math.hypot(dx, dz);
+        if (r > ext) return;
+        const t = r / R;
+        const n = nz.noise(x / 1.3 + c.seed, z / 1.3);
+        if (c.fresh) {
+          const a = Math.atan2(dz, dx);
+          const ray = this.craterRay(c, a);
+          // 분출물: 줄기 방향으로 멀리, 바깥으로 갈수록 성기게
+          const out = (1 - smoothstep(1.0, ejR, t + n * 0.25)) * (0.35 + 0.65 * ray);
+          this.paint(m, k, GM.subsoil, Math.min(0.95, out * 1.15 * (0.8 + 0.2 * n)));
+          if (t < 1.25) this.paint(m, k, GM.subsoil, (1 - smoothstep(0.75, 1.25, t)) * 0.85);
+          if (t < 0.95) this.paint(m, k, GM.mud, (1 - smoothstep(0.35, 0.9, t)) * 0.75);
+          // 바깥 젖은 흙 튄 자국
+          this.paint(m, k, GM.mud, smoothstep(0.55, 0.9, n) * (1 - smoothstep(1.1, 1.8, t)) * 0.4);
+        } else {
+          this.paint(m, k, GM.grass, (1 - smoothstep(0.85, 1.45, t)) * 0.7);
+          this.paint(m, k, GM.subsoil, (1 - smoothstep(0.1, 0.35, Math.abs(t - 1.02))) * 0.15);
+          this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 0.6, t)) * 0.8);
+        }
+      });
+    }
+  }
+
+  // 차량 둘레: 짓이겨진 진흙
+  paintObjects(m) {
+    const nz = this.noise;
+    for (const v of this.vehiclePads) {
+      const e = Math.hypot(v.hx, v.hz) + 7;
+      this.maskStamp(m, v.x - e, v.z - e, v.x + e, v.z + e, (x, z, k) => {
+        const dx = x - v.x;
+        const dz = z - v.z;
+        const lx = dx * v.c - dz * v.s;
+        const lz = dx * v.s + dz * v.c;
+        const d = Math.hypot(Math.max(0, Math.abs(lx) - v.hx), Math.max(0, Math.abs(lz) - v.hz));
+        this.paint(m, k, GM.mud, (1 - smoothstep(1.5, 6.5, d + nz.noise(x / 2.2, z / 2.2) * 1.5)) * 0.65);
+      });
+    }
+  }
+
+  // 셰이더용 혼합 마스크 텍스처 (렌더 때만 만든다)
+  groundMaskTextures() {
+    const m = this.buildGroundMask();
+    if (!m.texA) {
+      const mk = (data) => {
+        const t = new THREE.DataTexture(data, m.N, m.N, THREE.RGBAFormat, THREE.UnsignedByteType);
+        t.minFilter = THREE.LinearMipmapLinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        t.wrapS = THREE.ClampToEdgeWrapping;
+        t.wrapT = THREE.ClampToEdgeWrapping;
+        t.generateMipmaps = true;
+        t.colorSpace = THREE.NoColorSpace;
+        t.needsUpdate = true;
+        return t;
+      };
+      m.texA = mk(m.A);
+      m.texB = mk(m.B);
+    }
+    return { a: m.texA, b: m.texB, N: m.N };
+  }
+
+  // ------------------------------------------------------------------ 굽는 앰비언트 오클루전 + 정점색
+  // 지형 높이장의 수평선 각(8방향)으로 하늘이 보이는 정도 → 구덩이 안·참호·수로 바닥이 어둡다.
+  aoAt(x, z, h, fine) {
+    const A = CONFIG.ground.ao;
+    const dists = fine ? A.fineDists : A.coarseDists;
+    let vis = 0;
+    for (let q = 0; q < 8; q++) {
+      const dx = AO_DIRS[q * 2];
+      const dz = AO_DIRS[q * 2 + 1];
+      let mt = 0;
+      for (let i = 0; i < dists.length; i++) {
+        const d = dists[i];
+        const t = (this.heightAt(x + dx * d, z + dz * d) - h) / d;
+        if (t > mt) mt = t;
+      }
+      vis += 1 / (1 + mt * mt);
+    }
+    let ao = Math.pow(vis / 8, A.power);
+    // 건물·차량·엄체호 둘레 접지 음영
+    for (const b of this.aoBoxes) {
+      const dx = x - b.x;
+      const dz = z - b.z;
+      if (Math.abs(dx) > b.r || Math.abs(dz) > b.r) continue;
+      const lx = dx * b.c - dz * b.s;
+      const lz = dx * b.s + dz * b.c;
+      const d = Math.hypot(Math.max(0, Math.abs(lx) - b.hx), Math.max(0, Math.abs(lz) - b.hz));
+      ao *= 1 - b.k * (1 - smoothstep(0, b.fall, d));
+    }
+    return Math.max(A.min, ao);
+  }
+
+  vertexColor(x, z, h, fine, out) {
+    const V = CONFIG.ground.variation;
+    const nz = this.noise;
+    const p = this.parcelAt(x, z);
+    const tint = p ? this.parcels[p].tint : WHITE;
+    const v = 1 + V.amp[0] * nz.noise(x / V.size[0] + 17, z / V.size[0] - 4) + V.amp[1] * nz.noise(x / V.size[1] - 21, z / V.size[1] + 9);
+    const k = v * this.aoAt(x, z, h, fine);
+    out.push(tint[0] * k, tint[1] * k, tint[2] * k);
+  }
+
+  // ------------------------------------------------------------------ 메시
   gridHeight(x, z) {
     // 격자점 정확 높이 (경계 밖은 기본 함수)
     const fi = (x + this.half) / this.res;
@@ -625,90 +1249,114 @@ export class Terrain {
     return this.h[j * this.n + i];
   }
 
-  buildMesh(material) {
-    const W = CONFIG.world;
-    const half = this.half;
-    const cs = W.chunkSize;
-    const gs = W.groupSize;
-    const groups = new Map();
-    const col = new THREE.Color();
-    const nchunk = Math.round((2 * half) / cs);
-    let triCount = 0;
-    for (let cj = 0; cj < nchunk; cj++) {
-      for (let ci = 0; ci < nchunk; ci++) {
-        const x0 = -half + ci * cs;
-        const z0 = -half + cj * cs;
-        const [rx, rz] = this.chunkResolution(x0 - 0.5, z0 - 0.5, x0 + cs + 0.5, z0 + cs + 0.5);
-        const key = `${Math.floor((x0 + half) / gs)}_${Math.floor((z0 + half) / gs)}`;
-        if (!groups.has(key)) groups.set(key, { pos: [], nor: [], colr: [], mask: [], idx: [] });
-        triCount += this.buildChunk(groups.get(key), x0, z0, cs, rx, rz, col);
+  // 청크별 해상도 표 [근거리 x, z, 원거리 x, z]
+  chunkResolutions() {
+    const M = CONFIG.terrain.mesh;
+    const cs = M.chunk;
+    const nc = Math.round((2 * this.half) / cs);
+    const res = new Float32Array(nc * nc * 4);
+    for (let k = 0; k < nc * nc; k++) {
+      res[k * 4] = res[k * 4 + 1] = snapRes(M.baseRes, cs);
+      res[k * 4 + 2] = res[k * 4 + 3] = snapRes(M.farBaseRes, cs);
+    }
+    for (const r of this.detailRegions) {
+      const ci0 = clamp(Math.floor((r.x0 + this.half) / cs), 0, nc - 1);
+      const ci1 = clamp(Math.floor((r.x1 + this.half) / cs), 0, nc - 1);
+      const cj0 = clamp(Math.floor((r.z0 + this.half) / cs), 0, nc - 1);
+      const cj1 = clamp(Math.floor((r.z1 + this.half) / cs), 0, nc - 1);
+      const v = [snapRes(r.resX, cs), snapRes(r.resZ, cs), snapRes(r.farX, cs), snapRes(r.farZ, cs)];
+      for (let cj = cj0; cj <= cj1; cj++) {
+        for (let ci = ci0; ci <= ci1; ci++) {
+          const k = (cj * nc + ci) * 4;
+          for (let q = 0; q < 4; q++) if (v[q] < res[k + q]) res[k + q] = v[q];
+        }
       }
     }
-    const meshGroup = new THREE.Group();
-    meshGroup.name = 'terrain';
-    for (const g of groups.values()) meshGroup.add(this.makeMesh(g, material));
-    // 원경 지형
-    const far = { pos: [], nor: [], colr: [], mask: [], idx: [] };
-    triCount += this.buildFar(far, col);
-    const farMesh = this.makeMesh(far, material);
-    farMesh.receiveShadow = false;
-    meshGroup.add(farMesh);
-    this.triangleCount = triCount;
-    return meshGroup;
+    return { res, nc, cs };
   }
 
-  makeMesh(g, material) {
+  buildMesh(material) {
+    this.buildGroundMask();
+    const M = CONFIG.terrain.mesh;
+    const half = this.half;
+    const { res, nc, cs } = this.chunkResolutions();
+    const gc = Math.max(1, Math.round(M.group / cs));
+    const ng = Math.ceil(nc / gc);
+    const root = new THREE.Group();
+    root.name = 'terrain';
+    let tris = 0;
+    let farTris = 0;
+    this.lods = [];
+    for (let gj = 0; gj < ng; gj++) {
+      for (let gi = 0; gi < ng; gi++) {
+        const near = { pos: [], nor: [], colr: [], idx: [] };
+        const far = { pos: [], nor: [], colr: [], idx: [] };
+        const g = { ci0: gi * gc, cj0: gj * gc, ci1: Math.min(nc, (gi + 1) * gc) - 1, cj1: Math.min(nc, (gj + 1) * gc) - 1 };
+        for (let cj = g.cj0; cj <= g.cj1; cj++) {
+          for (let ci = g.ci0; ci <= g.ci1; ci++) {
+            tris += this.buildChunk(near, ci, cj, res, nc, cs, 0, g);
+            farTris += this.buildChunk(far, ci, cj, res, nc, cs, 2, g);
+          }
+        }
+        const cx = -half + (g.ci0 + g.ci1 + 1) * cs * 0.5;
+        const cz = -half + (g.cj0 + g.cj1 + 1) * cs * 0.5;
+        const lod = new THREE.LOD();
+        lod.name = 'terrainGroup';
+        lod.position.set(cx, this.heightAt(cx, cz), cz);
+        lod.updateMatrix();
+        lod.matrixAutoUpdate = false;
+        lod.addLevel(this.makeMesh(near, material, lod.position), 0, 0);
+        lod.addLevel(this.makeMesh(far, material, lod.position), M.lodDistance, M.lodHysteresis);
+        this.lods.push(lod);
+        root.add(lod);
+      }
+    }
+    // 원경 지형
+    const farRing = { pos: [], nor: [], colr: [], idx: [] };
+    const ringTris = this.buildFar(farRing);
+    const farMesh = this.makeMesh(farRing, material);
+    farMesh.receiveShadow = false;
+    farMesh.name = 'terrainFar';
+    root.add(farMesh);
+    this.triangleCount = tris + ringTris;
+    this.farLodTriangleCount = farTris;
+    return root;
+  }
+
+  // 그래픽 품질 프리셋용: 근거리 → 원거리 LOD 전환 거리 (m)
+  setLodDistance(d) {
+    for (const lod of this.lods) if (lod.levels[1]) lod.levels[1].distance = d;
+  }
+
+  makeMesh(g, material, offset = null) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(g.pos, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(g.nor, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(g.colr, 3));
-    geo.setAttribute('aMask', new THREE.Float32BufferAttribute(g.mask, 3));
     const vcount = g.pos.length / 3;
     geo.setIndex(vcount > 65535 ? new THREE.Uint32BufferAttribute(g.idx, 1) : new THREE.Uint16BufferAttribute(g.idx, 1));
     geo.computeBoundingSphere();
     geo.computeBoundingBox();
     const mesh = new THREE.Mesh(geo, material);
     mesh.receiveShadow = true;
+    // 정점은 월드 좌표 그대로: LOD 묶음의 위치만큼 되돌린다
+    if (offset) mesh.position.set(-offset.x, -offset.y, -offset.z);
+    mesh.updateMatrix();
     mesh.matrixAutoUpdate = false;
+    if (material.userData.onTerrainRender) mesh.onBeforeRender = material.userData.onTerrainRender;
     return mesh;
   }
 
-  vertexAttribs(x, z, h, rx, rz, g, col) {
-    // 법선 (청크 해상도 간격의 중앙차분)
-    const sx = (this.gridHeight(x + rx, z) - this.gridHeight(x - rx, z)) / (2 * rx);
-    const sz = (this.gridHeight(x, z + rz) - this.gridHeight(x, z - rz)) / (2 * rz);
-    let nx = -sx;
-    let ny = 1;
-    let nzz = -sz;
-    const nl = Math.hypot(nx, ny, nzz);
-    nx /= nl;
-    ny /= nl;
-    nzz /= nl;
-    g.nor.push(nx, ny, nzz);
-    // 색: 지면 종류 + 변화 + 오목한 곳 어둡게
-    const s = this.surfaceAt(x, z);
-    col.setHex(SURFACE_COLORS[s] ?? 0x5a5040);
-    const v1 = this.noise.noise(x / 7.3, z / 7.3);
-    const v2 = this.noise.noise(x / 1.9 + 3, z / 1.9 - 7);
-    let k = 1 + 0.13 * v1 + 0.05 * v2;
-    const r2 = 2.0;
-    const avg = (this.heightAt(x + r2, z) + this.heightAt(x - r2, z) + this.heightAt(x, z + r2) + this.heightAt(x, z - r2)) * 0.25;
-    const ao = clamp(1 + (h - avg) * 0.45, 0.55, 1.1);
-    k *= ao;
-    // 풀밭은 노랑-회색 사이 변화
-    if (s === SID.grass) {
-      const t = 0.5 + 0.5 * this.noise.noise(x / 18 + 40, z / 18);
-      col.r *= 0.9 + t * 0.2;
-      col.b *= 1.05 - t * 0.2;
-    }
-    g.colr.push(col.r * k, col.g * k, col.b * k);
-    const m = SURFACE_MASK[s] ?? [1, 0, 0];
-    g.mask.push(m[0], m[1], m[2]);
-  }
-
-  buildChunk(g, x0, z0, size, rx, rz, col) {
-    const nvx = Math.round(size / rx) + 1;
-    const nvz = Math.round(size / rz) + 1;
+  // 청크 하나 (lvl 0 = 근거리, 2 = 원거리). 이웃과 해상도가 다르거나 묶음 경계면 스커트로 틈을 가린다.
+  buildChunk(g, ci, cj, res, nc, cs, lvl, grp) {
+    const k = (cj * nc + ci) * 4;
+    const rx = res[k + lvl];
+    const rz = res[k + lvl + 1];
+    const x0 = -this.half + ci * cs;
+    const z0 = -this.half + cj * cs;
+    const nvx = Math.round(cs / rx) + 1;
+    const nvz = Math.round(cs / rz) + 1;
+    const fine = Math.min(rx, rz) <= 1.25;
     const base = g.pos.length / 3;
     for (let j = 0; j < nvz; j++) {
       const z = z0 + j * rz;
@@ -716,7 +1364,12 @@ export class Terrain {
         const x = x0 + i * rx;
         const h = this.gridHeight(x, z);
         g.pos.push(x, h, z);
-        this.vertexAttribs(x, z, h, rx, rz, g, col);
+        // 법선 (청크 해상도 간격의 중앙차분)
+        const sx = (this.gridHeight(x + rx, z) - this.gridHeight(x - rx, z)) / (2 * rx);
+        const sz = (this.gridHeight(x, z + rz) - this.gridHeight(x, z - rz)) / (2 * rz);
+        const nl = Math.hypot(sx, 1, sz);
+        g.nor.push(-sx / nl, 1 / nl, -sz / nl);
+        this.vertexColor(x, z, h, fine, g.colr);
       }
     }
     for (let j = 0; j < nvz - 1; j++) {
@@ -731,28 +1384,31 @@ export class Terrain {
       }
     }
     let tris = (nvx - 1) * (nvz - 1) * 2;
-    // 스커트 (해상도가 다른 청크 사이 틈 가림)
+    // 스커트: 이웃 청크와 변 방향 해상도가 다르거나, 묶음(LOD) 경계, 맵 가장자리
+    const nres = (ni, nj, axis) => {
+      if (ni < 0 || nj < 0 || ni >= nc || nj >= nc) return -1;
+      return res[(nj * nc + ni) * 4 + lvl + axis];
+    };
+    const outer = (ni, nj) => ni < grp.ci0 || ni > grp.ci1 || nj < grp.cj0 || nj > grp.cj1;
+    const edges = [];
+    if (outer(ci, cj - 1) || nres(ci, cj - 1, 0) !== rx) edges.push([...Array(nvx).keys()]);
+    if (outer(ci, cj + 1) || nres(ci, cj + 1, 0) !== rx) edges.push([...Array(nvx).keys()].map((i) => (nvz - 1) * nvx + i));
+    if (outer(ci - 1, cj) || nres(ci - 1, cj, 1) !== rz) edges.push([...Array(nvz).keys()].map((j) => j * nvx));
+    if (outer(ci + 1, cj) || nres(ci + 1, cj, 1) !== rz) edges.push([...Array(nvz).keys()].map((j) => j * nvx + nvx - 1));
     const sd = CONFIG.world.skirtDepth;
-    const edges = [
-      { list: [...Array(nvx).keys()].map((i) => i) },
-      { list: [...Array(nvx).keys()].map((i) => (nvz - 1) * nvx + i) },
-      { list: [...Array(nvz).keys()].map((j) => j * nvx) },
-      { list: [...Array(nvz).keys()].map((j) => j * nvx + nvx - 1) },
-    ];
-    for (const e of edges) {
+    for (const list of edges) {
       const start = g.pos.length / 3;
-      for (const local of e.list) {
+      for (const local of list) {
         const vi = base + local;
         g.pos.push(g.pos[vi * 3], g.pos[vi * 3 + 1] - sd, g.pos[vi * 3 + 2]);
         g.nor.push(g.nor[vi * 3], g.nor[vi * 3 + 1], g.nor[vi * 3 + 2]);
         g.colr.push(g.colr[vi * 3] * 0.8, g.colr[vi * 3 + 1] * 0.8, g.colr[vi * 3 + 2] * 0.8);
-        g.mask.push(g.mask[vi * 3], g.mask[vi * 3 + 1], g.mask[vi * 3 + 2]);
       }
-      for (let k = 0; k < e.list.length - 1; k++) {
-        const a = base + e.list[k];
-        const b = base + e.list[k + 1];
-        const c = start + k;
-        const d = start + k + 1;
+      for (let q = 0; q < list.length - 1; q++) {
+        const a = base + list[q];
+        const b = base + list[q + 1];
+        const c = start + q;
+        const d = start + q + 1;
         // 양면처럼 보이게 두 방향 모두
         g.idx.push(a, c, b, b, c, d, a, b, c, b, d, c);
         tris += 4;
@@ -761,26 +1417,26 @@ export class Terrain {
     return tris;
   }
 
-  buildFar(g, col) {
+  buildFar(g) {
     const W = CONFIG.world;
+    const V = CONFIG.ground.variation;
     const ext = W.farExtent;
     const step = W.farRes;
     const half = this.half;
     const nv = Math.round((2 * ext) / step) + 1;
     const base = g.pos.length / 3;
-    const fieldNoise = (x, z) => this.noise.noise(x / 260 + 50, z / 260 - 20);
+    const hAt = (x, z) => (Math.abs(x) <= half && Math.abs(z) <= half ? this.gridHeight(x, z) : this.baseHeight(x, z)) - 0.05;
     for (let j = 0; j < nv; j++) {
       const z = -ext + j * step;
       for (let i = 0; i < nv; i++) {
         const x = -ext + i * step;
-        const inside = Math.abs(x) <= half && Math.abs(z) <= half;
-        const h = inside ? this.gridHeight(x, z) - 0.05 : this.baseHeight(x, z) - 0.05;
-        g.pos.push(x, h, z);
-        g.nor.push(0, 1, 0);
-        const f = fieldNoise(x, z);
-        col.setHex(f > 0.15 ? 0x3a3128 : f < -0.25 ? 0x6e6650 : 0x5c5541);
-        g.colr.push(col.r, col.g, col.b);
-        g.mask.push(0.5, 0.5, 0);
+        g.pos.push(x, hAt(x, z), z);
+        const sx = (hAt(x + step, z) - hAt(x - step, z)) / (2 * step);
+        const sz = (hAt(x, z + step) - hAt(x, z - step)) / (2 * step);
+        const nl = Math.hypot(sx, 1, sz);
+        g.nor.push(-sx / nl, 1 / nl, -sz / nl);
+        const v = 1 + V.amp[0] * this.noise.noise(x / V.size[0] + 17, z / V.size[0] - 4);
+        g.colr.push(v, v, v);
       }
     }
     let tris = 0;
@@ -801,45 +1457,58 @@ export class Terrain {
   }
 }
 
-// 지형 재질: 정점색 × 지면별 디테일 텍스처
-export function createTerrainMaterial(textures) {
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+// 지형 재질: 표준(PBR) 재질 + 혼합 셰이더. 조명·그림자·안개·톤매핑은 Three.js 표준 경로 그대로.
+export function createTerrainMaterial(terrain) {
+  const G = CONFIG.ground;
+  const tex = groundTextures(G.textureSize, [...G.layerTile, G.detailTile]);
+  const macro = groundMacroTexture();
+  const mask = terrain.groundMaskTextures();
+  const parcels = [];
+  for (let i = 0; i < MAX_PARCELS; i++) {
+    const p = terrain.parcels[i];
+    parcels.push(p ? new THREE.Vector4(p.dirX, p.dirZ, p.spacing, p.depth) : new THREE.Vector4(0, 1, 1, 0));
+  }
+  const uniforms = {
+    tSplatA: { value: mask.a },
+    tSplatB: { value: mask.b },
+    tGAlb: { value: tex.albedo },
+    tGNrm: { value: tex.normal },
+    tMacro: { value: macro },
+    uParcel: { value: parcels },
+    // 물·젖은 흙에 비치는 흐린 하늘 (지평선 색). 대기 쪽에서 바꾸면 여기 값을 갱신하면 된다
+    uSkyRefl: { value: new THREE.Color(CONFIG.atmosphere.skyHorizon) },
+    uPomDist: { value: CONFIG.terrain.furrow.pomDistance },
+  };
+  const parts = terrainShaderParts({ maskN: mask.N, half: terrain.half });
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+  mat.name = 'terrain';
+  mat.userData.terrainUniforms = uniforms;
   mat.onBeforeCompile = (shader) => {
-    shader.uniforms.tSoil = { value: textures.soil };
-    shader.uniforms.tGrass = { value: textures.grass };
-    shader.uniforms.tMud = { value: textures.mud };
+    Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace(
-        '#include <common>',
-        '#include <common>\nattribute vec3 aMask;\nvarying vec3 vMask;\nvarying vec3 vWPos;\nvarying float vViewDist;',
-      )
-      .replace(
-        '#include <begin_vertex>',
-        '#include <begin_vertex>\nvMask = aMask;\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
-      )
-      .replace('#include <project_vertex>', '#include <project_vertex>\nvViewDist = -mvPosition.z;');
+      .replace('#include <common>', `#include <common>\n${parts.vertPars}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${parts.vertBegin}`)
+      .replace('#include <project_vertex>', `#include <project_vertex>\n${parts.vertProject}`);
     shader.fragmentShader = shader.fragmentShader
-      .replace(
-        '#include <common>',
-        '#include <common>\nuniform sampler2D tSoil;\nuniform sampler2D tGrass;\nuniform sampler2D tMud;\nvarying vec3 vMask;\nvarying vec3 vWPos;\nvarying float vViewDist;',
-      )
-      .replace(
-        '#include <color_fragment>',
-        `#include <color_fragment>
-        {
-          vec2 wp = vWPos.xz;
-          float s1 = texture2D(tSoil, wp * 0.31).r;
-          float s2 = texture2D(tSoil, wp * 0.047 + 0.31).r;
-          float dSoil = s1 * s2 * 2.0;
-          float dGrass = texture2D(tGrass, wp * 0.43).r * (0.75 + 0.5 * s2);
-          float dMud = texture2D(tMud, wp * 0.19).r * (0.8 + 0.4 * s2);
-          vec3 m = vMask / max(vMask.x + vMask.y + vMask.z, 0.001);
-          float detail = (dSoil * m.x + dGrass * m.y + dMud * m.z) * 2.0;
-          float fade = smoothstep(70.0, 260.0, vViewDist);
-          detail = mix(detail, 1.0, fade * 0.7);
-          diffuseColor.rgb *= detail;
-        }`,
-      );
+      .replace('#include <common>', `#include <common>\n${parts.fragPars}`)
+      .replace('#include <color_fragment>', `#include <color_fragment>\n${parts.fragMain}`)
+      .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = tRough;')
+      .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz);')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += tEmis;');
+  };
+  mat.customProgramCacheKey = () => 'terrainSplat';
+  // 첫 렌더 직전에 텍스처 이방성 필터를 GPU 최대값으로 (밉맵 + 이방성: 먼 바닥이 길게 번지지 않게)
+  let anisoDone = false;
+  mat.userData.onTerrainRender = (renderer) => {
+    if (anisoDone) return;
+    anisoDone = true;
+    const a = renderer.capabilities.getMaxAnisotropy();
+    for (const t of [tex.albedo, tex.normal, mask.a, mask.b, macro]) {
+      if (t.anisotropy !== a) {
+        t.anisotropy = a;
+        t.needsUpdate = true;
+      }
+    }
   };
   return mat;
 }

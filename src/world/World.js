@@ -11,7 +11,55 @@ import { GeoBatch } from './geom.js';
 import { StructureBuilder, InstanceCollector } from './Structures.js';
 import { Vegetation, windUniforms } from './Vegetation.js';
 import { createVisualMaterials } from './visualMaterials.js';
-import * as TX from './textures.js';
+
+// 물웅덩이 재질: 흐린 하늘(지평선~천정 색)을 프레넬로 비추는 평평한 수면 (낮은 각도일수록 밝은 회색).
+// 안개·톤매핑은 표준 경로. 하늘색은 CONFIG.atmosphere 에서 읽고, 바꾸려면 userData.puddleUniforms 를 갱신.
+function createPuddleMaterial() {
+  const A = CONFIG.atmosphere;
+  const P = CONFIG.ground.puddle;
+  const mat = new THREE.MeshBasicMaterial({
+    color: P.deepColor,
+    transparent: true,
+    opacity: P.opacity,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const uniforms = {
+    uHorizon: { value: new THREE.Color(A.skyHorizon) },
+    uZenith: { value: new THREE.Color(A.skyZenith) },
+    uReflect: { value: P.reflect },
+  };
+  mat.name = 'puddle';
+  mat.userData.puddleUniforms = uniforms;
+  mat.userData.noShadow = true;
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, uniforms);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vPWPos;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform vec3 uHorizon;\nuniform vec3 uZenith;\nuniform float uReflect;\nvarying vec3 vPWPos;')
+      .replace(
+        '#include <opaque_fragment>',
+        `{
+          vec3 V = normalize(vPWPos - cameraPosition);
+          // 바람에 아주 약한 잔물결
+          vec2 q = vPWPos.xz * 3.1;
+          vec3 N = normalize(vec3(0.012 * sin(q.x + 1.7 * sin(q.y)), 1.0, 0.012 * sin(q.y * 1.3 + 1.1 * sin(q.x))));
+          vec3 R = reflect(V, N);
+          vec3 sky = mix(uHorizon, uZenith, pow(clamp(R.y, 0.0, 1.0), 0.55));
+          float fres = clamp(0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0), 0.0, 1.0);
+          outgoingLight = mix(outgoingLight, sky * uReflect, fres);
+          diffuseColor.a = mix(diffuseColor.a, 1.0, fres);
+        }
+        #include <opaque_fragment>`,
+      );
+  };
+  mat.customProgramCacheKey = () => 'puddleSky';
+  return mat;
+}
 
 export class World {
   constructor(scene) {
@@ -46,11 +94,8 @@ export class World {
 
   finalize() {
     const scene = this.scene;
-    const terrainMat = createTerrainMaterial({
-      soil: TX.soilDetail(),
-      grass: TX.grassDetail(),
-      mud: TX.mudDetail(),
-    });
+    const terrainMat = createTerrainMaterial(this.terrain);
+    this.terrainMaterial = terrainMat;
     this.terrainMesh = this.terrain.buildMesh(terrainMat);
     scene.add(this.terrainMesh);
     this.staticMeshes = this.batch.build(this.materials, { name: 'structures' });
@@ -114,6 +159,8 @@ export class World {
     return mesh;
   }
 
+  // 물웅덩이: 수로 물 구간, 깊은 구덩이 바닥, 바퀴 자국. 모두 평평한 수면이고 가장자리는 지형이 가린다.
+  // 흐린 하늘을 프레넬로 비춰 어두운 땅 위에 밝은 선·점으로 보인다 (원근감 단서).
   buildPuddles() {
     const t = this.terrain;
     const pos = [];
@@ -138,10 +185,24 @@ export class World {
           pts.push([x, y, zc - w, x, y, zc + w]);
         }
         pushQuadStrip(pts);
+      } else if (p.type === 'strip') {
+        // 바퀴 자국을 따라 길쭉한 수면
+        const pts = [];
+        const L = p.pts;
+        for (let i = 0; i < L.length; i++) {
+          const a = L[Math.max(0, i - 1)];
+          const b = L[Math.min(L.length - 1, i + 1)];
+          const dl = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+          const nx = -(b[1] - a[1]) / dl;
+          const nz = (b[0] - a[0]) / dl;
+          const w = p.hw * (0.85 + 0.15 * Math.sin(i * 1.7 + L[0][0]));
+          pts.push([L[i][0] - nx * w, p.level, L[i][1] - nz * w, L[i][0] + nx * w, p.level, L[i][1] + nz * w]);
+        }
+        pushQuadStrip(pts);
       } else {
-        const seg = 14;
+        const seg = 16;
         const base = pos.length / 3;
-        const y = p.crater ? t.heightAt(p.x, p.z) + p.crater.d * 0.16 : t.heightAt(p.x, p.z) + 0.03;
+        const y = p.level ?? (p.crater ? t.heightAt(p.x, p.z) + p.crater.d * 0.16 : t.heightAt(p.x, p.z) + 0.03);
         pos.push(p.x, y, p.z);
         const st = p.stretch;
         for (let i = 0; i <= seg; i++) {
@@ -168,7 +229,7 @@ export class World {
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
     geo.setIndex(idx);
     geo.computeBoundingSphere();
-    const mesh = new THREE.Mesh(geo, this.materials.water);
+    const mesh = new THREE.Mesh(geo, createPuddleMaterial());
     mesh.name = 'puddles';
     mesh.renderOrder = 1;
     return mesh;

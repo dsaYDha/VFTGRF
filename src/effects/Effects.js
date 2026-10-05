@@ -145,6 +145,7 @@ export class Effects {
     _n.set(imp.nx, imp.ny, imp.nz);
     const fx = imp.effect;
     if (fx === 'dirt') this.dirt(imp, s, false);
+    else if (fx === 'subsoil') this.dirt(imp, s, false, true);
     else if (fx === 'mud') this.dirt(imp, s, true);
     else if (fx === 'water') this.water(imp, s);
     else if (fx === 'concrete') this.mineral(imp, s, 0x9b9890, 0x8c8a84);
@@ -207,9 +208,10 @@ export class Effects {
     }
   }
 
-  dirt(imp, s, wet) {
+  dirt(imp, s, wet, light = false) {
     // 흙먼지 기둥 (멀리서도 보이도록 밝은 흙빛 + 어두운 흙 줄기) + 흙덩이
-    const brown = wet ? 0x5a4c3e : 0x7c6b57;
+    // light: 파낸 하층토 (흉벽·구덩이 분출물) — 밝은 황갈색 먼지
+    const brown = light ? 0x9c8664 : wet ? 0x5a4c3e : 0x7c6b57;
     const vk = 0.65 + 0.35 * s;
     this.spray(imp, wet ? 4 : 6, [1.5, 4.5], 2.0, {
       sys: this.dust,
@@ -226,14 +228,14 @@ export class Effects {
       sys: this.dust,
       life: [0.8, 1.3],
       size: [0.12 * s, 0.55 * s],
-      color: wet ? 0x2e2620 : 0x43382d,
+      color: light ? 0x6e5c44 : wet ? 0x2e2620 : 0x43382d,
       alpha: 1,
       drag: 3.0,
       gravity: 6,
       up: 1.5,
       velScale: vk,
     });
-    this.chips(imp, wet ? 9 : 6, s, wet ? 0x2a221c : 0x3a3027, 0.05, [2, 6]);
+    this.chips(imp, wet ? 9 : 6, s, light ? 0x8a7454 : wet ? 0x2a221c : 0x3a3027, 0.05, [2, 6]);
   }
 
   water(imp, s) {

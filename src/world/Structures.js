@@ -375,7 +375,7 @@ export class StructureBuilder {
     const doorW = 7;
     const walls = [
       { a: [-W / 2, D / 2 - t / 2], b: [W / 2, D / 2 - t / 2], door: true },
-      { a: [-W / 2, -D / 2 + t / 2], b: [W / 2, -D / 2 + t / 2] },
+      { a: [-W / 2, -D / 2 + t / 2], b: [W / 2, -D / 2 + t / 2], backDoor: 3 },
       { a: [W / 2 - t / 2, -D / 2 + t], b: [W / 2 - t / 2, D / 2 - t] },
       { a: [-W / 2 + t / 2, -D / 2 + t], b: [-W / 2 + t / 2, D / 2 - t] },
     ];
@@ -386,6 +386,8 @@ export class StructureBuilder {
       const openings = [];
       if (w.door) openings.push({ s0: len / 2 - doorW / 2, s1: len / 2 + doorW / 2, y0: 0, y1: 4.2 });
       else openings.push({ s0: len / 2 - 0.8, s1: len / 2 + 0.8, y0: 2.6, y1: 3.4 });
+      // 뒷문 (뒤편에서 들어오는 증원용)
+      if (w.backDoor !== undefined) openings.push({ s0: len / 2 + w.backDoor - 0.6, s1: len / 2 + w.backDoor + 0.6, y0: 0, y1: 2.1 });
       const collapses = w.door ? [{ s0: len - 4, s1: len, h: 3.0 }] : [];
       this.wall({
         ox: ax,
@@ -578,17 +580,25 @@ export class StructureBuilder {
     const fz = Math.cos(yaw);
     const rx = Math.cos(yaw);
     const rz = -Math.sin(yaw);
+    // 모래주머니는 사수 양옆 앞쪽에 쌓아 사격 구획을 만든다 (정면 ±40° 정도는 트여 있다)
+    const fwd = 0.95;
+    const inner = 0.68;
     for (const side of [-1, 1]) {
+      const bags = [];
       for (let k = 0; k < 2; k++) {
-        const px = x + fx * 1.25 + rx * side * (0.55 + k * 0.48);
-        const pz = z + fz * 1.25 + rz * side * (0.55 + k * 0.48);
-        const py = this.terrain.heightAt(px, pz);
+        const px = x + fx * fwd + rx * side * (inner + 0.24 + k * 0.48);
+        const pz = z + fz * fwd + rz * side * (inner + 0.24 + k * 0.48);
+        bags.push([px, this.terrain.heightAt(px, pz), pz]);
+      }
+      // 지그재그 참호의 꺾인 부분에서는 한쪽 자리가 참호 안이 된다 → 그쪽은 쌓지 않는다
+      if (bags.some((b) => b[1] < floorY + 0.9)) continue;
+      for (const [px, py, pz] of bags) {
         for (let lv = 0; lv < 2; lv++) {
           this.inst.add('sandbag', px, py + 0.08 + lv * 0.15, pz, 0, yaw + (lv ? 0.08 : -0.05), 0, 1, 1, 1, 0xffffff);
         }
       }
-      const cx = x + fx * 1.25 + rx * side * 0.79;
-      const cz = z + fz * 1.25 + rz * side * 0.79;
+      const cx = x + fx * fwd + rx * side * (inner + 0.48);
+      const cz = z + fz * fwd + rz * side * (inner + 0.48);
       const cy = this.terrain.heightAt(cx, cz) + 0.16;
       this.col.addBox(cx, cy, cz, 0.5, 0.16, 0.2, yaw, 'sandbag', null);
     }

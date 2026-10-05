@@ -64,6 +64,16 @@ export class HUD {
     this.root.classList.toggle('hidden', !v);
   }
 
+  // 새 임무 시작 시 이전 판의 표시 정리
+  reset() {
+    this.ammoPending = null;
+    this.ammoTimer = 0;
+    this.ammo.classList.remove('show');
+    this.boundary.textContent = '';
+    this.messages.textContent = '';
+    this.rested.classList.remove('show');
+  }
+
   set(el, key, text) {
     if (this.cache[key] !== text) {
       this.cache[key] = text;

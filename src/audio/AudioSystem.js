@@ -311,6 +311,8 @@ export class AudioSystem {
       L.setPosition(p.x, p.y, p.z);
       L.setOrientation(_f.x, _f.y, _f.z, _u.x, _u.y, _u.z);
     }
+    // 일시정지 등으로 오디오가 멈춰 있으면 배경음을 예약하지 않는다 (재개 순간 한꺼번에 터지지 않게)
+    if (ctx.state !== 'running') return;
     // 멀리서 울리는 포성
     const A = CONFIG.audio;
     this.nextArtillery -= dt;

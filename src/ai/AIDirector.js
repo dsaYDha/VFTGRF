@@ -5,7 +5,6 @@
 //  출발 조건(제압 25 미만 + 최근 3초간 근처에 탄 없음)이 안 되면 기다리다 포기 → '저지'.
 //  적이 전투 불능이 되면 30~60초 뒤 단지 뒤편에서 증원이 와 빈자리를 채운다.
 // =============================================================================
-import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
 import { AI_MAP } from '../world/mapData.js';
@@ -233,9 +232,7 @@ export class AIDirector {
     const ai = this.spawn();
     const t = this.game.world.terrain;
     ai.pos.set(sp[0], t.heightAt(sp[0], sp[1]), sp[1]);
-    const path = [];
-    for (const [x, z] of node.approach || []) path.push(new THREE.Vector3(x, t.heightAt(x, z), z));
-    path.push(fp.coverPos.clone());
+    const path = this.nav.approachPath(node, fp);
     ai.fp = fp;
     ai.yaw = Math.atan2(path[0].x - sp[0], path[0].z - sp[1]);
     ai.targetYaw = ai.yaw;
@@ -272,7 +269,11 @@ export class AIDirector {
       if (plan.state === 'pending') {
         if (!plan.ai.s.alive) this.endPlan('deterred', true);
         else if (now >= plan.earliest && plan.ai.canDepart()) {
-          if (!this.depart()) this.endPlan('deterred', true);
+          if (!this.depart()) {
+            // 그사이 증원·위치 변경으로 목적지가 찼다 → 시도 취소 (저지로 세지 않는다)
+            this.endPlan('cancelled', true);
+            this.game.events.emit(EV.ADVANCE_CANCELLED, { unit: plan.ai.s, to: plan.to.id, attempt: plan.id });
+          }
         } else if (now > plan.deadline) {
           // 출발을 포기 → 저지
           this.endPlan('deterred');

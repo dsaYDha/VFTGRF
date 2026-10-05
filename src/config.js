@@ -237,7 +237,7 @@ export const CONFIG = {
     rifleman: {
       weapon: 'ak545',
       spareMags: 14,
-      aimDispersionMrad: 3.4, // 조준 사격 기본 분산 (표준편차)
+      aimDispersionMrad: 4.8, // 조준 사격 기본 분산 (표준편차)
       blindFireDispersionMrad: 45,
       reactionTime: [0.35, 0.8],
       colors: { uniform: 0x5c5a45, uniform2: 0x48463a, vest: 0x4a4a3a, helmet: 0x3f4234, skin: 0x8a6e5a, boots: 0x1c1a17, gear: 0x2d2b25 },
@@ -254,6 +254,10 @@ export const CONFIG = {
     observeTimePressuredMul: 0.5,
     observeTimeCoveringFireMul: 0.6,
     aimTime: [0.45, 0.95], // 고개를 든 뒤 첫 발까지
+    firstShotDelay: [0.3, 0.5], // 사격 자세로 바꾼 뒤 첫 발까지 (견착)
+    // 사수 자신의 엄폐물에 탄이 막히는지: 눈 → 총구 → checkDist 앞까지(끝을 endDrop 만큼 낮춰) 검사,
+    // 막히면 liftStep 씩 maxLift 까지 들어 올리고 그래도 막히면 쏘지 않는다
+    ownCoverClear: { checkDist: 3.5, endDrop: 0.05, liftStep: 0.07, maxLift: 0.21, effectMaxOffset: 0.35 },
     burstChoice: { single: 0.45, two: 0.3, three: 0.25 },
     coveringFireBurst: [3, 5],
     burstInterval: 0.092, // 650rpm

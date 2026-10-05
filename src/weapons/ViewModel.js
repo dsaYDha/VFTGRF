@@ -261,8 +261,11 @@ export class ViewModel {
         if (p >= st[3].at - 0.05 && p < st[4].at) boltPull = 0.08 * Math.min(1, (p - st[3].at + 0.05) / 0.05);
       }
     } else {
+      // 재장전이 아니면 탄창은 제자리 (재장전 도중 재시작한 경우 포함)
       this.leftHand.position.set(0, 0, 0);
       this.mag.visible = w.magIndex >= 0;
+      this.mag.position.copy(this.magHome);
+      this.mag.rotation.set(0, 0, 0);
     }
     this.bolt.position.z = boltPull;
     // 조정간: 단발(아래) / 연발(가운데)

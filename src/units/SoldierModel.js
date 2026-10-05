@@ -365,6 +365,15 @@ export class SoldierModel {
     _e.set(c[CH.RIFLE_R], c[CH.RIFLE_R + 1], c[CH.RIFLE_R + 2], 'YXZ');
     _q2.setFromEuler(_e);
     _p.set(c[CH.RIFLE_P], c[CH.RIFLE_P + 1], c[CH.RIFLE_P + 2]);
+    // 엎드려 경사를 따라 몸을 기울였으면 총 위치도 엉덩이를 축으로 함께 돌린다 (방향은 조준 그대로)
+    if (this.slopePitch !== 0) {
+      const cs = Math.cos(this.slopePitch);
+      const sn = Math.sin(this.slopePitch);
+      const py = _p.y - c[CH.HIP_Y];
+      const pz = _p.z - c[CH.HIP_Z];
+      _p.y = c[CH.HIP_Y] + py * cs - pz * sn;
+      _p.z = c[CH.HIP_Z] + py * sn + pz * cs;
+    }
     _m2.compose(_p, _q2, _one);
     _m.invert();
     this.rifleLocal.multiplyMatrices(_m, _m2);

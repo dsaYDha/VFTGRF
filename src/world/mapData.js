@@ -148,7 +148,7 @@ export const MAP = {
         { side: 'south', s: 13, w: 1.8, y0: 1.2, y1: 2.8 },
         { side: 'north', s: -4, w: 3.2, y0: 0.3, y1: 2.7 },
       ],
-      loopholes: [{ side: 'south', s: 4.6, y0: 0.42, y1: 0.75, w: 0.5 }],
+      loopholes: [{ side: 'south', s: 4.6, y0: 0.2, y1: 0.56, w: 0.8 }],
       collapse: [{ side: 'south', s0: -28, s1: -21, h: 1.3 }],
       doors: [
         { side: 'north', s: 6, w: 2.4, h: 2.4 },
@@ -171,7 +171,7 @@ export const MAP = {
         { side: 'south', s: 4, w: 3.2, y0: 0.0, y1: 2.7 },
         { side: 'south', s: -19, w: 1.6, y0: 1.5, y1: 2.9 },
       ],
-      loopholes: [{ side: 'south', s: 12.6, y0: 0.4, y1: 0.72, w: 0.5 }],
+      loopholes: [{ side: 'south', s: 12.6, y0: 0.2, y1: 0.56, w: 0.8 }],
       collapse: [
         { side: 'south', s0: 23, s1: 30, h: 1.0 },
         { side: 'east', s0: -6, s1: 6, h: 1.6 },
@@ -319,7 +319,7 @@ export const AI_MAP = {
         [-52, -143],
       ],
       fps: [
-        { x: -66, z: -135.2, fire: 'stand', cover: 'duck', coverRef: 'B1', face: FACE },
+        { x: -63, z: -135.2, fire: 'stand', cover: 'duck', coverRef: 'B1', face: FACE },
         { x: -54, z: -135.2, fire: 'stand', cover: 'duck', coverRef: 'B1', face: FACE },
         { x: -53.4, z: -135.0, fire: 'prone', cover: 'prone', coverRef: 'B1', face: FACE, coverOffset: [0, -0.9] },
         { x: -42, z: -135.2, fire: 'stand', cover: 'duck', coverRef: 'B1', face: FACE },
@@ -353,8 +353,9 @@ export const AI_MAP = {
       light: 'building',
       exit: [[98, -120.5]],
       approach: [
-        [98, -150],
-        [98, -136],
+        [101, -150],
+        [101, -136],
+        [101, -131.5],
       ],
       fps: [
         { x: 93.5, z: -122.6, fire: 'kneel', cover: 'kneel', coverRef: 'GARAGE', face: FACE, fireOffset: [1.0, 0.2], coverOffset: [0, -0.6] },
@@ -382,9 +383,10 @@ export const AI_MAP = {
       next: ['F1'],
       light: 'trench',
       trenchLine: 0,
+      // 증원: 축사 B1 서쪽 끝을 돌아 연결호로 들어온다
       approach: [
-        [-61, -104],
-        [-60, -96],
+        [-98, -150],
+        [-90, -124],
       ],
       fps: [
         { x: -98, fire: 'stand', cover: 'duck', step: true, coverRef: 'terrain', face: FACE },
@@ -400,9 +402,10 @@ export const AI_MAP = {
       next: ['F2'],
       light: 'trench',
       trenchLine: 1,
+      // 증원: 축사 B2 동쪽 끝을 돌아 연결호로 들어온다
       approach: [
-        [55, -106],
-        [51, -97],
+        [78, -162],
+        [78, -118],
       ],
       fps: [
         { x: 30, fire: 'stand', cover: 'duck', step: true, coverRef: 'terrain', face: FACE },
@@ -457,7 +460,7 @@ export const AI_MAP = {
       vehicle: 'tractor',
       fps: [
         { local: [-1.9, 0.0], fireLocal: [-1.7, 1.75], fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE },
-        { local: [-2.5, -0.8], fireLocal: [-1.9, -1.9], fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE },
+        { local: [-2.5, -0.8], fireLocal: [-1.3, -2.7], fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE },
       ],
     },
   },

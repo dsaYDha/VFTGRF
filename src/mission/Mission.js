@@ -16,6 +16,7 @@ export class Mission {
     const ev = game.events;
     const isPlayer = (u) => u === game.player.body;
     ev.on(EV.ADVANCE_PLANNED, () => this.running && this.stats.attempts++);
+    ev.on(EV.ADVANCE_CANCELLED, () => this.running && this.stats.attempts--);
     ev.on(EV.ADVANCE_DETERRED, () => this.running && this.stats.deterred++);
     ev.on(EV.ADVANCE_STOPPED, () => this.running && this.stats.stopped++);
     ev.on(EV.ADVANCE_COMPLETED, () => this.running && this.stats.completed++);

@@ -18,6 +18,9 @@ const _muzzle = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _v = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const _origin = new THREE.Vector3();
+const _hit = {};
 
 export const STATE_NAMES = {
   cover: '엄폐',
@@ -62,6 +65,7 @@ export class EnemyAI {
     this.shots = 0;
     this.shotTimer = 0;
     this.burstIndex = 0;
+    this.lineBlocked = false; // 마지막 사격이 자기 엄폐물에 막혀 취소됐는지
   }
 
   get level() {
@@ -173,7 +177,8 @@ export class EnemyAI {
           this.shots = r < c.single ? 1 : r < c.single + c.two ? 2 : 3;
         }
         this.burstMode = this.shots > 1;
-        this.shotTimer = rand(0.05, 0.2);
+        // 총을 견착해 자세가 자리 잡은 뒤 첫 발
+        this.shotTimer = randRange(A.firstShotDelay);
         this.burstIndex = 0;
         this.perception.aimPoint(this.aimPointV || (this.aimPointV = new THREE.Vector3()));
         break;
@@ -201,7 +206,9 @@ export class EnemyAI {
     const atFp = fp && (name === 'cover' || name === 'observe' || name === 'fire' || name === 'blindfire' || name === 'pinned');
     s.inCover = !!atFp && (!fp.temp || fp.inCrater);
     s.coverRef = fp ? fp.coverRef : null;
-    s.coverFacing.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    // 엄폐물이 막아 주는 방향 = 사격 위치의 정면 (지금 몸이 향한 방향이 아니라)
+    const facing = atFp ? fp.yaw : this.yaw;
+    s.coverFacing.set(Math.sin(facing), 0, Math.cos(facing));
     s.model.setTint(atFp ? fp.light : 1);
   }
 
@@ -440,7 +447,8 @@ export class EnemyAI {
       }
     }
     if (this.shots <= 0 && this.shotTimer <= 0) {
-      this.pendingReposition = Math.random() < A.repositionChance;
+      this.pendingReposition = this.lineBlocked || Math.random() < A.repositionChance;
+      this.lineBlocked = false;
       this.firedThisCycle = false;
       this.setState('cover');
     }
@@ -467,7 +475,29 @@ export class EnemyAI {
     if (!w.canFire()) return false;
     s.model.getMuzzle(_muzzle);
     _aim.copy(this.aimPointV || this.perception.estimate);
-    _dir.subVectors(_aim, _muzzle);
+    // 조준 사격의 탄은 조준선(눈 → 조준점) 위 총구 거리에서 출발한다. 모델 총구는 자세 전환·경사 때문에
+    // 흉벽·구덩이 테두리 아래로 내려가 있을 수 있어 효과 위치로만 쓴다. 맹목 사격은 머리 위로 든 총구 그대로.
+    const start = blind ? _muzzle : s.getEyePos(_eye);
+    _dir.subVectors(_aim, start).normalize();
+    _origin.copy(start);
+    if (!blind) _origin.addScaledVector(_dir, w.def.muzzleForward);
+    // 자기 엄폐물(흉벽·차체·테두리)에 바로 막히면 조금 들어 올려 넘겨 쏜다. 그래도 막히면 쏘지 않는다.
+    const C = A.ownCoverClear;
+    let lift = 0;
+    for (;;) {
+      const ex = _origin.x + _dir.x * C.checkDist;
+      const ey = _origin.y + _dir.y * C.checkDist + lift - C.endDrop; // 분산 여유만큼 낮춰 검사
+      const ez = _origin.z + _dir.z * C.checkDist;
+      if (!this.shortLineBlocked(start.x, start.y + lift, start.z, ex, ey, ez)) break;
+      lift += C.liftStep;
+      if (lift > C.maxLift + 1e-6) {
+        // 이 자리에서는 그쪽으로 쏠 수 없다 → 다음 엄폐 때 다른 사격 위치로 옮긴다
+        if (!blind) this.lineBlocked = true;
+        return false;
+      }
+    }
+    _origin.y += lift;
+    _dir.subVectors(_aim, _origin);
     const range = _dir.length();
     _dir.normalize();
     // 탄 낙차 보정 (같은 탄도표)
@@ -488,14 +518,29 @@ export class EnemyAI {
       if (this.game.player.speedClass !== 'still' && this.perception.visible) sigma *= 1.4;
     }
     applyDispersion(_dir, sigma);
-    const ground = this.game.world.terrain.heightAt(_muzzle.x, _muzzle.z);
+    // 섬광·총구 먼지 위치: 모델 총구가 탄 출발점에서 많이 벗어나 있으면(자세 전환 중) 출발점을 쓴다
+    const fxPos = _muzzle.distanceToSquared(_origin) < C.effectMaxOffset * C.effectMaxOffset ? _muzzle : _origin;
+    const ground = this.game.world.terrain.heightAt(fxPos.x, fxPos.z);
     // 흉벽·구덩이 테두리 바로 위로 쏘면 총구 앞 흙먼지
     const fx = Math.sin(this.yaw);
     const fz = Math.cos(this.yaw);
-    const ahead = this.game.world.terrain.heightAt(_muzzle.x + fx * 0.6, _muzzle.z + fz * 0.6);
-    const nearGround = _muzzle.y - Math.max(ground, ahead) < CONFIG.effects.muzzleDustHeight;
-    w.discharge(_muzzle.clone(), _dir, { muzzle: _muzzle.clone(), muzzleNearGround: nearGround });
+    const ahead = this.game.world.terrain.heightAt(fxPos.x + fx * 0.6, fxPos.z + fz * 0.6);
+    const nearGround = fxPos.y - Math.max(ground, ahead) < CONFIG.effects.muzzleDustHeight;
+    w.discharge(_origin.clone(), _dir, { muzzle: fxPos.clone(), muzzleNearGround: nearGround });
     return true;
+  }
+
+  // 사수 바로 앞 짧은 선분이 막혔는지: 지형은 촘촘히 샘플링(테두리 마루를 놓치지 않게), 구조물·차체는 정확히
+  shortLineBlocked(ax, ay, az, bx, by, bz) {
+    const t = this.game.world.terrain;
+    const n = Math.max(2, Math.ceil(Math.hypot(bx - ax, by - ay, bz - az) / 0.08));
+    for (let i = 0; i <= n; i++) {
+      const f = i / n;
+      const x = ax + (bx - ax) * f;
+      const z = az + (bz - az) * f;
+      if (ay + (by - ay) * f - t.heightAt(x, z) < 0.02) return true;
+    }
+    return this.game.world.collision.segmentCast(ax, ay, az, bx, by, bz, _hit, { noTerrain: true });
   }
 
   // ------------------------------------------------------------------ 위치 변경 (같은 노드 안)
@@ -744,6 +789,7 @@ export class EnemyAI {
     this.occupy(node, fp);
     this.path = path;
     this.pathIdx = 0;
+    this.posTarget.copy(this.pos);
     this.state = 'travel';
     this.stateT = 0;
     this.exposed = false;
@@ -753,14 +799,17 @@ export class EnemyAI {
 
   updateTravel(dt) {
     const sp = CONFIG.ai.moveSpeeds.jog;
+    if (this.level >= LEVEL.PINNED) {
+      // 이동 중 고착: 그 자리에 엎드린다 (정지 중 위치 보정이 엉뚱한 곳으로 끌지 않게 목표를 현재 위치로)
+      this.posTarget.copy(this.pos);
+      this.s.model.setPose('proneLow', 10);
+      return 0;
+    }
     if (this.moveAlong(dt, sp)) {
       this.setState('cover');
       return 0;
     }
-    if (this.level >= LEVEL.PINNED) {
-      this.s.model.setPose('proneLow', 10);
-      return 0;
-    }
+    this.posTarget.copy(this.pos);
     this.s.model.setPose('walk', 6);
     return sp;
   }

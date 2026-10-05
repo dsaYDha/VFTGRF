@@ -57,17 +57,22 @@ export class Input {
       { passive: true },
     );
     document.addEventListener('contextmenu', (e) => e.preventDefault());
-    document.addEventListener('pointerlockchange', () => {
-      this.locked = document.pointerLockElement === this.canvas;
-      if (!this.locked) {
-        this.buttons.left = false;
-        this.buttons.right = false;
-      }
-      if (this.onLockChange) this.onLockChange(this.locked);
-    });
+    document.addEventListener('pointerlockchange', () => this.pollLock());
     document.addEventListener('pointerlockerror', () => {
       if (this.onLockChange) this.onLockChange(false, true);
     });
+  }
+
+  // 포인터 잠금 상태 확인. 이벤트가 빠지는 환경도 있어 매 프레임 확인하고, 바뀌었을 때만 알린다.
+  pollLock() {
+    const locked = document.pointerLockElement === this.canvas;
+    if (locked === this.locked) return;
+    this.locked = locked;
+    if (!locked) {
+      this.buttons.left = false;
+      this.buttons.right = false;
+    }
+    if (this.onLockChange) this.onLockChange(locked);
   }
 
   requestLock() {

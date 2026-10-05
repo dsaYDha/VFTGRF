@@ -109,10 +109,11 @@ export class Perception {
         this.estimate.x += (ox - this.estimate.x) * k;
         this.estimate.z += (oz - this.estimate.z) * k;
         this.estimate.y += (oy - this.estimate.y) * k;
-        // 화염·총성을 아무리 모아도 직접 본 것만큼 정확해지지는 않는다
+        // 화염·총성을 아무리 모아도 직접 본 것만큼 정확해지지는 않는다.
+        // 단, 이미 그보다 정확한 추정(또는 관측)이 있으면 하한 때문에 나빠지지는 않는다.
         const A = CONFIG.ai;
         const floor = source === 'sound' || source === 'shared' ? A.soundErrorMin : A.flashErrorMin;
-        this.sigma = Math.max(floor, 1 / Math.sqrt(w1 + w2));
+        this.sigma = Math.max(Math.min(floor, cur, sigma), 1 / Math.sqrt(w1 + w2));
         this.time = now;
         if (SOURCE_RANK[source] > SOURCE_RANK[this.source]) this.source = source;
         return true;

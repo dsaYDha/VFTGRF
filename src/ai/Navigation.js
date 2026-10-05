@@ -93,9 +93,10 @@ export class Navigation {
       const base = Math.atan2(face[0] - c.x, face[1] - c.z) + (fd.rim || 0);
       const dx = Math.sin(base);
       const dz = Math.cos(base);
-      // 엎드린 몸(골반)은 안쪽 경사면, 머리가 테두리 마루에 걸친다
-      x = c.x + dx * (c.r - 0.9);
-      z = c.z + dz * (c.r - 0.9);
+      // 엎드린 몸(골반)은 안쪽 경사면, 머리가 테두리 마루에 걸친다 (눈이 마루 위로 약 10cm)
+      const inset = node.rimInset ?? 0.8;
+      x = c.x + dx * (c.r - inset);
+      z = c.z + dz * (c.r - inset);
       fp.coverPos.set(c.x + dx * c.r * 0.3, 0, c.z + dz * c.r * 0.3);
       fp.crater = c;
     }
@@ -149,26 +150,65 @@ export class Navigation {
     return { x: last[0], z: last[1], nx: 0, nz: 1 };
   }
 
+  // 참호선을 따라 x0 → x1 로 갈 때 지나는 꺾이는 점들 (이동 방향 순서)
+  trenchCorners(line, x0, x1, out) {
+    const dir = Math.sign(x1 - x0);
+    const xs = [];
+    for (const [px] of line) if ((px - x0) * dir > 0.5 && (x1 - px) * dir > 0.5) xs.push(px);
+    xs.sort((p, q) => (p - q) * dir);
+    for (const px of xs) {
+      const p = this.trenchPointAtX(line, px);
+      out.push(new THREE.Vector3(p.x, 0, p.z));
+    }
+    return out;
+  }
+
   // 같은 노드 안 사격 위치 사이 경로 (참호는 참호선을 따라)
   pathBetweenFps(a, b) {
     const pts = [];
     const node = a.node;
     if (node.kind === 'trench' && a.node === b.node) {
-      const line = MAP.trench.lines[node.trenchLine];
-      const x0 = a.pos.x;
-      const x1 = b.pos.x;
-      const dir = Math.sign(x1 - x0);
-      // 참호선 꺾이는 점들을 지나간다
-      for (const [px] of line) {
-        if ((px - x0) * dir > 0.5 && (x1 - px) * dir > 0.5) {
-          const p = this.trenchPointAtX(line, px);
-          pts.push(new THREE.Vector3(p.x, 0, p.z));
-        }
-      }
+      this.trenchCorners(MAP.trench.lines[node.trenchLine], a.pos.x, b.pos.x, pts);
     } else {
       pts.push(a.coverPos.clone());
     }
     pts.push(b.coverPos.clone());
+    for (const p of pts) p.y = this.terrain.heightAt(p.x, p.z);
+    return pts;
+  }
+
+  // 증원이 노드로 들어가는 경로: 지정된 접근로(건물을 돌아가는 경유점) → 참호는 연결호로 들어와 참호선을 따라간다
+  approachPath(node, fp) {
+    const pts = [];
+    for (const [x, z] of node.approach || []) pts.push(new THREE.Vector3(x, 0, z));
+    if (node.kind === 'trench') {
+      const line = MAP.trench.lines[node.trenchLine];
+      // 이 참호선에 닿는 연결호 (첫 점이 참호선 위에 있는 것)
+      let comm = null;
+      let best = 3;
+      let xmin = Infinity;
+      let xmax = -Infinity;
+      for (const [px] of line) {
+        xmin = Math.min(xmin, px);
+        xmax = Math.max(xmax, px);
+      }
+      for (const cl of MAP.trench.commLines) {
+        const [jx, jz] = cl[0];
+        if (jx < xmin || jx > xmax) continue;
+        const d = Math.abs(this.trenchPointAtX(line, jx).z - jz);
+        if (d < best) {
+          best = d;
+          comm = cl;
+        }
+      }
+      if (comm) {
+        for (let i = comm.length - 1; i >= 0; i--) pts.push(new THREE.Vector3(comm[i][0], 0, comm[i][1]));
+        const j = this.trenchPointAtX(line, comm[0][0]);
+        pts.push(new THREE.Vector3(j.x, 0, j.z));
+        this.trenchCorners(line, j.x, fp.pos.x, pts);
+      }
+    }
+    pts.push(fp.coverPos.clone());
     for (const p of pts) p.y = this.terrain.heightAt(p.x, p.z);
     return pts;
   }

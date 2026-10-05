@@ -30,6 +30,7 @@ export const EV = {
   ADVANCE_DETERRED: 'advanceDeterred', // 출발 포기
   ADVANCE_STOPPED: 'advanceStopped', // 이동 중 고착
   ADVANCE_COMPLETED: 'advanceCompleted',
+  ADVANCE_CANCELLED: 'advanceCancelled', // 출발 시점에 목적지 빈자리가 없어 시도 자체가 취소됨 (시도 횟수에서 뺀다)
   ENEMY_REACHED_LINE: 'enemyReachedLine',
   REINFORCEMENT: 'reinforcement',
   MISSION_START: 'missionStart',

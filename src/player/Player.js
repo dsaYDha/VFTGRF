@@ -56,6 +56,7 @@ export class Player {
     this.transT = 1;
     this.transDur = 0.4;
     this.eyeHeight = CONFIG.player.eyeHeights.stand;
+    this.bodyShift = 0; // 몸 모델 앞뒤 보정 (updateBody)
     this.lean = 0;
     this.stamina = CONFIG.player.stamina.max;
     this.breath = 0;
@@ -444,7 +445,11 @@ export class Player {
 
   updateBody(dt) {
     const m = this.body.model;
-    m.root.position.copy(this.pos);
+    // 몸(피격·발견 판정용 모델)은 눈이 카메라 바로 밑에 오도록 앞뒤로 옮긴다.
+    // 엎드리면 머리가 골반보다 0.6m 앞이라 그대로 두면 머리가 카메라보다 앞(엄폐물 너머)에 나온다.
+    const fx = -Math.sin(this.yaw);
+    const fz = -Math.cos(this.yaw);
+    m.root.position.set(this.pos.x + fx * this.bodyShift, this.pos.y, this.pos.z + fz * this.bodyShift);
     m.root.rotation.y = this.yaw + Math.PI;
     const dmg = this.body.damage;
     if (dmg.incapacitated) m.setPose('deadBack', 4);
@@ -453,6 +458,11 @@ export class Player {
     m.aimPitch = -this.pitch;
     m.lean = this.lean;
     this.body.update(dt);
+    if (!dmg.incapacitated && dt > 0) {
+      m.getEyePos(_v);
+      const eyeAhead = (_v.x - this.pos.x) * fx + (_v.z - this.pos.z) * fz - this.bodyShift;
+      this.bodyShift = damp(this.bodyShift, -eyeAhead, 10, dt);
+    }
   }
 
   updateCamera(dt) {

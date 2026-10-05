@@ -128,6 +128,7 @@ export class Game {
     this.player.reset();
     this.screenFx.reset();
     this.debug.reset();
+    this.hud.reset();
   }
 
   pause() {
@@ -151,8 +152,10 @@ export class Game {
     this.input.requestLock();
   }
 
-  onLockChange(locked, failed) {
-    if (!locked && this.state === 'playing' && !failed) this.pause();
+  // 잠금이 풀리거나 잠금 요청이 거절되면(Esc 직후 너무 빨리 다시 누른 경우 등) 일시정지 화면으로.
+  // 잠금 없이 계속 진행되면 조준·사격·일시정지를 할 수 없는 상태로 적 사격만 받게 된다.
+  onLockChange(locked) {
+    if (!locked && this.state === 'playing') this.pause();
   }
 
   onMissionEnd(r) {
@@ -173,17 +176,24 @@ export class Game {
     if (!R.dynamicResolution || this.state !== 'playing' || dt <= 0 || dt > 0.25) return;
     this.dynAcc = (this.dynAcc || 0) + dt;
     this.dynFrames = (this.dynFrames || 0) + 1;
+    (this.dynDts || (this.dynDts = [])).push(dt);
     if (this.dynAcc < 2) return;
     const fps = this.dynFrames / this.dynAcc;
+    // 화면 주사율 상한 추정: 짧은 쪽 10% 프레임 간격. 50Hz·30Hz 화면이면 목표 fps 를 그에 맞춰 낮춘다
+    // (그렇지 않으면 GPU 여유가 있어도 목표에 못 미친다고 보고 해상도를 계속 내린다)
+    const dts = this.dynDts.sort((a, b) => a - b);
+    const displayFps = 1 / Math.max(1 / 240, dts[Math.floor(dts.length * 0.1)]);
+    const target = Math.min(R.targetFps, displayFps * 0.95);
+    this.dynDts.length = 0;
     this.dynAcc = 0;
     this.dynFrames = 0;
     const maxPr = Math.min(window.devicePixelRatio, R.pixelRatioMax);
     const pr = this.renderer.getPixelRatio();
     let next = pr;
-    if (fps < R.targetFps - 6) {
+    if (fps < target - 6) {
       next = Math.max(R.pixelRatioMin, pr - 0.15);
       this.dynGood = 0;
-    } else if (fps > R.targetFps + 1 && pr < maxPr) {
+    } else if (fps >= target - 1 && pr < maxPr) {
       // 여유가 연속 3번(6초) 확인될 때만 올린다 (깜빡임 방지)
       this.dynGood = (this.dynGood || 0) + 1;
       if (this.dynGood >= 3) {
@@ -222,6 +232,7 @@ export class Game {
     const rawDt = this.clock.getDelta();
     const dt = Math.min(0.05, rawDt);
     const input = this.input;
+    input.pollLock();
     if (input.wasPressed('F3')) this.debug.toggle();
 
     if (this.state === 'playing') {

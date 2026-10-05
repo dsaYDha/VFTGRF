@@ -12,6 +12,7 @@ import { StructureBuilder, InstanceCollector } from './Structures.js';
 import { Vegetation, windUniforms } from './Vegetation.js';
 import { createVisualMaterials } from './visualMaterials.js';
 import { ContactShadows } from './ContactShadows.js';
+import { Distant } from './Distant.js';
 
 // 물웅덩이 재질: 흐린 하늘(지평선~천정 색)을 프레넬로 비추는 평평한 수면 (낮은 각도일수록 밝은 회색).
 // 안개·톤매핑은 표준 경로. 하늘색은 CONFIG.atmosphere 에서 읽고, 바꾸려면 userData.puddleUniforms 를 갱신.
@@ -109,62 +110,20 @@ export class World {
     this.vegetation = new Vegetation({ terrain: this.terrain, col: this.collision, rng: this.rng });
     scene.add(this.vegetation.build());
     scene.add(this.buildPuddles());
-    scene.add(this.buildDistantVillages());
+    // 원경: 먼 마을 지붕·교회·급수탑·곡물 창고, 송전탑·전신주 행렬과 전선 (맵 밖, 거리순 병합 메시 — setDistantRange)
+    this.distant = new Distant({ terrain: this.terrain, col: this.collision });
+    scene.add(this.distant.build());
     // 차량·잔해·건물 아래 접지 그림자 (맵 데이터 + 구조물 코드가 더한 발자국, 메시 하나)
     scene.add(this.contactShadows.addFromMap().build());
   }
 
-  // 원경의 먼 마을 실루엣 (접근 불가). 다른 물체와 같은 안개를 받아 희미한 실루엣으로만 보인다
-  // (안개 식의 먼 곳 실루엣 몫 CONFIG.atmosphere.fog.farResidual)
-  buildDistantVillages() {
-    const rng = new Random(77);
-    const parts = [];
-    const A = CONFIG.atmosphere;
-    for (const c of MAP.distantSmoke) {
-      const a = (c.bearing * Math.PI) / 180;
-      const d = c.dist * 0.92;
-      const cx = Math.sin(a) * d;
-      const cz = -Math.cos(a) * d;
-      const n = 10 + Math.floor(rng.next() * 10);
-      for (let i = 0; i < n; i++) {
-        const w = rng.range(8, 18);
-        const h = rng.range(4, 8);
-        const g = new THREE.BoxGeometry(w, h, w * rng.range(0.6, 1.2));
-        // 지붕 (박공)
-        const roof = new THREE.ConeGeometry(w * 0.72, h * 0.5, 4);
-        roof.rotateY(Math.PI / 4);
-        roof.translate(0, h / 2 + h * 0.25, 0);
-        const off = (rng.next() - 0.5) * 260;
-        const along = (rng.next() - 0.5) * 60;
-        const px = cx + Math.cos(a) * off + Math.sin(a) * along;
-        const pz = cz + Math.sin(a) * off - Math.cos(a) * along;
-        for (const geo of [g, roof]) {
-          geo.translate(px, h / 2 - 1, pz);
-          parts.push(geo.index ? geo.toNonIndexed() : geo);
-        }
-      }
-      // 교회 탑이나 급수탑 하나
-      const tower = new THREE.CylinderGeometry(2.5, 3, rng.range(18, 26), 8);
-      tower.translate(cx + Math.cos(a) * 40, 10, cz + Math.sin(a) * 40);
-      parts.push(tower.toNonIndexed());
-    }
-    let count = 0;
-    for (const p of parts) count += p.attributes.position.count;
-    const pos = new Float32Array(count * 3);
-    let o = 0;
-    for (const p of parts) {
-      pos.set(p.attributes.position.array, o * 3);
-      o += p.attributes.position.count;
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.computeBoundingSphere();
-    // 어두운 지붕·벽 색 (안개가 섞어 거의 안개색이 된다)
-    const col = new THREE.Color(A.fogColor).multiplyScalar(0.3);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col, fog: true }));
-    mesh.name = 'distantVillages';
-    mesh.renderOrder = -5;
-    return mesh;
+  // 그래픽 품질 프리셋: 원경(맵 밖 지형·먼 마을·송전선)을 그리는 거리 (맵 중심에서 m, CONFIG.distant.maxRange 이하). 실행 중 바로 적용
+  setDistantRange(m) {
+    const r = Math.min(CONFIG.distant.maxRange, Math.max(this.terrain.half + 50, m));
+    CONFIG.distant.range = r;
+    this.terrain.setFarRange(r);
+    if (this.distant) this.distant.setRange(r);
+    return r;
   }
 
   // 물웅덩이: 수로 물 구간, 깊은 구덩이 바닥, 바퀴 자국. 모두 평평한 수면이고 가장자리는 지형이 가린다.

@@ -39,6 +39,8 @@ export class Game {
   }
 
   async init() {
+    // 그래픽 품질 프리셋 (브라우저에 기억된 값): 렌더러·월드를 만들기 전에 CONFIG 에 써 넣으면 로딩 단계가 그 값으로 만든다
+    this.setQualityConfig(this.loadQualityName());
     this.screens = new Screens(this);
     const step = async (text, frac) => {
       this.screens.setLoading(text, frac);
@@ -175,6 +177,74 @@ export class Game {
         this.startMission();
       });
     }, 400);
+  }
+
+  // ------------------------------------------------------------------ 그래픽 품질 프리셋 (CONFIG.quality)
+  // 브라우저에 기억된 프리셋 이름 (저장소를 쓸 수 없거나 모르는 이름이면 기본값)
+  loadQualityName() {
+    const Q = CONFIG.quality;
+    let name = null;
+    try {
+      name = window.localStorage.getItem(Q.storageKey);
+    } catch {
+      name = null; // 사생활 보호 모드·파일 열기 등 저장소가 막힌 환경
+    }
+    return Object.hasOwn(Q.presets, name || '') ? name : Q.default;
+  }
+
+  // 프리셋 수치를 원래 설정 키에 써 넣는다 (각 모듈은 그 키를 읽는다)
+  setQualityConfig(name) {
+    const P = CONFIG.quality.presets[name];
+    const R = CONFIG.render;
+    CONFIG.vegetation.density = P.vegetationDensity;
+    CONFIG.vegetation.lodScale = P.vegetationLod;
+    CONFIG.terrain.mesh.lodDistance = P.terrainLod;
+    CONFIG.distant.range = P.distantRange;
+    R.shadows = P.shadows;
+    R.shadowMapSize = P.shadowMapSize;
+    R.shadowRadius = P.shadowRadius;
+    R.pixelRatioMax = P.pixelRatioMax;
+    R.antialias = P.antialias;
+    this.quality = name;
+  }
+
+  // 실행 중 프리셋 바꾸기 (일시정지 메뉴): 다시 만들지 않고 각 모듈의 적용 함수만 부른다 → 다음 프레임부터 반영.
+  // 안티앨리어싱만 WebGL 문맥을 만들 때 정해지므로 페이지를 새로 고쳐야 바뀐다 (qualityNeedsReload)
+  setQuality(name) {
+    if (!Object.hasOwn(CONFIG.quality.presets, name)) return false;
+    this.setQualityConfig(name);
+    try {
+      window.localStorage.setItem(CONFIG.quality.storageKey, name);
+    } catch {
+      // 저장소가 막혀 있어도 이번 실행에는 적용된다
+    }
+    if (!this.ready) return true;
+    const w = this.world;
+    if (w.vegetation) w.vegetation.applyConfig();
+    w.terrain.setLodDistance(CONFIG.terrain.mesh.lodDistance);
+    w.setDistantRange(CONFIG.distant.range);
+    this.atmosphere.applyShadowSettings();
+    this.resetResolution();
+    return true;
+  }
+
+  // 지금 쓰는 WebGL 문맥의 안티앨리어싱이 프리셋과 다르면 true (새로 고침해야 적용)
+  qualityNeedsReload() {
+    const attr = this.renderer && this.renderer.getContextAttributes();
+    return !!attr && !!attr.antialias !== !!CONFIG.render.antialias;
+  }
+
+  // 렌더 해상도를 상한(render.pixelRatioMax)으로 되돌리고 동적 해상도 측정을 처음부터 (프리셋을 바꿨을 때)
+  resetResolution() {
+    const pr = Math.min(window.devicePixelRatio, CONFIG.render.pixelRatioMax);
+    this.dynAcc = 0;
+    this.dynFrames = 0;
+    this.dynGood = 0;
+    if (this.dynDts) this.dynDts.length = 0;
+    if (Math.abs(this.renderer.getPixelRatio() - pr) > 0.001) {
+      this.renderer.setPixelRatio(pr);
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
   }
 
   // 동적 해상도: 2초 평균이 목표보다 낮으면 픽셀 비율을 낮추고, 여유가 있으면 천천히 올린다

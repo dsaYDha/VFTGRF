@@ -13,12 +13,25 @@ const KEYS = [
   ['B', '단발 / 연발 전환'],
   ['마우스 휠', '가늠자 거리 100~600m'],
   ['T', '잔탄 확인'],
-  ['F3', '디버그 표시'],
+  ['F3', '디버그 / 성능 표시'],
+  ['F4', '점검 시점 (디버그 중)'],
   ['Esc', '일시정지'],
 ];
 
 function keysHtml() {
   return `<div class="keys">${KEYS.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('')}</div>`;
+}
+
+// 그래픽 품질 선택 칸 (CONFIG.quality.presets: 낮음 / 보통 / 높음) — 누르면 바로 적용 (Game.setQuality)
+function qualityHtml() {
+  const btns = Object.entries(CONFIG.quality.presets)
+    .map(([k, p]) => `<div class="btn" data-quality="${k}" style="margin:0 5px;padding:6px 26px;font-size:15px">${p.label}</div>`)
+    .join('');
+  return `<div class="quality-select" style="text-align:center;cursor:default">
+      <h2 style="text-align:left">그래픽 품질</h2>
+      <div>${btns}</div>
+      <div class="sub" data-quality-note style="margin-top:8px;min-height:2.9em;line-height:1.45"></div>
+    </div>`;
 }
 
 export class Screens {
@@ -33,6 +46,39 @@ export class Screens {
     this.result = $('screen-result');
     this.buildBriefing();
     this.buildPause();
+    this.bindQuality(this.briefing);
+    this.bindQuality(this.pause);
+  }
+
+  // 그래픽 품질 버튼: 누르면 바로 적용하고 선택 표시·설명을 갱신한다.
+  // 일시정지 화면은 아무 곳이나 클릭하면 계속하므로, 이 칸 안의 클릭은 위로 올려 보내지 않는다 (게임이 다시 시작되지 않게)
+  bindQuality(screen) {
+    const box = screen.querySelector('.quality-select');
+    if (!box) return;
+    box.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const b = e.target.closest('[data-quality]');
+      if (b && b.dataset.quality !== this.game.quality) this.game.setQuality(b.dataset.quality);
+      this.refreshQuality();
+    });
+    this.refreshQuality();
+  }
+
+  refreshQuality() {
+    const name = this.game.quality;
+    for (const b of document.querySelectorAll('[data-quality]')) {
+      const on = b.dataset.quality === name;
+      b.style.background = on ? '#8c8152' : '';
+      b.style.borderColor = on ? '#e0d09a' : '';
+      b.style.color = on ? '#fffbe8' : '';
+    }
+    const P = CONFIG.quality.presets[name];
+    if (!P) return;
+    let note =
+      `식생 밀도 ${Math.round(P.vegetationDensity * 100)}% · 식생 거리 ×${P.vegetationLod} · 그림자 ${P.shadows ? P.shadowMapSize : '끔'} · ` +
+      `지형 고해상도 ${P.terrainLod}m · 원경 ${(P.distantRange / 1000).toFixed(1)}km · 해상도 상한 ×${P.pixelRatioMax} · 안티앨리어싱 ${P.antialias ? '켬' : '끔'}`;
+    if (this.game.qualityNeedsReload()) note += '<br><span style="color:#e8c070">안티앨리어싱은 페이지를 새로 고치면(F5) 적용됩니다. 나머지는 바로 적용되었습니다.</span>';
+    for (const el of document.querySelectorAll('[data-quality-note]')) el.innerHTML = note;
   }
 
   setLoading(text, frac) {
@@ -71,6 +117,7 @@ export class Screens {
         </ul>
         <h2>조작</h2>
         ${keysHtml()}
+        ${qualityHtml()}
         <div style="text-align:center"><div class="btn" id="btn-start">작전 개시</div></div>
         <div class="sub" style="text-align:center;margin-top:8px">클릭하면 마우스가 화면에 고정됩니다 (Esc 로 해제). 소리를 켜 두세요.</div>
       </div>`;
@@ -78,10 +125,11 @@ export class Screens {
 
   buildPause() {
     this.pause.innerHTML = `
-      <div class="panel" style="width:min(560px,92vw);text-align:center">
+      <div class="panel" style="width:min(660px,92vw);text-align:center">
         <h1>일시정지</h1>
-        <div class="sub">클릭하면 계속합니다</div>
+        <div class="sub">빈 곳을 클릭하면 계속합니다</div>
         <div style="text-align:left;margin-top:14px">${keysHtml()}</div>
+        ${qualityHtml()}
         <div class="btn" id="btn-resume">계속</div>
         <div class="btn" id="btn-restart-pause" style="margin-left:10px;background:#4a4840">처음부터</div>
       </div>`;
@@ -89,11 +137,13 @@ export class Screens {
 
   showBriefing(onStart) {
     this.hideAll();
+    this.refreshQuality();
     this.briefing.classList.remove('hidden');
     document.getElementById('btn-start').onclick = onStart;
   }
 
   showPause(onResume, onRestart) {
+    this.refreshQuality();
     this.pause.classList.remove('hidden');
     document.getElementById('btn-restart-pause').onclick = (e) => {
       e.stopPropagation();

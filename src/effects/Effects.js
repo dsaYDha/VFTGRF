@@ -151,6 +151,7 @@ export class Effects {
     else if (fx === 'concrete') this.mineral(imp, s, 0x9b9890, 0x8c8a84);
     else if (fx === 'brick') this.mineral(imp, s, 0x8f6656, 0x7a4a3a);
     else if (fx === 'rubber') this.rubber(imp, s);
+    else if (fx === 'hay') this.hay(imp, s);
     else if (fx === 'metal') this.metal(imp, s);
     else if (fx === 'wood') this.wood(imp, s);
     else if (fx === 'sand') this.sand(imp, s);
@@ -271,6 +272,12 @@ export class Effects {
   rubber(imp, s) {
     this.spray(imp, 3, [1.5, 3.5], 2, { sys: this.dust, life: [0.8, 1.5], size: [0.14 * s, 0.6 * s], color: 0x3a3734, alpha: 0.6, drag: 2.6 });
     this.chips(imp, 5, s, 0x1e1d1c, 0.03, [2, 5]);
+  }
+
+  // 썩은 건초(곤포·더미): 누런 회갈색 짚 먼지 + 짚 부스러기, 불꽃 없음
+  hay(imp, s) {
+    this.spray(imp, 4, [1.2, 3.2], 2.2, { sys: this.dust, life: [1.2, 2.2], size: [0.2 * s, 1.0 * s], color: 0x8c7e62, alpha: 0.7, drag: 2.8, gravity: 0.3, up: 0.5 });
+    this.chips(imp, 7, s, 0x9a8a62, 0.035, [1.5, 4]);
   }
 
   metal(imp, s) {

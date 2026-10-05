@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import * as TX from './textures.js';
+import { MAP } from './mapData.js';
 
 export function createVisualMaterials() {
   const lam = (opts) => new THREE.MeshLambertMaterial({ vertexColors: true, ...opts });
@@ -28,6 +29,21 @@ export function createVisualMaterials() {
     rubber: lam({ color: 0x1d1c1b }),
     plain: lam({}),
     interior: lam({ color: 0x141312 }),
+    // 적 진지·집단농장 (Structures.barn·silo·farmFence·hay·rubbleHeap): 저장탑 전용 텍스처(구멍·탄흔·얼룩), ПО-2 무늬 담장 판,
+    // 썩은 건초, 벽돌 잔해 더미 (색은 정점색). 벽 데칼(그을음·탄흔)은 투명 아틀라스 (Structures.buildFarmExtras 에서 따로 그림)
+    silo: lam({ map: TX.siloTexture(CONFIG.farm.silo.textureSize[0], CONFIG.farm.silo.textureSize[1], { ...MAP.silo, height: MAP.silo.h, pocks: CONFIG.farm.silo.pocks }) }),
+    fencePanel: lam({ map: TX.fencePanelTexture(CONFIG.farm.fence.textureSize[0], CONFIG.farm.fence.textureSize[1]) }),
+    hay: lam({ map: TX.hayTexture() }),
+    rubbleHeap: lam({ map: TX.rubbleTexture() }),
+    farmDecal: new THREE.MeshLambertMaterial({
+      map: TX.farmDecalTexture(CONFIG.farm.decalTexture[0], CONFIG.farm.decalTexture[1]),
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -2,
+    }),
     camoNet: new THREE.MeshLambertMaterial({
       map: TX.camoNetTexture(),
       alphaTest: 0.45,
@@ -48,5 +64,6 @@ export function createVisualMaterials() {
   };
   m.water.userData.noShadow = true;
   m.camoNet.userData.noShadow = false;
+  m.farmDecal.userData.noShadow = true;
   return m;
 }

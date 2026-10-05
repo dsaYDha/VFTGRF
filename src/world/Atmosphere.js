@@ -271,7 +271,14 @@ export class Atmosphere {
       this.renderer.shadowMap.needsUpdate = on;
     }
     sun.castShadow = on;
-    if (!on) return;
+    if (!on) {
+      // 그림자를 끄면 그림자 맵 메모리도 돌려준다 (다시 켜면 새로 만든다)
+      if (sun.shadow.map) {
+        sun.shadow.map.dispose();
+        sun.shadow.map = null;
+      }
+      return;
+    }
     if (sun.shadow.mapSize.x !== R.shadowMapSize && sun.shadow.map) {
       sun.shadow.map.dispose();
       sun.shadow.map = null;

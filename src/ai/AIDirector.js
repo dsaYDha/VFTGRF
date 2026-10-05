@@ -162,6 +162,8 @@ export class AIDirector {
   depart() {
     const plan = this.plan;
     const ai = plan.ai;
+    // 계획 뒤 출발 전에 증원이 목적 노드 정원(cap)을 채웠으면 빈 사격 위치가 남아 있어도 출발하지 않는다 (정원 초과 방지)
+    if (!this.nav.nodeHasRoom(plan.to)) return false;
     const destFp = this.pickDestFp(ai, plan);
     if (!destFp) return false;
     let path;

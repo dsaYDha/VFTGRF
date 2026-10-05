@@ -99,6 +99,52 @@ export class CollisionWorld {
     this.concealers.push({ cx, cy, cz, hx, hy, hz, cos, sin, density: def.density, kind });
   }
 
+  // 이동만 막는 볼륨 (철조망 등, Y 회전 상자 + 높이 y0..y1): 탄·시야 판정(castColliders·lineBlocked)에는 없고
+  // 플레이어 이동(resolveCylinder)만 막는다. 탄은 그대로 통과하고 시야는 은폐 볼륨(addConcealer)이 따로 맡는다.
+  addMoveBlocker(cx, cz, hx, hz, rotY, y0, y1, tag = null) {
+    const cos = Math.cos(rotY);
+    const sin = Math.sin(rotY);
+    const ex = Math.abs(cos) * hx + Math.abs(sin) * hz;
+    const ez = Math.abs(sin) * hx + Math.abs(cos) * hz;
+    if (!this.moveBlockers) this.moveBlockers = [];
+    this.moveBlockers.push({ cx, cz, hx, hz, cos, sin, y0, y1, tag, min: [cx - ex, cz - ez], max: [cx + ex, cz + ez] });
+  }
+
+  // 이동 차단 볼륨에서 밀어내기 (resolveCylinder 안에서). 밀었으면 true
+  pushOutOfBlockers(pos, radius, height) {
+    let any = false;
+    for (const b of this.moveBlockers) {
+      if (pos.x < b.min[0] - radius || pos.x > b.max[0] + radius || pos.z < b.min[1] - radius || pos.z > b.max[1] + radius) continue;
+      if (b.y1 < pos.y || b.y0 > pos.y + height) continue;
+      const px = pos.x - b.cx;
+      const pz = pos.z - b.cz;
+      const lx = b.cos * px - b.sin * pz;
+      const lz = b.sin * px + b.cos * pz;
+      const qx = Math.max(-b.hx, Math.min(b.hx, lx));
+      const qz = Math.max(-b.hz, Math.min(b.hz, lz));
+      const ox = lx - qx;
+      const oz = lz - qz;
+      const d = Math.hypot(ox, oz);
+      if (d >= radius) continue;
+      if (d < 1e-6) {
+        // 중심이 안: 가장 얕은 축으로
+        const alongX = b.hx - Math.abs(lx) < b.hz - Math.abs(lz);
+        const nlx = alongX ? (b.hx + radius) * (Math.sign(lx) || 1) - lx : 0;
+        const nlz = alongX ? 0 : (b.hz + radius) * (Math.sign(lz) || 1) - lz;
+        pos.x += b.cos * nlx + b.sin * nlz;
+        pos.z += -b.sin * nlx + b.cos * nlz;
+      } else {
+        const push = radius - d;
+        const nlx = (ox / d) * push;
+        const nlz = (oz / d) * push;
+        pos.x += b.cos * nlx + b.sin * nlz;
+        pos.z += -b.sin * nlx + b.cos * nlz;
+      }
+      any = true;
+    }
+    return any;
+  }
+
   insert(c) {
     this.colliders.push(c);
     if (c.tag) {
@@ -460,6 +506,7 @@ export class CollisionWorld {
         pos.z += R[2] * nlx + R[8] * nlz;
         any = true;
       }
+      if (this.moveBlockers && this.pushOutOfBlockers(pos, radius, height)) any = true;
       if (!any) break;
       pushed = true;
     }

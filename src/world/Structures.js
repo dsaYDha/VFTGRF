@@ -7,7 +7,7 @@ import { CONFIG } from '../config.js';
 import { MAP, AI_MAP } from './mapData.js';
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { boxGeo, cylGeo, gableGeo, place, tint } from './geom.js';
-import { clamp } from '../core/mathUtils.js';
+import { clamp, polylineDistance } from '../core/mathUtils.js';
 import { Random } from '../core/Random.js';
 
 const _v = new THREE.Vector3();
@@ -15,6 +15,7 @@ const _m4 = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _zAxis = new THREE.Vector3(0, 0, 1);
 const _one = new THREE.Vector3(1, 1, 1);
+const _decalCol = new THREE.Color();
 
 // 물체 좌표계 (yaw 회전)
 function frame(x, z, rot, y = 0) {
@@ -27,6 +28,13 @@ function toW(o, lx, lz) {
 function offsetUV(g, du, dv) {
   const uv = g.attributes.uv;
   for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) + du, uv.getY(i) + dv);
+  return g;
+}
+
+// 상자 등 면마다 0..1 인 UV 를 [u0, u1] x [v0, v1] 로 줄인다 (텍스처 한 장의 일부만 쓰는 토막)
+function uvRect(g, u0, v0, u1, v1) {
+  const uv = g.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, u0 + uv.getX(i) * (u1 - u0), v0 + uv.getY(i) * (v1 - v0));
   return g;
 }
 
@@ -82,6 +90,8 @@ export class StructureBuilder {
     this.trenchDetails();
     this.barricade(MAP.barricade);
     for (const n of MAP.camoNets) this.camoNet(n, materials);
+    this.barbedWire();
+    this.farmProps();
     this.apc(MAP.apc);
     this.tractor(MAP.tractor);
     for (const c of MAP.cars) this.car(c);
@@ -147,8 +157,15 @@ export class StructureBuilder {
   }
 
   // ------------------------------------------------------------------ 축사
+  // 지붕은 무너져 서까래 일부만 남았다: 남은 칸은 서까래 쌍·평보·마룻대·중도리·슬레이트 몇 장, 무너진 칸은 벽 위 도리에
+  // 부러진 서까래 그루터기만 서 있거나 서까래가 축사 안으로 비스듬히 떨어졌다 (불난 축사는 검게 탔다).
+  // 벽: 포탄 구멍(맵 데이터 holes — 위쪽 가장자리는 벽돌이 들쭉날쭉), 창·구멍 위 그을음, 구멍 둘레 그을림, 탄흔·떨어져 나간
+  // 벽면·빗물 줄·습기 띠(데칼, barnWallDecals), 무너진 벽 둘레엔 벽돌 잔해 더미(rubbleHeap).
+  // 창문·사격 구멍·문·구멍(적 사격 위치와 증원 경로가 쓰는 것)의 위치와 크기는 바꾸지 않는다.
   barn(b) {
     const rng = this.rng;
+    const F = CONFIG.farm.barn;
+    const drng = new Random(CONFIG.world.seed + 951 + Math.round(b.x * 7 - b.z * 3));
     const floorY = this.terrain.heightAt(b.x, b.z);
     const o = frame(b.x, b.z, b.rot, floorY);
     const L = b.length;
@@ -156,18 +173,31 @@ export class StructureBuilder {
     const H = b.height;
     const t = 0.38;
     const matKey = b.brick === 'red' ? 'brickRed' : 'brickWhite';
+    // 이 축사 안에서 불이 난 자리 (건물 화재 연기 MAP.smokeSources) → 로컬 좌표
+    let fire = null;
+    for (const sm of MAP.smokeSources || []) {
+      const dx = sm.x - b.x;
+      const dz = sm.z - b.z;
+      const lx = dx * o.cos - dz * o.sin;
+      const lz = dx * o.sin + dz * o.cos;
+      if (Math.abs(lx) < L / 2 + 1 && Math.abs(lz) < W / 2 + 1) fire = { lx, lz };
+    }
     const sides = {
-      south: { a: [-L / 2, W / 2 - t / 2], b: [L / 2, W / 2 - t / 2] },
-      north: { a: [-L / 2, -(W / 2 - t / 2)], b: [L / 2, -(W / 2 - t / 2)] },
-      east: { a: [L / 2 - t / 2, -W / 2 + t], b: [L / 2 - t / 2, W / 2 - t] },
-      west: { a: [-(L / 2 - t / 2), -W / 2 + t], b: [-(L / 2 - t / 2), W / 2 - t] },
+      south: { a: [-L / 2, W / 2 - t / 2], b: [L / 2, W / 2 - t / 2], n: [0, 1] },
+      north: { a: [-L / 2, -(W / 2 - t / 2)], b: [L / 2, -(W / 2 - t / 2)], n: [0, -1] },
+      east: { a: [L / 2 - t / 2, -W / 2 + t], b: [L / 2 - t / 2, W / 2 - t], n: [1, 0] },
+      west: { a: [-(L / 2 - t / 2), -W / 2 + t], b: [-(L / 2 - t / 2), W / 2 - t], n: [-1, 0] },
     };
+    const collapsedS = {}; // 긴 벽의 무너진 구간 (로컬 s, 도리·서까래용)
     for (const [side, sd] of Object.entries(sides)) {
       const [ax, az] = toW(o, sd.a[0], sd.a[1]);
       const [bx, bz] = toW(o, sd.b[0], sd.b[1]);
       const len = Math.hypot(bx - ax, bz - az);
       const ux = (bx - ax) / len;
       const uz = (bz - az) / len;
+      // 바깥 법선 (월드)
+      const nx = sd.n[0] * o.cos + sd.n[1] * o.sin;
+      const nz = -sd.n[0] * o.sin + sd.n[1] * o.cos;
       const openings = [];
       const centerS = (s) => s + len / 2;
       for (const h of b.holes.filter((h) => h.side === side)) {
@@ -177,7 +207,7 @@ export class StructureBuilder {
         this.rubblePile(hx, hz, 1.1 + h.w * 0.25, Math.round(14 + h.w * 8), b.brick);
       }
       for (const h of b.loopholes.filter((h) => h.side === side)) {
-        openings.push({ s0: centerS(h.s - h.w / 2), s1: centerS(h.s + h.w / 2), y0: h.y0, y1: h.y1 });
+        openings.push({ s0: centerS(h.s - h.w / 2), s1: centerS(h.s + h.w / 2), y0: h.y0, y1: h.y1, loophole: true });
       }
       for (const d of b.doors.filter((d) => d.side === side)) {
         openings.push({ s0: centerS(d.s - d.w / 2), s1: centerS(d.s + d.w / 2), y0: 0, y1: d.h, door: d });
@@ -205,13 +235,24 @@ export class StructureBuilder {
         this.windows.push({ barn: b.id, side, x: ax + ux * sm, z: az + uz * sm, y0: floorY + op.y0, y1: floorY + op.y1 });
       }
       const collapses = b.collapse.filter((c) => c.side === side).map((c) => ({ s0: centerS(c.s0), s1: centerS(c.s1), h: c.h }));
+      if (long) collapsedS[side] = collapses.map((c) => [c.s0 - len / 2, c.s1 - len / 2]);
       for (const c of collapses) {
+        // 무너진 벽: 바깥쪽에 벽돌 잔해 더미 (벽을 따라 길쭉), 안쪽에 낮은 더미 + 흩어진 벽돌
         const sm = (c.s0 + c.s1) / 2 - len / 2;
-        const [px, pz] = toW(o, ...this.wallLocal(side, sm, L, W, t, 0));
-        this.rubblePile(px, pz, 2.2, 60, b.brick);
+        const along = (c.s1 - c.s0) / 2 + 0.6;
+        const yaw = Math.atan2(-uz, ux);
+        const [px, pz] = toW(o, ...this.wallLocal(side, sm, L, W, t, 0.3));
+        this.rubbleHeap(px, pz, along, F.heap.radius * 0.75, F.heap.height * drng.range(0.85, 1.1), yaw, b.brick, drng);
+        const [qx, qz] = toW(o, ...this.wallLocal(side, sm, L, W, t, -1.9));
+        this.rubbleHeap(qx, qz, along * 0.8, F.heap.radius * 0.55, F.heap.height * 0.6, yaw, b.brick, drng);
+        const [rx, rz] = toW(o, ...this.wallLocal(side, sm, L, W, t, 0));
+        this.rubblePile(rx, rz, 2.2, 60, b.brick);
       }
       this.wall({ ox: ax, oz: az, ux, uz, len, thick: t, y0: floorY, height: H, openings, collapses, matKey, colMat: 'brick', tag: b.id });
-      // 창틀 위 콘크리트 인방 (밋밋함 방지): 생략
+      this.barnHoleTeeth(openings, { ax, az, ux, uz, t, floorY, matKey }, drng);
+      // 불난 축사: 불 가까운 창은 모두 그을음
+      const fireS = fire ? (side === 'south' || side === 'north' ? fire.lx : fire.lz) + len / 2 : null;
+      this.barnWallDecals(b, { ax, az, ux, uz, nx, nz, len, t, H, floorY, openings, collapses, long, fireS }, drng);
       // 문
       for (const op of openings.filter((p) => p.door && p.door.wood)) {
         const sMid = (op.s0 + op.s1) / 2;
@@ -260,51 +301,7 @@ export class StructureBuilder {
         this.col.addBox(px, floorY + 1.15, pz, 0.06, 1.15, len / 2, b.rot, 'thinWall', b.id + '_part');
       }
     }
-    // 지붕 트러스와 슬레이트
-    const ridge = 1.8;
-    const rafterLen = Math.hypot(W / 2, ridge);
-    const slope = Math.atan2(ridge, W / 2);
-    const kept = [];
-    for (let s = -L / 2 + 1.5; s <= L / 2 - 1.4; s += 3) {
-      const keep = rng.next() < b.roofKeep || (Math.abs(s) > L / 2 - 3 && rng.next() < 0.7);
-      kept.push(keep);
-      for (const sgn of [1, -1]) {
-        if (!keep && rng.next() < 0.75) continue;
-        const [rx, rz] = toW(o, s, (sgn * W) / 4);
-        if (keep) {
-          const g = boxGeo(0.12, 0.18, rafterLen, 1);
-          place(g, rx, floorY + H + ridge / 2, rz, [sgn * slope, b.rot, 0, 'YXZ']);
-          this.batch.add('wood', g, 0x6b5a48);
-        } else {
-          // 부러져 축사 안으로 늘어진 서까래
-          const g = boxGeo(0.12, 0.18, rafterLen * 0.8, 1);
-          const [rx2, rz2] = toW(o, s, (sgn * W) / 3.2);
-          place(g, rx2, floorY + H * 0.62, rz2, [sgn * -0.75, b.rot, 0.2, 'YXZ']);
-          this.batch.add('wood', g, 0x50443a);
-        }
-      }
-      if (keep) {
-        const [tx, tz] = toW(o, s, 0);
-        const g = boxGeo(0.12, 0.16, W - 2 * t, 1);
-        place(g, tx, floorY + H - 0.1, tz, b.rot);
-        this.batch.add('wood', g, 0x6b5a48);
-      }
-    }
-    // 슬레이트 지붕판 (관통 가능)
-    let bayIndex = 0;
-    for (let s = -L / 2 + 1.5; s < L / 2 - 4.4; s += 3, bayIndex++) {
-      if (!kept[bayIndex] || !kept[bayIndex + 1]) continue;
-      for (const sgn of [1, -1]) {
-        if (rng.next() > 0.62) continue;
-        const sm = s + 1.5;
-        const [rx, rz] = toW(o, sm, (sgn * W) / 4);
-        const rot = { x: sgn * slope, y: b.rot, z: 0, order: 'YXZ' };
-        const g = boxGeo(3.05, 0.03, rafterLen + 0.3, 1.2);
-        place(g, rx, floorY + H + ridge / 2 + 0.12, rz, [rot.x, rot.y, 0, 'YXZ']);
-        this.batch.add('slate', g, 0xd0d0cc);
-        this.col.addBox(rx, floorY + H + ridge / 2 + 0.12, rz, 1.52, 0.02, (rafterLen + 0.3) / 2, rot, 'slate', b.id + '_roof', { walkable: false, blocksMove: false });
-      }
-    }
+    this.barnRoof(b, o, { L, W, H, t, floorY, fire, collapsedS }, rng, drng);
     // 바닥에 떨어진 슬레이트·잔해
     for (let k = 0; k < Math.round(L / 6); k++) {
       const s = (rng.next() - 0.5) * (L - 4);
@@ -322,6 +319,291 @@ export class StructureBuilder {
     }
   }
 
+  // 축사 지붕 뼈대: 벽 위 도리(무너진 벽 구간은 끊김), 칸(3m)마다 남은 서까래 쌍 + 평보, 무너진 칸은 부러진 그루터기 / 안으로 떨어진 서까래,
+  // 남은 칸끼리는 마룻대·중도리·슬레이트(관통 가능 충돌체). 불 가까운 나무는 검게 탔다.
+  barnRoof(b, o, { L, W, H, t, floorY, fire, collapsedS }, rng, drng) {
+    const F = CONFIG.farm.barn;
+    const ridge = 1.8;
+    const rafterLen = Math.hypot(W / 2, ridge);
+    const slope = Math.atan2(ridge, W / 2);
+    const woodCol = (s) => (fire && Math.abs(s - fire.lx) < 13 ? F.charred : 0x6b5a48);
+    const collapsedAt = (side, s) => (collapsedS[side] || []).some(([a, c]) => s > a - 0.6 && s < c + 0.6);
+    const kept = [];
+    const bays = [];
+    for (let s = -L / 2 + 1.5; s <= L / 2 - 1.4; s += 3) bays.push(s);
+    for (const s of bays) {
+      const keep = rng.next() < b.roofKeep || (Math.abs(s) > L / 2 - 3 && rng.next() < 0.7);
+      kept.push(keep);
+      for (const sgn of [1, -1]) {
+        const side = sgn > 0 ? 'south' : 'north';
+        if (collapsedAt(side, s)) continue;
+        const col = woodCol(s);
+        if (keep) {
+          const [rx, rz] = toW(o, s, (sgn * W) / 4);
+          const g = boxGeo(0.12, 0.18, rafterLen, 1);
+          place(g, rx, floorY + H + ridge / 2, rz, [sgn * slope, b.rot, 0, 'YXZ']);
+          this.batch.add('wood', g, col);
+          continue;
+        }
+        const r = drng.next();
+        if (r < 0.42) {
+          // 도리 위에 남은 부러진 서까래 그루터기 (끝이 쪼개짐)
+          const stub = drng.range(F.rafterStub[0], F.rafterStub[1]);
+          const dz = (W / 2 - (stub / 2) * Math.cos(slope)) * sgn;
+          const [rx, rz] = toW(o, s, dz);
+          const yy = floorY + H + (stub / 2) * Math.sin(slope);
+          this.batch.add('wood', place(boxGeo(0.12, 0.18, stub, 1), rx, yy, rz, [sgn * slope, b.rot, drng.range(-0.08, 0.08), 'YXZ']), col);
+          const tipD = (W / 2 - stub * Math.cos(slope)) * sgn;
+          const [tx, tz] = toW(o, s + drng.range(-0.03, 0.03), tipD);
+          this.batch.add('wood', place(boxGeo(0.05, 0.08, 0.35, 1), tx, floorY + H + stub * Math.sin(slope) + 0.05, tz, [sgn * (slope + 0.5), b.rot + 0.15, 0, 'YXZ']), col);
+        } else if (r < 0.68) {
+          // 축사 안으로 비스듬히 떨어진 서까래 (한 끝은 벽 위, 한 끝은 바닥)
+          const [ex, ez] = toW(o, s + drng.range(-0.6, 0.6), (W / 2 - 0.2) * sgn);
+          const [fx2, fz2] = toW(o, s + drng.range(-1.4, 1.4), (W / 2 - drng.range(2.4, 3.6)) * sgn);
+          this.batch.add('wood', stickGeo(ex, floorY + H - 0.05, ez, fx2, floorY + 0.1, fz2, 0.12, 0.18), col);
+        }
+      }
+      if (keep) {
+        const [tx, tz] = toW(o, s, 0);
+        const g = boxGeo(0.12, 0.16, W - 2 * t, 1);
+        place(g, tx, floorY + H - 0.1, tz, b.rot);
+        this.batch.add('wood', g, woodCol(s));
+      }
+    }
+    // 벽 위 도리 (칸마다, 무너진 벽 구간과 일부 칸은 없음)
+    for (const sgn of [1, -1]) {
+      const side = sgn > 0 ? 'south' : 'north';
+      for (const s of bays) {
+        if (collapsedAt(side, s) || drng.next() < 0.15) continue;
+        const [px, pz] = toW(o, s, (W / 2 - t / 2) * sgn);
+        this.batch.add('wood', place(boxGeo(3.0, 0.14, 0.16, 1), px, floorY + H + 0.07, pz, b.rot), woodCol(s));
+      }
+    }
+    // 남은 칸 사이: 마룻대·중도리 (양쪽 칸이 다 남았을 때)
+    for (let i = 0; i < bays.length - 1; i++) {
+      if (!kept[i] || !kept[i + 1]) continue;
+      const sm = bays[i] + 1.5;
+      const col = woodCol(sm);
+      const [rx, rz] = toW(o, sm, 0);
+      this.batch.add('wood', place(boxGeo(3.05, 0.16, 0.12, 1), rx, floorY + H + ridge - 0.04, rz, b.rot), col);
+      for (const sgn of [1, -1]) {
+        const [px, pz] = toW(o, sm, (sgn * W) / 4);
+        this.batch.add('wood', place(boxGeo(3.05, 0.1, 0.1, 1), px, floorY + H + ridge / 2 + 0.1, pz, [sgn * slope, b.rot, 0, 'YXZ']), col);
+      }
+    }
+    // 슬레이트 지붕판 (관통 가능)
+    let bayIndex = 0;
+    for (let s = -L / 2 + 1.5; s < L / 2 - 4.4; s += 3, bayIndex++) {
+      if (!kept[bayIndex] || !kept[bayIndex + 1]) continue;
+      for (const sgn of [1, -1]) {
+        if (rng.next() > 0.62) continue;
+        const sm = s + 1.5;
+        if (collapsedAt(sgn > 0 ? 'south' : 'north', sm)) continue;
+        const [rx, rz] = toW(o, sm, (sgn * W) / 4);
+        const rot = { x: sgn * slope, y: b.rot, z: 0, order: 'YXZ' };
+        const g = boxGeo(3.05, 0.03, rafterLen + 0.3, 1.2);
+        place(g, rx, floorY + H + ridge / 2 + 0.12, rz, [rot.x, rot.y, 0, 'YXZ']);
+        this.batch.add('slate', g, 0xd0d0cc);
+        this.col.addBox(rx, floorY + H + ridge / 2 + 0.12, rz, 1.52, 0.02, (rafterLen + 0.3) / 2, rot, 'slate', b.id + '_roof', { walkable: false, blocksMove: false });
+      }
+    }
+  }
+
+  // 포탄 구멍 위쪽 가장자리: 벽돌이 들쭉날쭉하게 매달림 (구멍 위 1/4 높이 안, 아래로 최대 0.16m — 사격 사선·이동 높이 위).
+  // 구멍 옆 가장자리도 1.95m 위에서만 벽돌 반 장씩 튀어나온다. 충돌 없음 (벽 면 안의 작은 조각)
+  barnHoleTeeth(openings, { ax, az, ux, uz, t, floorY, matKey }, rng) {
+    const yaw = Math.atan2(-uz, ux);
+    const col = 0x9a948c;
+    for (const op of openings) {
+      if (!op.hole || op.y1 < 2.1) continue;
+      for (let s = op.s0 + 0.06; s < op.s1 - 0.06; s += 0.125) {
+        const courses = Math.floor(rng.next() * 3); // 0..2 줄 (한 줄 0.075m)
+        if (!courses) continue;
+        const hgt = courses * 0.075;
+        const cx = ax + ux * (s + 0.0625);
+        const cz = az + uz * (s + 0.0625);
+        this.batch.add(matKey, place(boxGeo(0.125, hgt, t * rng.range(0.6, 0.95), 0.5), cx, floorY + op.y1 - hgt / 2, cz, yaw), col);
+      }
+      for (const [edge, dir] of [
+        [op.s0, 1],
+        [op.s1, -1],
+      ]) {
+        for (let y = Math.max(op.y0, 1.95); y < op.y1 - 0.05; y += 0.075) {
+          if (rng.next() < 0.45) continue;
+          const w = rng.range(0.06, 0.13);
+          const sc = edge + dir * (w / 2);
+          this.batch.add(matKey, place(boxGeo(w, 0.07, t * rng.range(0.6, 0.95), 0.5), ax + ux * sc, floorY + y + 0.035, az + uz * sc, yaw), col);
+        }
+      }
+    }
+  }
+
+  // 축사 벽 한 면의 데칼 (벽 바깥·안쪽 면에서 decalLift 만큼 띄운 투명 사각형, 아틀라스 칸은 textures.farmDecalTexture):
+  // 창·구멍 위 그을음, 구멍 둘레 그을림 띠, 탄흔 무리(남쪽 = 플레이어 쪽 벽에 많이), 떨어져 나간 벽면, 위에서 흘러내린 줄,
+  // 벽 아래 습기 띠, 구멍 모서리의 금. 열린 곳(창·문·구멍·사격 구멍)과 무너진 벽 위로는 걸치지 않는다.
+  barnWallDecals(b, w, rng) {
+    const F = CONFIG.farm.barn;
+    const { ax, az, ux, uz, nx, nz, len, t, H, floorY, openings, collapses, long, fireS } = w;
+    const lift = CONFIG.farm.decalLift;
+    const topAt = (s) => {
+      let top = H;
+      for (const c of collapses) if (s > c.s0 - 0.3 && s < c.s1 + 0.3) top = Math.min(top, c.h - 0.42);
+      return top;
+    };
+    const free = (s0, s1, y0, y1, except = null) => {
+      if (s0 < 0.2 || s1 > len - 0.2 || y0 < -0.01) return false;
+      for (const op of openings) {
+        if (op === except) continue;
+        if (s1 > op.s0 - 0.05 && s0 < op.s1 + 0.05 && y1 > op.y0 - 0.05 && y0 < op.y1 + 0.05) return false;
+      }
+      for (let s = s0; s <= s1 + 1e-3; s += 0.25) if (y1 > topAt(Math.min(s, s1)) - 0.02) return false;
+      return true;
+    };
+    const put = (cell, s0, s1, y0, y1, face, color, edge = 'bottom', flip = false) => {
+      const off = face * (t / 2 + lift);
+      this.pushDecal(cell, ax + nx * off, floorY, az + nz * off, ux, uz, s0, s1, y0, y1, nx * face, nz * face, color, edge, flip);
+    };
+    const south = nz > 0.7;
+    // 창·구멍 위 그을음 (구멍은 양쪽 면, 불난 축사의 불 가까운 창도)
+    for (const op of openings) {
+      if (op.loophole) continue;
+      const nearFire = fireS !== null && Math.abs((op.s0 + op.s1) / 2 - fireS) < 16;
+      if (!op.hole && !nearFire && rng.next() > F.sootChance) continue;
+      const wdt = (op.s1 - op.s0) * 1.7 + 0.4;
+      const sm = (op.s0 + op.s1) / 2;
+      const y0 = op.y1 + 0.01;
+      const hgt = Math.min(F.sootHeight * rng.range(0.7, 1.15) * (nearFire ? 1.3 : 1), topAt(sm) - y0 - 0.03);
+      if (hgt < 0.25) continue;
+      const faces = op.hole || nearFire ? [1, -1] : [1];
+      for (const face of faces) if (free(sm - wdt / 2, sm + wdt / 2, y0, y0 + hgt, op)) put(0, sm - wdt / 2, sm + wdt / 2, y0, y0 + hgt, face, 0xffffff, 'bottom', rng.next() < 0.5);
+    }
+    // 포탄 구멍 둘레 그을림 띠 (위·양옆·아래, 양쪽 면) + 모서리 금
+    const sw = F.scorchWidth;
+    for (const op of openings) {
+      if (!op.hole) continue;
+      for (const face of [1, -1]) {
+        const top = Math.min(op.y1 + sw, topAt((op.s0 + op.s1) / 2) - 0.02);
+        if (top > op.y1 + 0.1 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, face, 0xffffff, 'bottom');
+        if (free(op.s0 - sw, op.s0, op.y0, op.y1, op)) put(1, op.s0 - sw, op.s0, op.y0, op.y1, face, 0xffffff, 'b');
+        if (free(op.s1, op.s1 + sw, op.y0, op.y1, op)) put(1, op.s1, op.s1 + sw, op.y0, op.y1, face, 0xffffff, 'a');
+        if (op.y0 > sw * 0.6 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, face, 0xffffff, 'top');
+      }
+      const cs = rng.next() < 0.5 ? op.s1 + 0.05 : op.s0 - 0.95;
+      const cy = Math.min(op.y1 + 0.05, topAt(cs) - 0.95);
+      if (cy > op.y1 - 0.3 && free(cs, cs + 0.9, cy, cy + 0.9, op)) put(6, cs, cs + 0.9, cy, cy + 0.9, 1, 0xffffff, 'bottom', rng.next() < 0.5);
+    }
+    // 탄흔 무리 (남쪽 벽에 많이) · 떨어져 나간 벽면
+    const spallCol = b.brick === 'red' ? 0xd0a090 : 0xffffff;
+    const tries = (long ? (south ? F.pockClusters + 2 : 1) : 1) * 4;
+    let pocks = 0;
+    let spalls = 0;
+    const wantPocks = long ? (south ? F.pockClusters + 1 : 1) : 1;
+    const wantSpalls = long ? 2 : 1;
+    for (let k = 0; k < tries * 2 && (pocks < wantPocks || spalls < wantSpalls); k++) {
+      const isPock = pocks < wantPocks && (spalls >= wantSpalls || rng.next() < 0.6);
+      const wdt = isPock ? rng.range(1.0, 1.8) : rng.range(0.6, 1.3);
+      const hgt = isPock ? wdt : wdt * rng.range(0.6, 0.9);
+      const s0 = rng.range(0.3, len - 0.3 - wdt);
+      const y0 = rng.range(0.35, Math.max(0.4, H - 0.3 - hgt));
+      if (!free(s0, s0 + wdt, y0, y0 + hgt)) continue;
+      if (isPock) {
+        put(2, s0, s0 + wdt, y0, y0 + hgt, 1, 0xffffff, 'bottom', rng.next() < 0.5);
+        pocks++;
+      } else {
+        put(3, s0, s0 + wdt, y0, y0 + hgt, 1, spallCol, 'bottom', rng.next() < 0.5);
+        spalls++;
+      }
+    }
+    // 위에서 흘러내린 빗물·그을음 줄
+    for (let s = rng.range(0.4, 2.5); s < len - 1; s += rng.range(2.5, 6)) {
+      const wdt = rng.range(0.8, 1.8);
+      const y1 = topAt(s + wdt / 2) - 0.02;
+      const y0 = y1 - rng.range(0.9, 1.6);
+      if (y0 > 0.3 && free(s, s + wdt, y0, y1)) put(4, s, s + wdt, y0, y1, 1, 0xffffff, 'bottom', rng.next() < 0.5);
+    }
+    // 벽 아래 습기·이끼 띠 (열린 곳을 피해 조각조각)
+    for (let s = 0.25; s < len - 0.4; ) {
+      const wdt = Math.min(rng.range(2.2, 3.6), len - 0.25 - s);
+      const hgt = rng.range(0.45, 0.7);
+      if (wdt > 0.5 && free(s, s + wdt, 0.0, hgt)) put(5, s, s + wdt, 0.0, hgt, 1, 0xffffff, 'bottom', rng.next() < 0.5);
+      s += wdt + rng.range(0.05, 0.6);
+    }
+  }
+
+  // 데칼 사각형 하나: 기준점 (px, y0Base, pz) 에서 벽 방향 (ux, uz) 으로 s0..s1, 높이 y0..y1, 법선 (nx, nz).
+  // edge = 아틀라스 칸의 v=0 이 오는 변 ('bottom' | 'top' | 'a' = s0 쪽 | 'b' = s1 쪽), flip = 칸 u 뒤집기
+  pushDecal(cell, px, yBase, pz, ux, uz, s0, s1, y0, y1, nx, nz, color = 0xffffff, edge = 'bottom', flip = false) {
+    const D = this.decal || (this.decal = { pos: [], nrm: [], uv: [], col: [], idx: [] });
+    const c = _decalCol.set(color);
+    const cu = cell % 4;
+    const cv = Math.floor(cell / 4);
+    const U0 = cu / 4;
+    const V0 = 1 - (cv + 1) / 2;
+    // 모서리 A(s0,y0) B(s1,y0) C(s1,y1) D(s0,y1) 의 칸 안 (u, v)
+    let q;
+    if (edge === 'top') q = [[1, 1], [0, 1], [0, 0], [1, 0]];
+    else if (edge === 'a') q = [[0, 0], [0, 1], [1, 1], [1, 0]];
+    else if (edge === 'b') q = [[0, 1], [0, 0], [1, 0], [1, 1]];
+    else q = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    const base = D.pos.length / 3;
+    const corners = [
+      [s0, y0],
+      [s1, y0],
+      [s1, y1],
+      [s0, y1],
+    ];
+    corners.forEach(([s, y], i) => {
+      D.pos.push(px + ux * s, yBase + y, pz + uz * s);
+      D.nrm.push(nx, 0, nz);
+      const u = flip ? 1 - q[i][0] : q[i][0];
+      D.uv.push(U0 + u * 0.25, V0 + q[i][1] * 0.5);
+      D.col.push(c.r, c.g, c.b);
+    });
+    // 감김 방향: (B-A) x 위 = (-uz, 0, ux) 가 법선 쪽이면 A,B,C
+    if (-uz * nx + ux * nz >= 0) D.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    else D.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
+  }
+
+  // 벽돌·콘크리트 잔해 더미: 울퉁불퉁한 낮은 둔덕 (잔해 텍스처 + 벽돌 색 정점색) + 벽돌 여러 장 붙은 큰 벽 조각 몇 개 + 흩어진 조각.
+  // ra = 길이 방향(yaw) 반지름, rb = 폭 반지름. 충돌: 낮은 상자 (잔해, 관통 불가, 올라설 수 있음) + 접지 그림자
+  rubbleHeap(x, z, ra, rb, h, yaw, brick, rng) {
+    const g = new THREE.SphereGeometry(1, 18, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+    const p = g.attributes.position;
+    const uv = g.attributes.uv;
+    const ph = rng.next() * 50;
+    for (let i = 0; i < p.count; i++) {
+      const px = p.getX(i);
+      const py = p.getY(i);
+      const pz = p.getZ(i);
+      const lump = 1 + 0.2 * Math.sin(px * 5.3 + ph) * Math.cos(pz * 4.1 + ph * 0.7) + 0.09 * Math.sin(px * 13.1 + pz * 11.3 + ph);
+      const X = px * ra * (1 + 0.08 * Math.sin(pz * 3 + ph));
+      const Z = pz * rb;
+      p.setXYZ(i, X, Math.pow(Math.max(0, py), 0.85) * h * lump - 0.08, Z);
+      uv.setXY(i, X / 1.4, Z / 1.4);
+    }
+    g.computeVertexNormals();
+    const y = this.terrain.heightAt(x, z);
+    place(g, x, y, z, yaw);
+    this.batch.add('rubbleHeap', g, brick === 'red' ? 0xb08a7a : 0xc8c4b8);
+    const matKey = brick === 'red' ? 'brickRed' : 'brickWhite';
+    const c = Math.cos(yaw);
+    const s = Math.sin(yaw);
+    for (let k = 0; k < Math.round(2 + ra * 0.8); k++) {
+      const lx = rng.range(-0.75, 0.75) * ra;
+      const lz = rng.range(-0.6, 0.6) * rb;
+      const wx = x + lx * c + lz * s;
+      const wz = z - lx * s + lz * c;
+      const rr = Math.hypot(lx / ra, lz / rb);
+      const hy = y + Math.max(0.05, h * (1 - rr * rr)) * 0.85;
+      const blk = boxGeo(rng.range(0.45, 1.1), rng.range(0.22, 0.45), 0.38, 0.5);
+      place(blk, wx, hy, wz, [rng.range(-0.6, 0.6), rng.next() * Math.PI, rng.range(-0.5, 0.5)]);
+      this.batch.add(matKey, blk, 0xb8b4ac, 0.15);
+    }
+    this.rubblePile(x, z, Math.max(ra, rb) * 1.1, Math.round(ra * rb * 9), brick);
+    this.col.addBox(x, y + h * 0.33, z, ra * 0.72, h * 0.33, rb * 0.62, yaw, 'rubble', 'RUBBLE');
+    this.contactShadows?.add({ x, z, hx: ra * 1.05, hz: rb * 1.05, rot: yaw, shape: 'ellipse', preset: 'rubble' });
+  }
+
   wallLocal(side, s, L, W, t, off) {
     switch (side) {
       case 'south':
@@ -336,23 +618,52 @@ export class StructureBuilder {
   }
 
   // ------------------------------------------------------------------ 곡물 저장탑
+  // 몸통은 전용 텍스처 한 장으로 감싼다 (textures.siloTexture: 슬립폼 이음 줄, 빗물 세로줄, 구멍 아래 녹물·위 그을음,
+  // 아래 습기 띠, 남쪽 아래에 몰린 탄흔, 큰 포탄 구멍). 구멍(MAP.silo.holes) 둘레엔 부서진 콘크리트 조각이 튀어나오고
+  // 철근이 휘어 삐져나오며, 그 아래 땅에 떨어진 조각 더미. 충돌은 원기둥 하나 (콘크리트, 관통 불가).
   silo(s) {
     const y = this.terrain.heightAt(s.x, s.z);
-    this.batch.add('concrete', place(cylGeo(s.r, s.r * 1.02, s.h, 28, 3), s.x, y + s.h / 2, s.z), 0xc4c1b8, 0.35);
+    const rng = new Random(CONFIG.world.seed + 961);
+    // 몸통: UV u = 남쪽(+z)부터 동쪽으로 한 바퀴, v = 아래 0 → 꼭대기 1 (CylinderGeometry 기본 UV 그대로)
+    const body = new THREE.CylinderGeometry(s.r, s.r * 1.02, s.h, 36, 1, true);
+    this.batch.add('silo', place(body, s.x, y + s.h / 2, s.z), 0xffffff);
     const dome = new THREE.SphereGeometry(s.r, 24, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-    this.batch.add('concrete', place(dome, s.x, y + s.h, s.z, 0, [1, 0.35, 1]), 0xb6b3aa);
+    this.batch.add('concrete', place(dome, s.x, y + s.h, s.z, 0, [1, 0.35, 1]), 0xa8a59c);
     // 꼭대기 기계실 (포탄에 뚫림)
-    this.batch.add('concrete', place(boxGeo(2.8, 2.4, 3.0, 3), s.x + 0.8, y + s.h + 1.8, s.z, 0.2), 0xaaa79e);
+    this.batch.add('concrete', place(boxGeo(2.8, 2.4, 3.0, 3), s.x + 0.8, y + s.h + 1.8, s.z, 0.2), 0x9e9b92);
     this.batch.add('interior', place(boxGeo(1.2, 1.0, 0.1), s.x + 1.1, y + s.h + 1.9, s.z + 1.55, 0.2));
-    // 포탄 구멍 (어두운 부분)
-    for (const [ang, hy, sz] of [
-      [2.6, 0.72, 1.6],
-      [0.9, 0.45, 1.0],
-      [3.9, 0.85, 0.9],
-    ]) {
-      const px = s.x + Math.sin(ang) * (s.r - 0.05);
-      const pz = s.z + Math.cos(ang) * (s.r - 0.05);
-      this.batch.add('interior', place(boxGeo(sz, sz * 0.8, 0.2), px, y + s.h * hy, pz, ang));
+    this.batch.add('interior', place(boxGeo(0.1, 0.8, 0.9), s.x + 2.22, y + s.h + 1.5, s.z - 0.4, 0.2));
+    // 큰 포탄 구멍 둘레: 튀어나온 콘크리트 조각 + 휜 철근, 아래 땅에 떨어진 조각
+    for (const hole of s.holes || []) {
+      const sa = Math.sin(hole.ang);
+      const ca = Math.cos(hole.ang);
+      const hy = y + s.h * hole.y;
+      const halfA = hole.w / 2 / s.r; // 둘레 각 반폭
+      for (let k = 0; k < 14; k++) {
+        const a = (k / 14) * Math.PI * 2;
+        const jag = rng.range(0.95, 1.25);
+        const ang = hole.ang + Math.cos(a) * halfA * jag;
+        const py = hy + Math.sin(a) * (hole.h / 2) * jag;
+        const rr = s.r + rng.range(0.02, 0.12);
+        const sz = rng.range(0.12, 0.3);
+        this.inst.add('chunk', s.x + Math.sin(ang) * rr, py, s.z + Math.cos(ang) * rr, rng.next() * 3, rng.next() * 3, rng.next() * 3, sz * 1.4, sz * 0.6, sz, 0xaaa69c);
+      }
+      for (let k = 0; k < 5; k++) {
+        // 철근: 구멍 가장자리에서 밖으로 휘어 처짐 (두 마디)
+        const a = rng.next() * Math.PI * 2;
+        const ang = hole.ang + Math.cos(a) * halfA * 0.85;
+        const py = hy + Math.sin(a) * (hole.h / 2) * 0.85;
+        const r0 = s.r - 0.05;
+        const p0 = [s.x + Math.sin(ang) * r0, py, s.z + Math.cos(ang) * r0];
+        const out = rng.range(0.25, 0.6);
+        const p1 = [s.x + Math.sin(ang) * (r0 + out), py + rng.range(-0.05, 0.12), s.z + Math.cos(ang) * (r0 + out)];
+        const p2 = [p1[0] + sa * rng.range(0.05, 0.3), p1[1] - rng.range(0.2, 0.55), p1[2] + ca * rng.range(0.05, 0.3)];
+        this.batch.add('darkSteel', stickGeo(...p0, ...p1, 0.022, 0.022), 0x8a6a56);
+        this.batch.add('darkSteel', stickGeo(...p1, ...p2, 0.02, 0.02), 0x8a6a56);
+      }
+      const gx = s.x + sa * (s.r + 1.6);
+      const gz = s.z + ca * (s.r + 1.6);
+      this.rubblePile(gx, gz, 1.2 + hole.w * 0.5, Math.round(16 + hole.w * hole.h * 10), 'mixed');
     }
     // 컨베이어 관 (기울어진 녹슨 통)
     // 아래 끝 (s.x+16, 지면) → 위 끝 (s.x+2, 꼭대기)
@@ -361,6 +672,12 @@ export class StructureBuilder {
     place(g, s.x + 9, y + 11, s.z + 1.2, [-1.0, -Math.PI / 2, 0, 'YXZ']);
     this.batch.add('rust', g, 0x9a8a7a);
     this.batch.add('rust', place(boxGeo(1.6, 2.2, 1.6, 2), s.x + 16.2, y + 1.1, s.z + 1.2), 0x8a7a6a);
+    // 컨베이어 받침 다리 (하나는 휘어 꺾임)
+    this.batch.add('darkSteel', stickGeo(s.x + 11.5, y, s.z + 0.7, s.x + 11.5, y + 6.65, s.z + 1.2, 0.12, 0.12), 0x6a5444);
+    this.batch.add('darkSteel', stickGeo(s.x + 11.5, y, s.z + 1.7, s.x + 11.5, y + 6.65, s.z + 1.2, 0.12, 0.12), 0x6a5444);
+    this.batch.add('darkSteel', stickGeo(s.x + 6.5, y, s.z + 1.0, s.x + 6.9, y + 6.3, s.z + 1.1, 0.12, 0.12), 0x6a5444);
+    this.batch.add('darkSteel', stickGeo(s.x + 6.9, y + 6.3, s.z + 1.1, s.x + 6.2, y + 13.5, s.z + 1.2, 0.12, 0.12), 0x6a5444);
+    this.col.addBox(s.x + 11.5, y + 3.3, s.z + 1.2, 0.08, 3.3, 0.55, 0, 'steel', 'SILO');
     // 사다리 보호틀
     for (let k = 0; k < 2; k++) {
       const px = s.x + Math.sin(-0.5) * (s.r + 0.35) + k * 0.5;
@@ -381,6 +698,7 @@ export class StructureBuilder {
     const D = gd.d;
     const H = gd.h;
     const doorW = 7;
+    const drng = new Random(CONFIG.world.seed + 957);
     const walls = [
       { a: [-W / 2, D / 2 - t / 2], b: [W / 2, D / 2 - t / 2], door: true },
       { a: [-W / 2, -D / 2 + t / 2], b: [W / 2, -D / 2 + t / 2], backDoor: 3 },
@@ -414,6 +732,11 @@ export class StructureBuilder {
         uvScale: 3,
         color: 0xb4b0a6,
       });
+      // 벽 데칼 (탄흔·빗물 줄·습기·문 위 그을음 — 축사와 같은 규칙)
+      const alongX = Math.abs(w.a[1] - w.b[1]) < 1e-6;
+      const nx = alongX ? 0 : Math.sign(w.a[0]);
+      const nz = alongX ? Math.sign(w.a[1]) : 0;
+      this.barnWallDecals({ brick: 'concrete' }, { ax, az, ux: (bx - ax) / len, uz: (bz - az) / len, nx, nz, len, t, H, floorY, openings, collapses, long: alongX, fireS: null }, drng);
     }
     // 골함석 지붕 (일부 없음, 관통 가능)
     for (let i = 0; i < 6; i++) {
@@ -503,48 +826,92 @@ export class StructureBuilder {
         const s = rng.range(0.12, 0.45);
         this.inst.add('chunk', x, y + s * 0.3, z, rng.next() * 3, rng.next() * 3, rng.next() * 3, s * rng.range(0.8, 1.6), s * rng.range(0.4, 0.8), s, 0x9a978f);
       } else {
-        const col = brick === 'red' ? (rng.next() < 0.5 ? 0x7c4a3a : 0x6a4034) : rng.next() < 0.5 ? 0xb8b4aa : 0xa29e94;
+        const col = brick === 'red' ? (rng.next() < 0.5 ? 0x6e4a3e : 0x5e4038) : rng.next() < 0.5 ? 0xb8b4aa : 0xa29e94;
         this.inst.add('brick', x, y + 0.04, z, rng.range(-0.4, 0.4), rng.next() * 3, rng.range(-0.4, 0.4), 1, 1, 1, col);
       }
     }
   }
 
   // ------------------------------------------------------------------ 엄체호
+  // 통나무 지붕 위로 흙을 덮은 낮은 둔덕 (둔덕 자체는 지형, Terrain.applyTrenches). 남쪽(참호 쪽) 앞면은 가로 통나무 벽,
+  // 지붕 통나무 끝이 앞으로 튀어나오고, 통나무 기둥·인방으로 짠 어두운 입구 양옆에 모래주머니, 가로 사격 틈.
+  // 포탄에 흙이 벗겨진 자리엔 지붕 통나무가 드러나 있고, 둔덕 위로 난로 연통이 비죽 나왔다.
   dugout(d) {
     const rng = this.rng;
+    const E = CONFIG.enemyPosition.dugout;
     const baseY = this.terrain.baseHeight(d.x, d.z);
     const o = frame(d.x, d.z, d.rot, baseY);
-    // 남쪽(참호 쪽) 통나무 전면과 입구
     const front = d.d / 2;
+    const lr = E.logRadius;
+    // 앞면 가로 통나무 벽
     for (let k = 0; k < 4; k++) {
-      const [lx, lz] = toW(o, 0, front - 0.1);
-      const g = cylGeo(0.13, 0.14, d.w + 0.6, 8, 1.2);
-      place(g, lx, baseY + 0.18 + k * 0.24, lz, [0, d.rot, Math.PI / 2, 'YXZ']);
-      this.batch.add('bark', g, 0xffffff);
+      const [lx, lz] = toW(o, rng.range(-0.08, 0.08), front - 0.1);
+      const g = cylGeo(lr, lr * 1.08, d.w + 0.6 + rng.range(-0.2, 0.3), 8, 1.2);
+      place(g, lx, baseY + 0.18 + k * 0.24, lz, [0, d.rot + rng.range(-0.02, 0.02), Math.PI / 2, 'YXZ']);
+      this.batch.add('bark', g, k === 3 ? 0xcfc4b8 : 0xffffff);
     }
-    // 위쪽으로 튀어나온 통나무 끝
-    for (let k = -2; k <= 2; k++) {
-      const [lx, lz] = toW(o, k * (d.w / 5), front - 0.6);
-      const g = cylGeo(0.12, 0.12, 1.4, 7, 1.2);
-      place(g, lx, baseY + 0.86, lz, [Math.PI / 2, d.rot, 0, 'YXZ']);
+    // 앞으로 튀어나온 지붕 통나무 끝 (폭 전체에 촘촘히, 길이·굵기 제각각)
+    const nBeams = Math.round(d.w / 0.5);
+    for (let k = 0; k <= nBeams; k++) {
+      const lxk = -d.w / 2 + (k / nBeams) * d.w + rng.range(-0.05, 0.05);
+      const len = rng.range(0.9, 1.5);
+      const [lx, lz] = toW(o, lxk, front - 1.0 + len / 2);
+      const r = lr * rng.range(0.85, 1.15);
+      const g = cylGeo(r, r, len, 7, 1.2);
+      place(g, lx, baseY + 0.86 + rng.range(-0.03, 0.03), lz, [Math.PI / 2 + rng.range(-0.05, 0.05), d.rot, 0, 'YXZ']);
       this.batch.add('bark', g, 0xcfc4b8);
     }
-    // 입구 (어둠)
-    const [ex, ez] = toW(o, -d.w * 0.22, front + 0.02);
-    this.batch.add('interior', place(boxGeo(0.9, 0.95, 0.12), ex, baseY - 0.35, ez, d.rot));
+    // 입구: 통나무 기둥 둘 + 인방, 안은 어둠
+    const ex = -d.w * 0.22;
+    for (const sx of [-0.55, 0.55]) {
+      const [px, pz] = toW(o, ex + sx, front + 0.02);
+      this.batch.add('bark', place(cylGeo(0.09, 0.1, 1.15, 7, 1.2), px, baseY + 0.32, pz), 0xb8ae9e);
+    }
+    const [lx0, lz0] = toW(o, ex, front + 0.04);
+    this.batch.add('bark', place(cylGeo(0.1, 0.1, 1.5, 7, 1.2), lx0, baseY + 0.9, lz0, [0, d.rot, Math.PI / 2, 'YXZ']), 0xb8ae9e);
+    const [ex1, ez1] = toW(o, ex, front + 0.03);
+    this.batch.add('interior', place(boxGeo(0.95, 1.05, 0.12), ex1, baseY + 0.3, ez1, d.rot));
     // 사격 구멍 (가로 틈)
     const [sx, sz] = toW(o, d.w * 0.2, front + 0.02);
-    this.batch.add('interior', place(boxGeo(1.2, 0.18, 0.12), sx, baseY + 0.12, sz, d.rot));
+    this.batch.add('interior', place(boxGeo(1.2, 0.18, 0.12), sx, baseY + 0.62, sz, d.rot));
     const [cx, cz] = toW(o, 0, front - 0.35);
     this.col.addBox(cx, baseY + 0.45, cz, d.w / 2 + 0.3, 0.45, 0.4, d.rot, 'log', 'DUGOUT');
-    // 흙 위에 풀
+    // 입구 양옆 모래주머니 (각 3자루 x 2단)
+    const yaw = d.rot;
+    for (const side of [-1, 1]) {
+      const bx0 = ex + side * 1.05;
+      for (let k = 0; k < E.entranceBags; k++) {
+        const lv = k < E.entranceBags / 2 ? 0 : 1;
+        const kk = k % Math.ceil(E.entranceBags / 2);
+        const [px, pz] = toW(o, bx0 + side * lv * 0.05, front + 0.35 + kk * 0.36);
+        this.inst.add('sandbag', px, this.terrain.heightAt(px, pz) + 0.08 + lv * 0.15, pz, 0, yaw + Math.PI / 2 + rng.range(-0.1, 0.1), 0, 1, 1, 1, 0xc8c0a8);
+      }
+      const [qx, qz] = toW(o, bx0, front + 0.7);
+      this.col.addBox(qx, this.terrain.heightAt(qx, qz) + 0.16, qz, 0.2, 0.16, 0.55, yaw, 'sandbag', 'DUGOUT');
+    }
+    // 흙이 벗겨져 드러난 지붕 통나무 (둔덕 위, 반쯤 묻힘)
+    for (let k = 0; k < E.exposedLogs; k++) {
+      const lxk = rng.range(-d.w * 0.3, d.w * 0.3);
+      const lzk = rng.range(-d.d * 0.25, d.d * 0.15);
+      const [px, pz] = toW(o, lxk, lzk);
+      const g = cylGeo(lr, lr, rng.range(1.2, 2.2), 7, 1.2);
+      place(g, px, this.terrain.heightAt(px, pz) - lr * 0.3, pz, [Math.PI / 2, d.rot + rng.range(-0.15, 0.15), 0, 'YXZ']);
+      this.batch.add('bark', g, 0xb0a698);
+    }
+    // 난로 연통 (꺾인 끝)
+    const [px, pz] = toW(o, d.w * 0.28, -d.d * 0.15);
+    const py = this.terrain.heightAt(px, pz);
+    this.batch.add('darkSteel', place(cylGeo(0.07, 0.07, 0.75, 8), px, py + 0.3, pz), 0x4a3c34);
+    this.batch.add('darkSteel', stickGeo(px, py + 0.66, pz, px + 0.18, py + 0.78, pz + 0.05, 0.13, 0.13), 0x4a3c34);
+    // 흙 위 흙덩이
     for (let k = 0; k < 6; k++) {
       const [gx, gz] = toW(o, rng.range(-d.w / 2, d.w / 2), rng.range(-d.d / 2, d.d / 2));
-      this.inst.add('chunk', gx, this.terrain.heightAt(gx, gz), gz, 0, rng.next() * 3, 0, 0.3, 0.1, 0.25, 0x4a4032);
+      this.inst.add('chunk', gx, this.terrain.heightAt(gx, gz), gz, 0, rng.next() * 3, 0, 0.3, 0.1, 0.25, 0x6a5a46);
     }
   }
 
-  // 참호 내 디테일: 사격 발판은 AI 준비 단계에서 addFireStep 으로 추가
+  // 참호 내 디테일: 판자 보강, 흉벽 앞면·마루의 흙덩이, 흉벽 모래주머니 구간(사격 구멍).
+  // 사격 발판(+ 양옆 모래주머니)은 AI 준비 단계에서 addFireStep 으로 추가된다.
   trenchDetails() {
     const rng = this.rng;
     // 참호 벽 일부에 판자 보강
@@ -574,6 +941,126 @@ export class StructureBuilder {
         this.batch.add('wood', g, 0x9c8c78);
       }
     }
+    this.trenchSandbags();
+    this.parapetClods();
+  }
+
+  // 참호 사격 위치 x (참호선 번호별, AI_MAP 의 trench 노드)
+  trenchFpX() {
+    const out = MAP.trench.lines.map(() => []);
+    for (const node of Object.values(AI_MAP.nodes)) {
+      if (node.kind !== 'trench') continue;
+      for (const f of node.fps) out[node.trenchLine].push(f.x);
+    }
+    return out;
+  }
+
+  // 참호선 선분마다 앞쪽(남쪽, 플레이어 쪽) 법선과 함께 돌려준다
+  trenchSegments(line) {
+    const out = [];
+    for (let i = 0; i < line.length - 1; i++) {
+      const [ax, az] = line[i];
+      const [bx, bz] = line[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      const ux = (bx - ax) / len;
+      const uz = (bz - az) / len;
+      let nx = -uz;
+      let nz = ux;
+      if (nz < 0) {
+        nx = -nx;
+        nz = -nz;
+      }
+      out.push({ ax, az, len, ux, uz, nx, nz });
+    }
+    return out;
+  }
+
+  // 흉벽 모래주머니 구간 (MAP.trench.sandbagRuns): 흉벽 마루 위에 2줄 3단(맨 윗단은 가운데 1줄), 단마다 반 자루씩 엇갈려 쌓는다.
+  // 사격 구멍: 가운데 단을 비우고 판자를 덮은 어두운 틈. 충돌: 선분 조각마다 상자 하나 (모래주머니, 관통 불가)
+  trenchSandbags() {
+    const S = CONFIG.enemyPosition.sandbags;
+    const T = MAP.trench;
+    const rng = new Random(CONFIG.world.seed + 943);
+    for (const run of T.sandbagRuns || []) {
+      const line = T.lines[run.line];
+      // 사격 구멍 위치 (구간 안에 고르게)
+      const holes = [];
+      for (let k = 0; k < (run.loopholes || 0); k++) holes.push(run.x0 + ((k + 1) / (run.loopholes + 1)) * (run.x1 - run.x0) + rng.range(-0.6, 0.6));
+      for (const sg of this.trenchSegments(line)) {
+        if (Math.abs(sg.ux) < 1e-3) continue;
+        // 이 선분에서 x 가 구간 안인 s 범위
+        let sa = (run.x0 - sg.ax) / sg.ux;
+        let sb = (run.x1 - sg.ax) / sg.ux;
+        if (sa > sb) [sa, sb] = [sb, sa];
+        sa = Math.max(sa, 0.35);
+        sb = Math.min(sb, sg.len - 0.35);
+        if (sb - sa < 0.8) continue;
+        const yaw = Math.atan2(-sg.uz, sg.ux);
+        const at = (s, d) => [sg.ax + sg.ux * s + sg.nx * d, sg.az + sg.uz * s + sg.nz * d];
+        const rows = [S.crestDist - 0.17, S.crestDist + 0.17];
+        for (let lv = 0; lv < S.layers; lv++) {
+          const top = lv === S.layers - 1;
+          const ds = top ? [S.crestDist] : rows;
+          for (const d of ds) {
+            for (let s = sa + (lv % 2) * S.bagStep * 0.5; s <= sb; s += S.bagStep) {
+              const [px, pz] = at(s, d);
+              if (lv === 1 && holes.some((hx) => Math.abs(px - hx) < S.loopholeWidth / 2 + 0.2)) continue;
+              const py = this.terrain.heightAt(px, pz) + 0.07 + lv * 0.14;
+              this.inst.add('sandbag', px, py, pz, rng.range(-0.05, 0.05), yaw + rng.range(-0.08, 0.08), rng.range(-0.05, 0.05), 1, 1, 1, S.colors[Math.floor(rng.next() * S.colors.length)]);
+            }
+          }
+        }
+        // 사격 구멍: 판자 덮개 + 어두운 틈
+        for (const hx of holes) {
+          const s = (hx - sg.ax) / sg.ux;
+          if (s < sa || s > sb) continue;
+          const [px, pz] = at(s, S.crestDist);
+          const gy = this.terrain.heightAt(px, pz);
+          this.batch.add('wood', place(boxGeo(S.loopholeWidth + 0.35, 0.04, 0.62, 1), px, gy + 0.29, pz, yaw), 0x8a7a64);
+          this.batch.add('interior', place(boxGeo(S.loopholeWidth, 0.11, 0.5), px, gy + 0.205, pz, yaw));
+        }
+        // 충돌 상자 (마루 높이 기준)
+        const sm = (sa + sb) / 2;
+        const [cx, cz] = at(sm, S.crestDist);
+        const gy = this.terrain.heightAt(cx, cz);
+        const hy = (S.layers * 0.14 + 0.1) / 2;
+        this.col.addBox(cx, gy + hy - 0.04, cz, (sb - sa) / 2 + 0.25, hy, 0.36, yaw, 'sandbag', 'TRENCH_SANDBAG');
+      }
+    }
+  }
+
+  // 흉벽 앞면·마루의 흙덩이 (인스턴스 'clod' — 밝은 황갈색 하층토): 들쭉날쭉한 마루 윤곽을 만들어 200m 밖에서 참호선이 읽히게.
+  // 사격 위치 둘레(fpClear)와 모래주머니 구간에는 두지 않는다 (사수 눈높이가 흉벽 마루 + 0.12m 라서).
+  // 충돌 없음 (지형 흉벽 표면의 요철)
+  parapetClods() {
+    const C = CONFIG.enemyPosition.clods;
+    const T = MAP.trench;
+    const rng = new Random(CONFIG.world.seed + 945);
+    const fpX = this.trenchFpX();
+    T.lines.forEach((line, li) => {
+      const runs = (T.sandbagRuns || []).filter((r) => r.line === li);
+      for (const sg of this.trenchSegments(line)) {
+        const n = Math.round(sg.len * C.perMeter);
+        for (let k = 0; k < n; k++) {
+          const s = rng.next() * sg.len;
+          // 마루(흉벽 단면의 꼭대기) 둘레에 몰리고 앞면으로 흘러내림
+          const crest = T.topHalf * 0.85 + T.parapet.width * 0.33;
+          const g = rng.gaussian();
+          const d = Math.max(T.topHalf + 0.15, crest + (g > 0 ? g * 0.75 : g * 0.3));
+          const px = sg.ax + sg.ux * s + sg.nx * d;
+          const pz = sg.az + sg.uz * s + sg.nz * d;
+          const sz = rng.range(C.size[0], C.size[1]);
+          const flat = rng.range(C.flat[0], C.flat[1]);
+          const col = C.colors[Math.floor(rng.next() * C.colors.length)];
+          const ry = rng.next() * Math.PI;
+          if (polylineDistance(line, px, pz) < d - 0.2) continue;
+          if (fpX[li].some((x) => Math.abs(px - x) < C.fpClear)) continue;
+          if (runs.some((r) => px > r.x0 - 0.6 && px < r.x1 + 0.6)) continue;
+          const sy = sz * flat;
+          this.inst.add('clod', px, this.terrain.heightAt(px, pz) + sy * 0.1, pz, rng.range(-0.2, 0.2), ry, rng.range(-0.2, 0.2), sz * rng.range(1.0, 1.7), sy, sz, col);
+        }
+      }
+    });
   }
 
   // 참호 사격 발판 + 양옆 모래주머니
@@ -627,8 +1114,11 @@ export class StructureBuilder {
     }
   }
 
+  // 위장망: 기둥 4개에 걸쳐 가운데가 처지고 가장자리가 땅까지 늘어진 그물 (알파 텍스처). n.rot = Y 회전.
+  // 충돌 태그는 '은폐만' (탄 통과, 시야만 가림)
   camoNet(n, materials) {
     const y = this.terrain.baseHeight(n.x, n.z);
+    const rot = n.rot ?? 0.05;
     const g = new THREE.PlaneGeometry(n.w, n.d, 10, 6);
     g.rotateX(-Math.PI / 2);
     const pos = g.attributes.position;
@@ -636,23 +1126,537 @@ export class StructureBuilder {
       const px = pos.getX(i) / (n.w / 2);
       const pz = pos.getZ(i) / (n.d / 2);
       const sag = (1 - px * px) * 0.35 + (1 - pz * pz) * 0.2;
-      pos.setY(i, n.h - (1 - Math.max(Math.abs(px), Math.abs(pz))) * 0.1 - sag * 0.6 - (Math.abs(px) > 0.9 ? 1.1 : 0));
+      const edge = Math.abs(px) > 0.9 || Math.abs(pz) > 0.92 ? Math.min(n.h - 0.05, 1.1) : 0;
+      pos.setY(i, n.h - (1 - Math.max(Math.abs(px), Math.abs(pz))) * 0.1 - sag * 0.6 * Math.min(1, n.h / 2) - edge);
     }
     g.computeVertexNormals();
-    place(g, n.x, y, n.z, 0.05);
+    place(g, n.x, y, n.z, rot);
     this.batch.add('camoNet', g, 0xffffff);
+    const c = Math.cos(rot);
+    const s = Math.sin(rot);
     for (const [sx, sz] of [
       [-1, -1],
       [1, -1],
       [-1, 1],
       [1, 1],
     ]) {
-      const px = n.x + (sx * n.w) / 2.2;
-      const pz = n.z + (sz * n.d) / 2.2;
+      const lx = (sx * n.w) / 2.2;
+      const lz = (sz * n.d) / 2.2;
+      const px = n.x + lx * c + lz * s;
+      const pz = n.z - lx * s + lz * c;
       const py = this.terrain.heightAt(px, pz);
-      this.batch.add('wood', place(cylGeo(0.04, 0.05, n.h + 0.4, 6), px, py + (n.h + 0.4) / 2 - 0.3, pz), 0x7a6a56);
+      const ph = Math.max(0.6, y + n.h + 0.1 - py);
+      this.batch.add('wood', place(cylGeo(0.04, 0.05, ph + 0.3, 6), px, py + ph / 2 - 0.15, pz), 0x7a6a56);
     }
-    this.col.addConcealer(n.x, y + n.h * 0.5, n.z, n.w / 2, n.h * 0.6, n.d / 2, 0.05, 'camoNet');
+    this.col.addConcealer(n.x, y + n.h * 0.5, n.z, n.w / 2, n.h * 0.6, n.d / 2, rot, 'camoNet');
+  }
+
+  // ------------------------------------------------------------------ 철조망 (참호 앞 20~40m, MAP.wire)
+  // 말뚝 철조망 (이중 에이프런: 말뚝 + 가로 가닥 4줄 + 양쪽 닻 말뚝으로 내려가는 비스듬한 줄과 그 면을 따라가는 가닥)과
+  // 원형 철조망 (고리가 이어진 나선, 군데군데 짓눌림). 선은 LineSegments 하나 (buildFarmExtras), 말뚝은 병합 기하.
+  // 충돌 태그는 '은폐만': 탄은 통과하고(말뚝도 충돌체 없음) 시야는 아주 옅게 가리며 (은폐 볼륨 'wire'), 이동은 막는다
+  // (CollisionWorld.addMoveBlocker). 적 이동 경로·농로 틈(MAP.wire.gaps)과 포탄 구덩이에 걸린 곳은 끊겨 있다.
+  barbedWire() {
+    const W = CONFIG.enemyPosition.wire;
+    const M = MAP.wire;
+    if (!M) return;
+    const rng = new Random(CONFIG.world.seed + 947);
+    const t = this.terrain;
+    const L = this.barbed || (this.barbed = []);
+    const seg = (a, b) => L.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+    const lerp3 = (a, b, f) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+    const cut = (x, z) => M.gaps.some(([a, b]) => x > a && x < b) || t.craters.some((c) => Math.hypot(x - c.x, z - c.z) < c.r * W.craterCut);
+    // 선을 따라 step 간격 점 → 끊긴 곳에서 나뉜 연속 구간들
+    const runsAlong = (pts, step) => {
+      const runs = [];
+      let run = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, az] = pts[i];
+        const [bx, bz] = pts[i + 1];
+        const len = Math.hypot(bx - ax, bz - az);
+        const ux = (bx - ax) / len;
+        const uz = (bz - az) / len;
+        for (let s = i === 0 ? 0 : step * 0.5; s < len; s += step) {
+          const x = ax + ux * s;
+          const z = az + uz * s;
+          if (cut(x, z)) {
+            if (run.length > 1) runs.push(run);
+            run = [];
+            continue;
+          }
+          run.push({ x, z, ux, uz, y: t.heightAt(x, z) });
+        }
+      }
+      if (run.length > 1) runs.push(run);
+      return runs;
+    };
+    const stake = (x, y, z, tx, ty, tz, w) => this.batch.add('rust', stickGeo(x, y, z, tx, ty, tz, w, w, 0.5), W.picketColor);
+    // 말뚝 철조망
+    for (const line of M.fences) {
+      for (const run of runsAlong(line, W.picketSpacing)) {
+        for (const p of run) {
+          const h = W.picketHeight * rng.range(0.88, 1.05);
+          p.lean = [rng.range(-0.05, 0.05), rng.range(-0.07, 0.07)];
+          p.at = (hh) => [p.x + p.lean[0] * hh, p.y + hh, p.z + p.lean[1] * hh];
+          p.top = p.at(h);
+          stake(p.x, p.y - 0.15, p.z, ...p.top, 0.045);
+          const nx = -p.uz;
+          const nz = p.ux;
+          p.anchor = {};
+          for (const sd of [-1, 1]) {
+            const axp = p.x + nx * sd * W.apron + rng.range(-0.1, 0.1);
+            const azp = p.z + nz * sd * W.apron + rng.range(-0.1, 0.1);
+            const ayp = t.heightAt(axp, azp);
+            stake(axp, ayp - 0.08, azp, axp, ayp + 0.28, azp, 0.035);
+            p.anchor[sd] = [axp, ayp + 0.25, azp];
+            seg(p.top, p.anchor[sd]);
+          }
+        }
+        for (let i = 0; i < run.length - 1; i++) {
+          const a = run[i];
+          const b = run[i + 1];
+          const broken = rng.next() < W.breakChance;
+          for (const hh of W.strands) {
+            const A = a.at(hh);
+            const B = b.at(hh);
+            if (broken && rng.next() < 0.55) {
+              // 끊긴 가닥: 한쪽 말뚝에서 땅으로 늘어짐
+              const from = rng.next() < 0.5 ? A : B;
+              const mid = lerp3(A, B, rng.range(0.3, 0.7));
+              const gy = t.heightAt(mid[0], mid[2]) + 0.03;
+              seg(from, [mid[0], gy + (from[1] - gy) * 0.35, mid[2]]);
+              seg([mid[0], gy + (from[1] - gy) * 0.35, mid[2]], [mid[0] + rng.range(-0.5, 0.5), gy, mid[2] + rng.range(-0.5, 0.5)]);
+              continue;
+            }
+            const sag = 0.03 + rng.next() * 0.07;
+            const Mid = lerp3(A, B, 0.5);
+            Mid[1] -= sag;
+            seg(A, Mid);
+            seg(Mid, B);
+          }
+          // 에이프런 면을 따라가는 가닥 (꼭대기 ~ 닻 사이 1/3, 2/3)
+          for (const sd of [-1, 1]) {
+            for (const f of [0.38, 0.72]) seg(lerp3(a.top, a.anchor[sd], f), lerp3(b.top, b.anchor[sd], f));
+            seg(a.anchor[sd], b.anchor[sd]);
+          }
+        }
+        this.wireVolumes(run, 0.45, W.apron + 0.15, W.picketHeight);
+      }
+    }
+    // 원형 철조망
+    const nSeg = W.coilSegments;
+    for (const line of M.coils) {
+      for (const run of runsAlong(line, W.coilPitch)) {
+        let prev = null;
+        let squashRun = 0;
+        let squash = 1;
+        run.forEach((p, k) => {
+          if (squashRun <= 0) {
+            squash = rng.next() < 0.12 ? rng.range(0.45, 0.7) : rng.range(0.88, 1.0);
+            squashRun = Math.floor(rng.range(4, 18));
+          }
+          squashRun--;
+          const R = W.coilRadius * rng.range(0.88, 1.08);
+          const nx = -p.uz;
+          const nz = p.ux;
+          for (let j = 0; j < nSeg; j++) {
+            const th = (j / nSeg) * Math.PI * 2;
+            const adv = (j / nSeg) * W.coilPitch;
+            const wob = 1 + (rng.next() - 0.5) * 0.14;
+            const x = p.x + p.ux * adv + nx * Math.cos(th) * R * wob;
+            const z = p.z + p.uz * adv + nz * Math.cos(th) * R * wob;
+            const gy = t.heightAt(x, z);
+            const y = Math.max(p.y + R * squash * (1 + Math.sin(th) * wob), gy + 0.02);
+            const q = [x, y, z];
+            if (prev) seg(prev, q);
+            prev = q;
+          }
+          // 고정 말뚝 (약 6m 마다)
+          if (k % 25 === 12) stake(p.x + nx * R * 0.2, p.y - 0.1, p.z + nz * R * 0.2, p.x + nx * R * 0.25, p.y + R * 2.1, p.z + nz * R * 0.25, 0.04);
+        });
+        this.wireVolumes(run, W.coilRadius + 0.05, W.coilRadius + 0.1, W.coilRadius * 2.05);
+      }
+    }
+  }
+
+  // 철조망 구간을 12m 안팎 조각으로 나눠 은폐 볼륨('wire', 아주 옅음 — 가닥이 몰린 폭 concealHalfW, 철조망 높이까지만)과
+  // 이동 차단 볼륨(에이프런까지 moveHalfW)을 단다. 은폐 볼륨은 적 인지(Perception)의 시야선에만 쓰인다
+  wireVolumes(run, concealHalfW, moveHalfW, height) {
+    let i0 = 0;
+    for (let i = 1; i < run.length; i++) {
+      const a = run[i0];
+      const b = run[i];
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      if (len < 12 && i < run.length - 1) continue;
+      if (len > 0.3) {
+        const cx = (a.x + b.x) / 2;
+        const cz = (a.z + b.z) / 2;
+        const yaw = Math.atan2(-(b.z - a.z), b.x - a.x);
+        const gy = Math.min(a.y, b.y, this.terrain.heightAt(cx, cz));
+        const hy = height / 2;
+        this.col.addConcealer(cx, gy + hy, cz, len / 2 + 0.2, hy + 0.15, concealHalfW, yaw, 'wire');
+        this.col.addMoveBlocker(cx, cz, len / 2 + 0.2, moveHalfW, yaw, gy - 0.6, gy + height, 'WIRE');
+      }
+      i0 = i;
+    }
+  }
+
+  // ------------------------------------------------------------------ 집단농장 주변 소품 (MAP.farm)
+  farmProps() {
+    const P = MAP.farm;
+    if (!P) return;
+    for (const f of P.fences || []) this.farmFence(f);
+    for (const m of P.machinery || []) this.farmMachine(m);
+    for (const h of P.hay || []) this.hayPile(h);
+    // 불탄 차량: 중간 지대와 같은 잔해 (Structures.car — 그을린 땅 데칼 포함)
+    for (const v of P.vehicles || []) this.car(v);
+  }
+
+  // 소련식 무늬 콘크리트 담장 (ПО-2): 4m 판을 콘크리트 기둥 사이에 세운다. 빠진 판(기둥만 남거나 아래 토막만), 쓰러져 땅에 누운 판,
+  // 기운 판. 판 한 장 = 텍스처 한 장 (마름모 무늬, BoxGeometry 기본 UV). 충돌: 판·기둥 상자 (콘크리트, 관통 불가)
+  farmFence(f) {
+    const F = CONFIG.farm.fence;
+    const [PL, PH, PT] = F.panel;
+    const rng = new Random(CONFIG.world.seed + 971 + Math.round(f.points[0][0] * 3 - f.points[0][1]));
+    const t = this.terrain;
+    let k = 0;
+    for (let i = 0; i < f.points.length - 1; i++) {
+      const [ax, az] = f.points[i];
+      const [bx, bz] = f.points[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      const ux = (bx - ax) / len;
+      const uz = (bz - az) / len;
+      const nx = -uz;
+      const nz = ux;
+      const yaw = Math.atan2(-uz, ux);
+      const n = Math.max(1, Math.round(len / PL));
+      const pl = len / n;
+      // 기둥 (모서리 기둥은 앞 구간과 겹치지 않게 한 번만)
+      for (let j = i === 0 ? 0 : 1; j <= n; j++) {
+        if (rng.next() < 0.06) continue;
+        const px = ax + ux * j * pl;
+        const pz = az + uz * j * pl;
+        const py = t.heightAt(px, pz);
+        const ph = rng.next() < 0.12 ? rng.range(0.8, 1.6) : PH + 0.2;
+        this.batch.add('concrete', place(boxGeo(F.post, ph + 0.3, F.post, 2), px, py + ph / 2 - 0.15, pz, yaw), 0xb0aca2, 0.3);
+        this.col.addBox(px, py + ph / 2, pz, F.post / 2, ph / 2, F.post / 2, yaw, 'concrete', 'FENCE');
+      }
+      for (let j = 0; j < n; j++, k++) {
+        const s = (j + 0.5) * pl;
+        const cx = ax + ux * s;
+        const cz = az + uz * s;
+        const gy = Math.min(t.heightAt(cx, cz), t.heightAt(cx - ux * pl * 0.45, cz - uz * pl * 0.45), t.heightAt(cx + ux * pl * 0.45, cz + uz * pl * 0.45));
+        const shade = rng.range(0.86, 1.04);
+        const col = new THREE.Color(shade, shade, shade * 0.98);
+        const w = pl - 0.05;
+        if (f.missing && f.missing.includes(k)) {
+          // 빠진 판: 절반은 아래 토막만 남음
+          if (rng.next() < 0.5) {
+            const hh = rng.range(0.3, 0.7);
+            const g = new THREE.BoxGeometry(w, hh, PT);
+            uvRect(g, 0, 0, 1, hh / PH);
+            this.batch.add('fencePanel', place(g, cx, gy + hh / 2 - 0.02, cz, yaw), col);
+            this.col.addBox(cx, gy + hh / 2, cz, w / 2, hh / 2, PT / 2, yaw, 'concrete', 'FENCE');
+          }
+          continue;
+        }
+        const g = new THREE.BoxGeometry(w, PH, PT);
+        if (f.fallen && f.fallen.includes(k)) {
+          // 쓰러진 판: 아래 끝을 축으로 넘어가 땅에 누움 (조금 비스듬)
+          const sd = rng.next() < 0.5 ? 1 : -1;
+          const ang = sd * (Math.PI / 2 - rng.range(0.03, 0.12));
+          const off = (PH / 2) * Math.sin(Math.abs(ang)) + 0.05;
+          const px = cx + nx * sd * off + ux * rng.range(-0.3, 0.3);
+          const pz = cz + nz * sd * off + uz * rng.range(-0.3, 0.3);
+          const py = t.heightAt(px, pz) + PT / 2 + (PH / 2) * Math.cos(Math.abs(ang));
+          const r = [ang, yaw + rng.range(-0.12, 0.12), rng.range(-0.04, 0.04), 'YXZ'];
+          this.batch.add('fencePanel', place(g, px, py, pz, r), col);
+          this.col.addBox(px, py, pz, w / 2, PH / 2, PT / 2, { x: r[0], y: r[1], z: r[2], order: 'YXZ' }, 'concrete', 'FENCE');
+          continue;
+        }
+        let ang = rng.range(-0.025, 0.025);
+        if (f.lean && f.lean.includes(k)) ang = (rng.next() < 0.5 ? 1 : -1) * rng.range(0.14, 0.32);
+        // 아래 끝 가운데를 축으로 기움 (로컬 z = 담장 왼쪽 법선)
+        const px = cx + nx * Math.sin(ang) * (PH / 2);
+        const pz = cz + nz * Math.sin(ang) * (PH / 2);
+        const py = gy - 0.04 + Math.cos(ang) * (PH / 2);
+        this.batch.add('fencePanel', place(g, px, py, pz, [ang, yaw, 0, 'YXZ']), col);
+        this.col.addBox(px, py, pz, w / 2, PH / 2, PT / 2, { x: ang, y: yaw, z: 0, order: 'YXZ' }, 'concrete', 'FENCE');
+      }
+    }
+  }
+
+  // 녹슨 농기계 하나 (로컬 x = 앞, z = 오른쪽). 기계마다 함수가 접지 그림자 반크기를 돌려준다
+  farmMachine(m) {
+    const y = this.terrain.heightAt(m.x, m.z) - 0.04;
+    const k = this.wreckKit(m.x, y, m.z, m.rot);
+    const tag = 'MACHINE';
+    const build = { combine: this.combineWreck, harrow: this.harrowWreck, seeder: this.seederWreck, trailer: this.trailerWreck, crawler: this.crawlerWreck }[m.kind];
+    if (!build) return;
+    const half = build.call(this, k, tag);
+    this.contactShadows?.add({ x: m.x, z: m.z, hx: half[0], hz: half[1], rot: m.rot, preset: 'vehicle', strength: 0.4 });
+  }
+
+  // 썩어 내려앉은 농기계 타이어 (아래가 눌려 납작한 고무 + 녹슨 림). 축은 로컬 z
+  rotTyre(k, x, r, z, w, sag = 0.1) {
+    const tyre = new THREE.TorusGeometry(r * 0.72, r * 0.28, 6, 16);
+    const p = tyre.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const yy = p.getY(i);
+      if (yy < -r * 0.62) p.setY(i, -r * 0.62 + (yy + r * 0.62) * 0.3);
+    }
+    tyre.scale(1, 1, w / (r * 0.56));
+    tyre.computeVertexNormals();
+    k.put('rubber', tyre, x, r - sag, z, 0, 0x9a948e, 0);
+    k.put('rust', cylGeo(r * 0.48, r * 0.48, w * 0.85, 10, 1), x, r - sag, z, [Math.PI / 2, 0, 0], 0xa08070, 0);
+  }
+
+  // 콤바인 (SK-5 '니바' 계열): 차체·곡물 탱크·유리 없는 운전실 뼈대·경사 공급부·예취부(커터바·릴)·큰 앞바퀴·작은 뒷바퀴·배출 오거·엔진 덮개
+  combineWreck(k, tag) {
+    const R = 'rust';
+    const D = 'darkSteel';
+    const paint = 0xa8948a;
+    k.put(R, boxGeo(4.6, 2.0, 2.3, 2), -0.5, 1.75, 0, 0, paint, 0.25);
+    k.put(R, boxGeo(2.4, 1.1, 2.1, 2), -0.9, 3.3, 0, 0, paint);
+    k.put('interior', boxGeo(2.2, 0.05, 1.9), -0.9, 3.86, 0);
+    for (const [px, pz] of [
+      [1.15, -1.05],
+      [2.15, -1.05],
+      [1.15, 0.2],
+      [2.15, 0.2],
+    ]) {
+      k.putRaw(D, stickGeo(px, 2.8, pz, px + 0.02, 3.95, pz, 0.06, 0.06), 0x5a4a40);
+    }
+    k.put(R, boxGeo(1.3, 0.07, 1.4, 2), 1.65, 3.98, -0.42, [0.05, 0, 0.07, 'XYZ'], paint);
+    k.put(R, boxGeo(1.2, 0.5, 1.2, 2), 1.65, 2.98, -0.42, 0, 0x9a8070);
+    k.put(D, boxGeo(0.25, 0.45, 1.0), 2.05, 3.25, -0.42, 0, 0x3a3430);
+    k.put(R, boxGeo(1.4, 0.15, 1.5, 2), 1.6, 2.75, -0.42, 0, 0x8a7062);
+    k.putRaw(R, stickGeo(1.3, 1.45, 0, 3.0, 0.8, 0, 1.15, 0.7, 2), paint);
+    k.put(R, boxGeo(1.1, 0.55, 5.0, 2), 3.45, 0.6, 0, [0, 0, 0.05, 'XYZ'], paint);
+    k.put(D, boxGeo(0.25, 0.06, 5.0), 4.0, 0.32, 0, 0, 0x4a3e36);
+    for (const sz of [-1, 1]) k.put('rustDouble', boxGeo(1.2, 0.95, 0.05, 2), 3.45, 0.8, sz * 2.5, 0, paint);
+    // 릴: 축 + 바깥 막대 6개 + 살
+    const rx = 3.7;
+    const ry = 1.4;
+    const rr = 0.55;
+    k.putRaw(D, stickGeo(rx, ry, -2.45, rx, ry, 2.45, 0.05, 0.05), 0x5a4a40);
+    for (let a = 0; a < 6; a++) {
+      const th = (a * Math.PI) / 3 + 0.2;
+      const bx = rx + Math.cos(th) * rr;
+      const by = ry + Math.sin(th) * rr;
+      k.putRaw(D, stickGeo(bx, by, -2.35, bx, by - 0.05 * (a % 2), 2.35, 0.035, 0.035), 0x6a5444);
+      for (const sz of [-2.2, 0, 2.2]) k.putRaw(D, stickGeo(rx, ry, sz, bx, by, sz, 0.025, 0.025), 0x5a4a40);
+    }
+    for (const sz of [-1, 1]) {
+      this.rotTyre(k, 1.2, 0.74, sz * 1.38, 0.5, 0.14);
+      this.rotTyre(k, -2.35, 0.42, sz * 1.05, 0.3, 0.08);
+    }
+    k.putRaw(R, stickGeo(-1.6, 3.35, 1.0, -3.9, 3.9, 2.15, 0.32, 0.32, 2), paint);
+    k.put(R, boxGeo(0.8, 1.2, 1.8, 2), -3.1, 1.6, 0, [0, 0, -0.2, 'XYZ'], paint);
+    k.put(R, boxGeo(1.6, 0.6, 1.6, 2), -2.1, 3.05, 0, 0, 0x9a7a68);
+    k.putRaw(D, stickGeo(-1.8, 3.3, -0.65, -1.85, 4.25, -0.65, 0.12, 0.12), 0x3a3028);
+    // 충돌: 차체·탱크 (얇은 철판 → 관통 가능), 차대·예취부·앞바퀴 (강철)
+    k.box(-0.5, 1.75, 0, 2.3, 1.0, 1.15, 'sheetMetal', tag);
+    k.box(-0.9, 3.3, 0, 1.2, 0.55, 1.05, 'sheetMetal', tag);
+    k.box(-0.5, 0.55, 0, 2.1, 0.3, 0.9, 'steel', tag);
+    k.box(3.45, 0.6, 0, 0.55, 0.3, 2.5, 'steel', tag);
+    for (const sz of [-1, 1]) k.box(1.2, 0.62, sz * 1.38, 0.6, 0.6, 0.25, 'steel', tag);
+    return [3.4, 2.7];
+  }
+
+  // 원판 써레 (BDT 계열): 앞뒤 두 줄 틀에 비스듬한 원판 묶음, 삼각 견인봉, 작은 운반 바퀴. 낮다
+  harrowWreck(k, tag) {
+    const R = 'rust';
+    for (const [x, ang] of [
+      [0.6, 0.3],
+      [-0.6, -0.3],
+    ]) {
+      k.put(R, boxGeo(0.14, 0.14, 4.0, 1), x, 0.72, 0, ang * 0.25, 0x9a7a66);
+      for (let i = 0; i < 10; i++) {
+        const z = -1.8 + i * 0.4;
+        k.put('darkSteel', cylGeo(0.28, 0.28, 0.025, 12), x + 0.1, 0.27, z, [Math.PI / 2, ang, 0, 'YXZ'], 0x7a5a48);
+      }
+      k.put('darkSteel', cylGeo(0.03, 0.03, 4.0, 6), x + 0.1, 0.27, 0, [Math.PI / 2, 0, 0], 0x4a3a30);
+      for (const z of [-1.5, 0, 1.5]) k.putRaw(R, stickGeo(x, 0.72, z, x + 0.1, 0.3, z, 0.08, 0.06), 0x8a6a56);
+    }
+    k.putRaw(R, stickGeo(0.7, 0.72, -1.5, 2.6, 0.42, 0, 0.1, 0.1), 0x9a7a66);
+    k.putRaw(R, stickGeo(0.7, 0.72, 1.5, 2.6, 0.42, 0, 0.1, 0.1), 0x9a7a66);
+    k.put(R, boxGeo(1.4, 0.12, 0.12), 0.0, 0.78, 0, 0, 0x9a7a66);
+    for (const sz of [-1, 1]) this.rotTyre(k, 0, 0.32, sz * 2.18, 0.18, 0.05);
+    k.box(0, 0.42, 0, 0.9, 0.36, 2.05, 'steel', tag);
+    return [1.6, 2.3];
+  }
+
+  // 곡물 파종기 (SZ-3.6 계열): 위가 넓은 긴 씨앗 통(뚜껑 반쯤 열림), 틀, 철 바퀴, 파종관 줄, 견인봉
+  seederWreck(k, tag) {
+    const R = 'rust';
+    const paint = 0x9ca08a;
+    k.put(R, taperBoxGeo(0.5, 3.6, 0.85, 3.7, 0.62, 2), 0, 0.95, 0, 0, paint);
+    k.put('rustDouble', boxGeo(0.85, 0.04, 3.75, 2), -0.12, 1.66, 0, [0, 0, 0.5, 'XYZ'], paint);
+    for (const lx of [0.25, -0.3]) k.put('darkSteel', boxGeo(0.1, 0.1, 3.8), lx, 0.86, 0, 0, 0x5a4a40);
+    for (const sz of [-1, 1]) {
+      k.put('rust', new THREE.TorusGeometry(0.52, 0.035, 4, 18), 0, 0.52, sz * 1.95, 0, 0x8a6a56, 0);
+      k.put('darkSteel', cylGeo(0.05, 0.05, 0.2, 6), 0, 0.52, sz * 1.95, [Math.PI / 2, 0, 0], 0x4a3c32);
+      for (let a = 0; a < 6; a++) {
+        const th = (a * Math.PI) / 3;
+        k.putRaw('darkSteel', stickGeo(0, 0.52, sz * 1.95, Math.cos(th) * 0.5, 0.52 + Math.sin(th) * 0.5, sz * 1.95, 0.025, 0.025), 0x5a4a40);
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      const z = -1.65 + i * 0.3;
+      k.putRaw('darkSteel', stickGeo(0, 0.95, z, 0.35, 0.1, z, 0.03, 0.03), 0x4a3c32);
+    }
+    k.putRaw(R, stickGeo(0.3, 0.8, -1.2, 2.2, 0.48, 0, 0.09, 0.09), paint);
+    k.putRaw(R, stickGeo(0.3, 0.8, 1.2, 2.2, 0.48, 0, 0.09, 0.09), paint);
+    k.box(0, 1.26, 0, 0.36, 0.32, 1.85, 'sheetMetal', tag);
+    k.box(0, 0.5, 0, 0.25, 0.42, 1.9, 'steel', tag);
+    return [1.3, 2.2];
+  }
+
+  // 짐 트레일러 (2PTS-4 계열): 열린 짐칸(바닥·옆판, 뒤판은 열려 늘어짐) 안에 썩은 건초, 차대·두 차축·내려앉은 바퀴, 견인봉
+  trailerWreck(k, tag) {
+    const R = 'rust';
+    const paint = 0xa4a48e;
+    const L = 4.4;
+    const W = 2.2;
+    const Hs = 0.75;
+    const bedY = 1.0;
+    k.put(R, boxGeo(L, 0.06, W, 2), 0, bedY, 0, 0, paint);
+    for (const sz of [-1, 1]) k.put('rustDouble', boxGeo(L, Hs, 0.05, 2), 0, bedY + Hs / 2, (sz * W) / 2, 0, paint);
+    k.put('rustDouble', boxGeo(0.05, Hs, W, 2), L / 2, bedY + Hs / 2, 0, 0, paint);
+    k.put('rustDouble', boxGeo(0.05, Hs, W, 2), -L / 2 - 0.08, bedY - Hs / 2 + 0.02, 0, [0, 0, 0.18, 'XYZ'], paint);
+    k.put('hay', boxGeo(L - 0.25, 0.3, W - 0.2, 1.5), 0, bedY + 0.16, 0, [0, 0, 0.03, 'XYZ'], 0x9a9080);
+    for (const sz of [-1, 1]) k.put('darkSteel', boxGeo(L * 0.9, 0.16, 0.14), 0, bedY - 0.12, sz * 0.6, 0, 0x4a3e34);
+    for (const x of [1.15, -1.15]) {
+      k.put('darkSteel', cylGeo(0.05, 0.05, 2.0, 6), x, 0.45, 0, [Math.PI / 2, 0, 0], 0x4a3e34);
+      for (const sz of [-1, 1]) this.rotTyre(k, x, 0.48, sz * 0.98, 0.3, 0.12);
+    }
+    k.putRaw(R, stickGeo(L / 2, bedY - 0.15, -0.5, L / 2 + 1.6, 0.35, 0, 0.1, 0.1), paint);
+    k.putRaw(R, stickGeo(L / 2, bedY - 0.15, 0.5, L / 2 + 1.6, 0.35, 0, 0.1, 0.1), paint);
+    for (const sz of [-1, 1]) k.box(0, bedY + Hs / 2, (sz * W) / 2, L / 2, Hs / 2, 0.03, 'sheetMetal', tag);
+    k.box(L / 2, bedY + Hs / 2, 0, 0.03, Hs / 2, W / 2, 'sheetMetal', tag);
+    k.box(0, bedY - 0.25, 0, L / 2, 0.3, W / 2 - 0.1, 'steel', tag);
+    return [2.6, 1.4];
+  }
+
+  // 궤도 트랙터 (DT-75 계열, 불탐): 두 줄 궤도, 엔진 덮개, 유리 없는 운전실, 라디에이터, 배기관
+  crawlerWreck(k, tag) {
+    const C = 'wreckCar';
+    for (const sz of [-1, 1]) {
+      k.put('track', boxGeo(2.9, 0.6, 0.4, 0.6), -0.1, 0.3, sz * 0.72, 0, 0xffffff, 0.2);
+      for (const x of [-1.0, -0.3, 0.4, 1.1]) k.put('darkSteel', cylGeo(0.2, 0.2, 0.42, 10), x, 0.24, sz * 0.72, [Math.PI / 2, 0, 0], 0x4a3c34);
+      k.box(-0.1, 0.3, sz * 0.72, 1.45, 0.3, 0.2, 'steel', tag);
+    }
+    k.put(C, boxGeo(1.6, 0.85, 0.95, 2), 0.55, 1.05, 0, 0, 0xffffff, 0.2);
+    k.put('interior', boxGeo(0.04, 0.6, 0.7), 1.36, 1.0, 0);
+    k.put(C, taperBoxGeo(1.3, 1.5, 1.15, 1.35, 1.25, 2), -0.75, 0.62, 0, 0, 0xffffff);
+    for (const sz of [-1, 1]) k.put('interior', boxGeo(0.8, 0.55, 0.04), -0.75, 1.45, sz * 0.7);
+    k.put('interior', boxGeo(0.04, 0.55, 1.05), -0.11, 1.45, 0);
+    k.put(C, boxGeo(1.4, 0.05, 1.55, 2), -0.75, 1.9, 0, [0.06, 0, 0.04, 'XYZ'], 0xd0c0b0);
+    k.putRaw('darkSteel', stickGeo(0.95, 1.45, -0.3, 0.97, 2.25, -0.3, 0.09, 0.09), 0x3a3028);
+    k.box(0.55, 1.05, 0, 0.8, 0.43, 0.48, 'steel', tag);
+    k.box(-0.75, 1.25, 0, 0.66, 0.62, 0.72, 'sheetMetal', tag);
+    return [1.8, 1.25];
+  }
+
+  // 썩은 건초: bale = 둥근 곤포 (위가 눌리고 아래가 퍼짐, stack 이면 위에 하나 더), heap = 무너진 건초 더미.
+  // 충돌 '건초' (관통 가능, 속도 크게 감소), 접지 그림자
+  hayPile(h) {
+    const H = CONFIG.farm.hay;
+    const rng = new Random(CONFIG.world.seed + 991 + Math.round(h.x * 7 + h.z * 3));
+    const col = () => H.colors[Math.floor(rng.next() * H.colors.length)];
+    const y = this.terrain.heightAt(h.x, h.z);
+    if (h.kind === 'heap') {
+      const g = new THREE.SphereGeometry(1, 16, 7, 0, Math.PI * 2, 0, Math.PI / 2);
+      const p = g.attributes.position;
+      const uv = g.attributes.uv;
+      const ph = rng.next() * 40;
+      for (let i = 0; i < p.count; i++) {
+        const px = p.getX(i);
+        const py = p.getY(i);
+        const pz = p.getZ(i);
+        const lump = 1 + 0.12 * Math.sin(px * 4.3 + ph) * Math.cos(pz * 3.7 + ph) + 0.05 * Math.sin(px * 11 + pz * 9);
+        p.setXYZ(i, px * h.r * lump, Math.pow(py, 1.25) * h.h * lump - 0.05, pz * h.r * (0.85 + 0.1 * Math.sin(px * 2 + ph)));
+        uv.setXY(i, uv.getX(i) * 0.5, uv.getY(i) * 2);
+      }
+      g.computeVertexNormals();
+      this.batch.add('hay', place(g, h.x, y, h.z, rng.next() * Math.PI), h.burnt ? H.burntColor : col(), h.burnt ? 0.5 : 0);
+      this.col.addBox(h.x, y + h.h * 0.4, h.z, h.r * 0.62, h.h * 0.4, h.r * 0.62, 0, 'hay', 'HAY');
+      // 타다 남은 더미는 둘레 땅이 넓게 그을렸다
+      if (h.burnt) this.contactShadows?.add({ x: h.x, z: h.z, hx: h.r * 1.5, hz: h.r * 1.4, shape: 'ellipse', preset: 'rubble', strength: 0.55, soft: 2.2 });
+      else this.contactShadows?.add({ x: h.x, z: h.z, hx: h.r * 1.05, hz: h.r * 0.95, shape: 'ellipse', preset: 'rubble' });
+      return;
+    }
+    const R = H.baleRadius;
+    const Wd = H.baleWidth;
+    const bale = (x, by, z, rot) => {
+      this.batch.add('hay', place(this.baleGeometry(R, Wd, rng), x, by, z, rot), col());
+      this.col.addBox(x, by + R * 0.78, z, R * 0.95, R * 0.78, Wd / 2, rot, 'hay', 'HAY');
+    };
+    bale(h.x, y, h.z, h.rot || 0);
+    if (h.stack) bale(h.x + rng.range(-0.15, 0.15), y + R * 1.5, h.z + rng.range(-0.15, 0.15), (h.rot || 0) + rng.range(-0.3, 0.3));
+    this.contactShadows?.add({ x: h.x, z: h.z, hx: R * 1.1, hz: Wd * 0.6, rot: h.rot || 0, shape: 'ellipse', preset: 'small', strength: 0.4 });
+  }
+
+  // 둥근 곤포: 축은 로컬 z, 바닥이 y=0. 옆면 = 텍스처 왼쪽 절반(짚 결), 마구리 = 오른쪽 절반(소용돌이). 썩어 위가 눌리고 아래가 퍼짐
+  baleGeometry(R, W, rng) {
+    const side = new THREE.CylinderGeometry(R, R, W, 16, 3, true);
+    const su = side.attributes.uv;
+    for (let i = 0; i < su.count; i++) su.setX(i, su.getX(i) * 0.5);
+    side.rotateX(Math.PI / 2);
+    const capA = new THREE.CircleGeometry(R, 16);
+    const cu = capA.attributes.uv;
+    for (let i = 0; i < cu.count; i++) cu.setX(i, 0.5 + cu.getX(i) * 0.5);
+    capA.translate(0, 0, W / 2);
+    const capB = capA.clone();
+    capB.rotateY(Math.PI);
+    const g = mergeGeometries([side.toNonIndexed(), capA.toNonIndexed(), capB.toNonIndexed()]);
+    const p = g.attributes.position;
+    const sq = rng.range(0.72, 0.86);
+    const ph = rng.next() * 10;
+    for (let i = 0; i < p.count; i++) {
+      let x = p.getX(i);
+      let y = p.getY(i);
+      const z = p.getZ(i);
+      const lump = 1 + 0.05 * Math.sin(x * 7 + ph) * Math.sin(y * 5 + z * 3 + ph);
+      if (y > 0) y *= sq;
+      else x *= 1.06;
+      p.setXYZ(i, x * lump, y * lump + R * 0.95, z);
+    }
+    g.computeVertexNormals();
+    return g;
+  }
+
+  // ------------------------------------------------------------------ 마무리: 벽 데칼 메시 + 철조망 선 (buildInstances 에서)
+  buildFarmExtras(group, materials) {
+    const D = this.decal;
+    if (D && D.idx.length && materials.farmDecal) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(D.pos, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(D.nrm, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(D.uv, 2));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(D.col, 3));
+      geo.setIndex(D.idx);
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, materials.farmDecal);
+      mesh.name = 'farmDecals';
+      mesh.receiveShadow = true;
+      mesh.matrixAutoUpdate = false;
+      // 투명 물체 중 먼저 (연기 기둥이 데칼 위에 그려지게)
+      mesh.renderOrder = -1;
+      group.add(mesh);
+    }
+    if (this.barbed && this.barbed.length) {
+      const W = CONFIG.enemyPosition.wire;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(this.barbed, 3));
+      geo.computeBoundingSphere();
+      const mat = new THREE.LineBasicMaterial({ color: W.color, transparent: W.opacity < 1, opacity: W.opacity });
+      const lines = new THREE.LineSegments(geo, mat);
+      lines.name = 'barbedWire';
+      lines.matrixAutoUpdate = false;
+      group.add(lines);
+    }
   }
 
   // ------------------------------------------------------------------ 중간 지대 차량 잔해 공용
@@ -2367,12 +3371,15 @@ export class StructureBuilder {
       chunk: new THREE.DodecahedronGeometry(0.5, 0),
       sandbag: this.sandbagGeometry(),
       crate: boxGeo(0.6, 0.24, 0.32, 0.6),
+      // 흉벽 흙덩이 (Structures.parapetClods): 각진 면으로 음영이 나뉘는 밝은 하층토 덩어리
+      clod: new THREE.DodecahedronGeometry(0.5, 0),
     };
     const mats = {
       brick: new THREE.MeshLambertMaterial({ color: 0xffffff }),
       chunk: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.concrete.map }),
       sandbag: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.sandbag.map }),
       crate: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.wood.map }),
+      clod: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
     };
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
@@ -2404,6 +3411,7 @@ export class StructureBuilder {
       }
     }
     this.buildDebrisInstances(group, materials);
+    this.buildFarmExtras(group, materials);
     return group;
   }
 

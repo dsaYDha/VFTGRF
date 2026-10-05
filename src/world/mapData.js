@@ -24,6 +24,11 @@ function canalCenterZ(x) {
 }
 // 시작 위치: 수로 북쪽 사격 발판(둔덕 뒤) 위, 모래주머니 사격 위치. canal.bench 의 inner~outer 사이
 const SPAWN_X = -18;
+// 원경 배치용: 맵 중심에서 방위각(도, 0 = 북, 시계방향)·거리(m) → { x, z }
+function polar(bearing, dist) {
+  const a = (bearing * Math.PI) / 180;
+  return { x: Math.round(Math.sin(a) * dist * 10) / 10, z: Math.round(-Math.cos(a) * dist * 10) / 10 };
+}
 
 export const MAP = {
   playerSpawn: { x: SPAWN_X, z: canalCenterZ(SPAWN_X) - 2.42, yaw: 0, posture: 'crouch' },
@@ -148,6 +153,13 @@ export const MAP = {
       ],
     ],
     commDepth: 1.3,
+    // 흉벽 모래주머니 구간 (참호선 lines[line] 의 x 범위, 흉벽 마루 위에 2줄 3단, loopholes = 사격 구멍 수).
+    // 참호 사격 위치(AI_MAP T1·T2 fps x)에서 5m 이상, 뒤쪽 건물·잔해 사격 위치(B1·B2·R1)의 엎드려쏴 사선이 참호선을 지나는 곳은 피한다.
+    sandbagRuns: [
+      { line: 0, x0: -120, x1: -114, loopholes: 1 },
+      { line: 0, x0: -93, x1: -80, loopholes: 2 },
+      { line: 1, x0: 69, x1: 81, loopholes: 1 },
+    ],
   },
 
   // 엄체호 (통나무·흙으로 덮음)
@@ -157,7 +169,51 @@ export const MAP = {
     { x: 79, z: -99.0, w: 4.8, d: 3.4, rot: 0.03 },
   ],
 
-  camoNets: [{ x: 96, z: -92.5, w: 9, d: 5, h: 2.1 }],
+  // 위장망: h = 그물 높이 (참호 위 그물은 흉벽 바로 위로 낮게 덮는다), rot = Y 회전.
+  // 은폐 볼륨이 되므로 사격 위치(참호 fps)에서 떨어뜨리고 뒤쪽 건물 사격 위치의 사선 밖에 둔다
+  camoNets: [
+    { x: 96, z: -92.5, w: 9, d: 5, h: 2.1 },
+    { x: -108, z: -90.2, w: 8, d: 4.6, h: 1.0, rot: 0.25 },
+    { x: 117, z: -92.6, w: 7, d: 4.4, h: 1.0, rot: -0.12 },
+    { x: -84, z: -98.6, w: 6.4, d: 4.8, h: 1.25, rot: 0.05 }, // 엄체호 위
+  ],
+
+  // 철조망 (참호 앞 20~40m): fences = 말뚝 철조망(이중 에이프런), coils = 원형 철조망 (점 목록은 서 → 동).
+  // gaps = 적 이동 경로(AI_MAP.edges T1>F1, T2>F2)와 농로가 지나가는 틈 [x0, x1] — 적은 충돌체를 무시하고 움직이므로
+  // 경로 위에 철조망이 있으면 뚫고 지나가는 것처럼 보인다. 포탄 구덩이에 걸린 곳은 끊어져 있다 (CONFIG.enemyPosition.wire)
+  wire: {
+    fences: [
+      [
+        [-124, -58.5],
+        [-96, -60.5],
+        [-64, -61],
+        [-40, -60.5],
+        [-8, -62],
+        [22, -62.5],
+        [54, -61.5],
+        [90, -60.5],
+        [126, -58.5],
+      ],
+    ],
+    coils: [
+      [
+        [-123, -66],
+        [-92, -67.5],
+        [-60, -68],
+        [-30, -67],
+        [-6, -69],
+        [20, -69.5],
+        [50, -68.5],
+        [86, -67.5],
+        [125, -66],
+      ],
+    ],
+    gaps: [
+      [-42, -26],
+      [0, 12],
+      [34, 48],
+    ],
+  },
 
   // ---------------------------------------------------------------- 건물
   barns: [
@@ -227,7 +283,19 @@ export const MAP = {
       partitions: [],
     },
   ],
-  silo: { x: -122, z: -176, r: 3.4, h: 23 },
+  // 곡물 저장탑: holes = 큰 포탄 구멍 (ang = 둘레 각 rad, 0 = 남(+z), π/2 = 동(+x) / y = 높이 비율 / w·h = 크기 m)
+  silo: {
+    x: -122,
+    z: -176,
+    r: 3.4,
+    h: 23,
+    holes: [
+      { ang: 0.55, y: 0.44, w: 1.9, h: 1.5 },
+      { ang: 5.72, y: 0.71, w: 1.2, h: 1.05 },
+      { ang: 2.6, y: 0.72, w: 1.6, h: 1.3 },
+      { ang: 1.35, y: 0.19, w: 0.8, h: 0.65 },
+    ],
+  },
   garage: { x: 98, z: -128, w: 18, d: 12, h: 5.2 },
   // 무너진 소건물 (사무동) 잔해 + 남은 벽 모서리
   ruins: [{ id: 'R1', x: -12, z: -121, moundR: 4.6, moundH: 1.35, walls: true }],
@@ -238,6 +306,41 @@ export const MAP = {
     { x: 118, z: -160, r: 3.0, h: 0.9 },
   ],
   barricade: { x: 15, z: -91, rot: 0.08 },
+
+  // 집단농장 주변 소품 (수치는 CONFIG.farm). 증원 경로(AI_MAP.spawnPoints → 각 노드 approach)와 사격 위치 사선을 피해
+  // 단지 서쪽(x < -105)·동쪽(x > 108) 가장자리에 둔다.
+  farm: {
+    // 소련식 무늬 콘크리트 담장 (판 하나 4m): points = 담장 선, missing = 빠진 판 번호(선 처음부터 0..), fallen = 쓰러진 판, lean = 기운 판
+    fences: [
+      { points: [[-152, -106], [-152, -204], [-112, -204]], missing: [1, 9, 17, 27], fallen: [3, 4, 12, 21, 31], lean: [2, 13, 22, 30] },
+      { points: [[170, -108], [170, -180]], missing: [5, 6, 12], fallen: [2, 10, 15], lean: [3, 9] },
+    ],
+    // 녹슨 농기계: combine 콤바인, harrow 원판 써레, seeder 파종기, trailer 짐 트레일러, crawler 궤도 트랙터. rot = Y 회전 (로컬 +x = 앞)
+    machinery: [
+      { kind: 'combine', x: -136, z: -150, rot: 0.55 },
+      { kind: 'harrow', x: -131, z: -127, rot: 1.2 },
+      { kind: 'seeder', x: 146, z: -152, rot: -0.4 },
+      { kind: 'trailer', x: 112, z: -184, rot: 1.62 },
+      { kind: 'crawler', x: 152, z: -195, rot: 2.3 },
+    ],
+    // 썩은 건초: bale = 둥근 곤포 (stack = 그 위에 하나 더), heap = 무너진 건초 더미 (r 반지름, h 높이, burnt = 타다 남음)
+    hay: [
+      { kind: 'bale', x: -140, z: -190, rot: 0.3, stack: true },
+      { kind: 'bale', x: -137.6, z: -191.6, rot: 0.25 },
+      { kind: 'bale', x: -142.8, z: -187.2, rot: 1.9 },
+      { kind: 'heap', x: -134, z: -198.5, r: 3.4, h: 1.6 },
+      { kind: 'heap', x: -118.5, z: -188.6, r: 2.5, h: 1.0, burnt: true }, // 저장탑 뒤 연기(MAP.smokeSources)가 오르는 타다 남은 건초 더미
+      { kind: 'bale', x: 146, z: -205, rot: 1.2, stack: true },
+      { kind: 'bale', x: 148.2, z: -207.8, rot: 1.3 },
+      { kind: 'bale', x: 143.4, z: -209, rot: 2.6 },
+      { kind: 'heap', x: 157, z: -214, r: 3.0, h: 1.4 },
+    ],
+    // 불탄 차량 (Structures.car 와 같은 잔해: sedan | van | truck)
+    vehicles: [
+      { kind: 'van', x: 141, z: -124.6, rot: 0.33 },
+      { kind: 'sedan', x: -131, z: -116.5, rot: -0.12 },
+    ],
+  },
 
   // ---------------------------------------------------------------- 중간 지대
   apc: { x: -46, z: 11, rot: 0.45, tag: 'APC' },
@@ -394,12 +497,80 @@ export const MAP = {
   ],
 
   // 원경 연기 기둥 (방위각 도, 거리 m, 크기 배수). 안개(시정 600m)에 섞여 희미한 실루엣으로만 보인다.
-  // 너무 멀면(2km+) 안개에 완전히 묻히므로 1~1.6km 에 둔다 (먼 마을 실루엣도 이 방위·거리를 따른다)
+  // 너무 멀면(2km+) 안개에 완전히 묻히므로 1~1.6km 에 둔다. 불타는 먼 마을(MAP.distant.villages 의 북쪽·북동·서북서 마을) 길가 집에서 오른다
   distantSmoke: [
-    { bearing: 348, dist: 1250, size: 1.0 },
-    { bearing: 31, dist: 1550, size: 0.8 },
-    { bearing: 297, dist: 1100, size: 0.9 },
+    { bearing: 351.6, dist: 1310, size: 1.0 },
+    { bearing: 33.5, dist: 1607, size: 0.8 },
+    { bearing: 295, dist: 1128, size: 0.9 },
   ],
+
+  // ---------------------------------------------------------------- 원경 (맵 밖, 접근 불가) — Distant.js · Terrain.buildFar
+  // 수치(언덕·밭 구획·집 크기·색)는 CONFIG.distant. 숲·수림대는 두지 않는다 (스텝 개활지).
+  distant: {
+    // 마을: 중심 (방위각·거리 → x, z), 큰길 방위각(도, 0 = 북)·길이·집 수 (길 양쪽), cross = 큰길 at m 지점에서 갈라지는 길,
+    // damage = 부서진·불탄 집 비율 배수 (전선 쪽 마을은 크게), church / waterTower / elevator / farm = 큰길 at m 지점, side 쪽(±1) off m
+    villages: [
+      // 북쪽 (적 진지 뒤): 불타는 마을, 교회
+      { ...polar(349, 1320), street: 90, len: 900, houses: 46, cross: [{ at: -150, len: 460, houses: 16 }], church: { at: 80, side: -1, off: 40 }, damage: 1.0 },
+      // 북동: 집단농장 중심 마을 — 급수탑, 곡물 창고, 축사
+      {
+        ...polar(32, 1750),
+        street: 18,
+        len: 1000,
+        houses: 52,
+        cross: [{ at: 260, len: 380, houses: 12 }],
+        waterTower: { at: -330, side: 1, off: 60 },
+        elevator: { at: 420, side: -1, off: 95 },
+        farm: { at: -60, side: -1, off: 170, barns: 4 },
+        damage: 0.7,
+      },
+      // 서북서: 작은 마을
+      { ...polar(296, 1150), street: 160, len: 460, houses: 18, damage: 1.0 },
+      // 남쪽 (아군 후방): 교회, 급수탑
+      { ...polar(197, 1500), street: 80, len: 820, houses: 36, church: { at: -60, side: 1, off: 42 }, waterTower: { at: 300, side: -1, off: 70 }, damage: 0.15 },
+      // 동쪽 (수로가 이어지는 쪽)
+      { ...polar(97, 1900), street: 5, len: 700, houses: 28, waterTower: { at: 120, side: 1, off: 55 }, damage: 0.35 },
+      // 서남서
+      { ...polar(258, 1900), street: 100, len: 720, houses: 26, church: { at: 150, side: -1, off: 40 }, damage: 0.25 },
+    ],
+    // 외딴 농장 작업장 (축사 barns 동 + 급수탑): 수로 남남동 약 800m (남쪽을 보면 왼쪽 안개 속 실루엣)
+    farms: [{ ...polar(155, 870), angle: 75, barns: 3, waterTower: true }],
+    // 완만한 언덕 (노이즈 언덕 CONFIG.distant.terrain.hills 위에 더한다): 중심, 반지름 r (코사인 둔덕), 높이 h (m).
+    // 북쪽·북동 마을은 집단농장 너머 비탈에 올라앉아 축사 지붕 위로 실루엣이 보인다
+    hills: [
+      { x: -180, z: -1520, r: 950, h: 26 },
+      { x: 1020, z: -1780, r: 850, h: 30 },
+      { x: -560, z: 1820, r: 900, h: 20 },
+      { x: 2450, z: -150, r: 1000, h: 28 },
+      { x: -2350, z: -350, r: 1100, h: 34 },
+      { x: 300, z: -3300, r: 1400, h: 40 },
+    ],
+    // 맵 밖 농로 (지면 셰이더가 칠한다). 첫 점이 맵 가장자리면 맵 안 농로가 그대로 이어지고, 첫 구간(남북 직선)은 단면을 판다
+    roads: [
+      { points: [[8, 300], [8, 1150], [-34, 1363]] }, // 맵 안 농로 남쪽 끝 → 남쪽 마을
+      { points: [[-842, 1505], [-1300, 1100], [-1504, 457]] }, // 남쪽 마을 → 서남서 마을
+      { points: [[44, -300], [44, -700], [-20, -1000], [-110, -1296]] }, // 맵 안 농로 북쪽 끝 → 북쪽 마을
+      { points: [[198, -1296], [480, -1180], [773, -1009]] }, // 북쪽 마을 → 북동 마을
+      { points: [[8, 880], [200, 800], [330, 760]] }, // 남쪽 농로 → 외딴 농장
+    ],
+    // 송전선 (점을 따라 spacing m 마다 탑): pylon = 맵 안과 같은 110kV 격자 탑, big = 큰 송전탑 (CONFIG.distant.bigScale),
+    // pole = 콘크리트 전신주 (CONFIG.midfield.poles). anchor = 첫 점이 맵 안 송전탑·전신주 (전선이 거기서 이어진다)
+    lines: [
+      { kind: 'pylon', anchor: 'pylonsEast', points: [[266, -66], [1140, -177], [2600, -570], [4700, -1130]], spacing: 110 },
+      { kind: 'pylon', anchor: 'pylonsWest', points: [[-282, 4], [-1170, 117], [-2500, 460], [-4700, 820]], spacing: 110 },
+      { kind: 'big', points: [[-4700, 1420], [-1600, 930], [600, 650], [2300, 900], [4700, 1560]], spacing: 330 },
+      { kind: 'pole', anchor: 'polesSouth', points: [[2.6, 262], [2.6, 1150], [-40, 1358]], spacing: 54 },
+    ],
+    // 맵 밖으로 이어지는 수로의 물 고인 구간 (x 범위)
+    canalWater: [
+      [316, 372],
+      [455, 548],
+      [690, 742],
+      [-372, -318],
+      [-520, -455],
+      [-800, -735],
+    ],
+  },
   // 건물 화재 연기 (가는 파티클 기둥, 회색~검정): 축사 B2 동쪽 무너진 끝 안쪽, 곡물 저장탑 뒤(북쪽)
   smokeSources: [
     { x: 60, z: -151, kind: 'fire', size: 1.0 },
@@ -412,6 +583,7 @@ export const MAP = {
 //  fire: 사격 자세 (stand | kneel | prone), cover: 엄폐 자세 (duck | prone | kneel)
 //  step: 참호 사격 발판 사용, fireOffset/coverOffset: 기준점에서의 이동 (월드 xz)
 //  coverRef: 이 위치의 엄폐물 ('terrain' 또는 충돌체 태그) — 엄폐물 탄착 5m 규칙에 사용
+//  rimInset (구덩이 노드): 엎드려쏴 골반이 구덩이 반지름 안쪽으로 들어간 거리 (작을수록 눈이 높다, 기본 0.8)
 // =============================================================================
 const FACE = [0, CANAL_Z]; // 기본: 플레이어 쪽 (수로 중앙)
 
@@ -454,7 +626,8 @@ export const AI_MAP = {
       ],
       fps: [
         { x: 28, z: -145.2, fire: 'stand', cover: 'duck', coverRef: 'B2', face: FACE },
-        { x: 44, z: -145.4, fire: 'kneel', cover: 'duck', coverRef: 'B2', face: FACE, fireOffset: [0.9, 0], coverOffset: [-0.4, -0.5] },
+        // 바닥까지 뚫린 큰 포탄 구멍(s 4, 폭 3.2m): 엄폐는 구멍 동쪽 벽 뒤 (구멍 정면에 웅크리면 수로에서 머리가 보인다)
+        { x: 44, z: -145.4, fire: 'kneel', cover: 'duck', coverRef: 'B2', face: FACE, fireOffset: [0.9, 0], coverOffset: [2.5, 0.25] },
         { x: 52.6, z: -145.0, fire: 'prone', cover: 'prone', coverRef: 'B2', face: FACE, coverOffset: [0, -0.9] },
         { x: 56, z: -145.2, fire: 'stand', cover: 'duck', coverRef: 'B2', face: FACE },
       ],
@@ -485,8 +658,10 @@ export const AI_MAP = {
         [-14, -128],
       ],
       fps: [
-        { x: -10.8, z: -118.2, fire: 'kneel', cover: 'duck', coverRef: 'R1', face: FACE, fireOffset: [0.95, 0.1] },
-        { x: -13.6, z: -118.3, fire: 'prone', cover: 'prone', coverRef: ['R1', 'terrain'], face: FACE, coverOffset: [0, -1.2] },
+        // 엄폐는 남쪽 벽에 바짝 붙어(벽 밑동이 잔해 둔덕에 묻혀 낮아진 만큼) 동쪽 비스듬한 시선에서도 머리가 가려지게
+        { x: -10.8, z: -118.2, fire: 'kneel', cover: 'duck', coverRef: 'R1', face: FACE, fireOffset: [0.95, 0.1], coverOffset: [-0.25, 0.25] },
+        // 무너진 벽 틈(낮음)으로 엎드려쏴, 엄폐는 틈 서쪽 온전한 벽 뒤에 엎드림 (둔덕 위로 물러나면 머리가 벽 위로 드러난다)
+        { x: -13.6, z: -118.3, fire: 'prone', cover: 'prone', coverRef: ['R1', 'terrain'], face: FACE, coverOffset: [-1.1, 0] },
         { x: -15.6, z: -118.4, fire: 'kneel', cover: 'duck', coverRef: 'R1', face: FACE, fireOffset: [-0.95, 0.1] },
       ],
     },
@@ -534,6 +709,9 @@ export const AI_MAP = {
       next: ['L1'],
       light: 'crater',
       crater: 'F1',
+      // 엎드린 몸(골반)이 테두리 반지름 안쪽 rimInset m: 기복·다른 구덩이 테두리·쓰러진 전신주가 있는 개활지 너머 수로까지
+      // 사선이 열리도록 눈이 자연 지면 위 약 0.47m (테두리 마루 바로 위)에 오게 한다. 엄폐(구덩이 바닥 쪽)는 그대로
+      rimInset: 0.6,
       fps: [
         { rim: -0.35, fire: 'prone', cover: 'prone', coverRef: 'terrain', face: FACE },
         { rim: 0.3, fire: 'prone', cover: 'prone', coverRef: 'terrain', face: FACE },
@@ -546,6 +724,7 @@ export const AI_MAP = {
       next: ['L2'],
       light: 'crater',
       crater: 'F2',
+      rimInset: 0.6,
       fps: [
         { rim: -0.3, fire: 'prone', cover: 'prone', coverRef: 'terrain', face: FACE },
         { rim: 0.32, fire: 'prone', cover: 'prone', coverRef: 'terrain', face: FACE },
@@ -560,8 +739,9 @@ export const AI_MAP = {
       line: true,
       vehicle: 'apc',
       fps: [
-        { local: [-1.4, -2.7], fireLocal: [-3.7, -2.1], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
-        { local: [1.6, -2.7], fireLocal: [4.1, -2.0], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
+        // 엄폐는 차체 옆면에 바짝 붙어 앉는다 (낮아진 차체 뒤에서 비스듬한 시선에 머리가 드러나지 않게)
+        { local: [-0.95, -1.95], fireLocal: [-3.7, -2.1], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
+        { local: [1.3, -2.0], fireLocal: [4.1, -2.0], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
       ],
     },
     L2: {

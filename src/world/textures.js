@@ -1746,3 +1746,401 @@ export function bulletHoleTexture() {
     );
   });
 }
+
+// ---------------------------------------------------------------------------
+// 적 진지·집단농장 (축사 그을음·탄흔 데칼, 곡물 저장탑, 소련식 무늬 콘크리트 담장, 썩은 건초, 벽돌 잔해 더미)
+
+// w x h RGBA 픽셀 캔버스 (정사각형이 아닌 것). fn(x, y, col) — col = [r, g, b, a] (0..255)
+function pixelCanvas(w, h, fn) {
+  const c = canvas(w, h);
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  const col = [0, 0, 0, 255];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      col[3] = 255;
+      fn(x, y, col);
+      const i = (y * w + x) * 4;
+      d[i] = col[0];
+      d[i + 1] = col[1];
+      d[i + 2] = col[2];
+      d[i + 3] = col[3];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+// 벽 데칼 아틀라스 (4 x 2 칸, 칸마다 알파 무늬). UV 칸 번호는 Structures 의 DECAL 표와 같다:
+//  0 창·구멍 위로 번진 그을음 (아래 가운데에서 위로 넓어짐)  1 포탄 구멍·무너진 곳 가장자리 그을림 띠 (아래 끝 = 구멍 가장자리)
+//  2 탄흔 무리 (어두운 구멍 + 밝게 떨어져 나간 둘레)  3 떨어져 나간 회반죽·벽면 (밝은 얼룩 + 어두운 테두리)
+//  4 위에서 흘러내린 빗물·그을음 세로줄  5 벽 아래 습기·이끼 띠  6 금 (가지 친 가는 선)  7 둥근 그을림 얼룩
+// 칸 가장자리 몇 px 는 비워 밉맵 번짐을 막는다. 칸 안 y 는 위로 증가 (캔버스는 뒤집어 그린다).
+export function farmDecalTexture(w = 1024, h = 512) {
+  return cached(`farmDecal${w}x${h}`, () => {
+    const cw = w / 4;
+    const ch = h / 2;
+    const fA = makeFbm(601, 4, 4);
+    const fB = makeFbm(602, 8, 3);
+    const streakN = rectFbm(603, 24, 2, 3);
+    const pad = 6;
+    const c = pixelCanvas(w, h, (x, y, col) => {
+      const cell = Math.floor(x / cw) + 4 * Math.floor(y / ch);
+      const lx = x % cw;
+      const ly = y % ch;
+      const u = lx / cw;
+      const v = 1 - ly / ch; // 칸 안에서 위로 증가
+      const edge = Math.min(lx, ly, cw - 1 - lx, ch - 1 - ly);
+      const n = fA(u + cell * 0.31, v * 0.9 + cell * 0.17, 0.55);
+      const m = fB(u * 1.3 + cell * 0.23, v + cell * 0.41, 0.5);
+      let a = 0;
+      let rgb = [26, 23, 21];
+      if (cell === 0) {
+        // 그을음 기둥: 아래(v=0) 가운데에서 위로 넓어지며 옅어짐
+        const wdt = 0.16 + 0.34 * v + (n - 0.5) * 0.22;
+        const dx = Math.abs(u - 0.5 - (m - 0.5) * 0.25 * v);
+        a = (1 - smooth(wdt * 0.55, wdt, dx)) * Math.pow(1 - v, 0.8) * (0.55 + 0.6 * n);
+        a = Math.min(0.9, a * 1.15);
+      } else if (cell === 1) {
+        // 가장자리 그을림 띠: v=0(구멍 가장자리)에서 가장 짙고 들쭉날쭉하게 사라짐
+        const reach = 0.55 + (n - 0.5) * 0.7 + (m - 0.5) * 0.3;
+        a = (1 - smooth(reach * 0.25, reach, v)) * 0.9;
+        rgb = [30, 26, 22];
+      } else if (cell === 3) {
+        // 떨어져 나간 벽면: 날카로운 경계의 밝은 얼룩 + 어두운 테두리
+        const r = Math.hypot(u - 0.5, v - 0.5) * 2 + (n - 0.5) * 0.7;
+        const inside = 1 - smooth(0.6, 0.64, r);
+        const rim = smooth(0.5, 0.6, r) * (1 - smooth(0.64, 0.72, r));
+        if (inside > 0.01) {
+          const s = 132 + (m - 0.5) * 40 + (hashPx(x, y, 31) - 0.5) * 24;
+          rgb = [s, s * 0.97, s * 0.92];
+          a = inside * 0.6;
+        }
+        if (rim > 0.01) {
+          rgb = [48, 44, 40];
+          a = Math.max(a, rim * 0.6);
+        }
+      } else if (cell === 4) {
+        // 빗물·그을음 세로줄: 위(v=1)에서 아래로 흘러내림
+        const sN = streakN(u, v, 0.5);
+        const len = 0.25 + sN * 0.9;
+        a = smooth(0.42, 0.75, sN) * smooth(1 - len, 1, v) * 0.7;
+        rgb = [40, 38, 34];
+      } else if (cell === 5) {
+        // 벽 아래 습기·이끼: 물결진 경계
+        const top = 0.38 + (n - 0.5) * 0.3;
+        a = (1 - smooth(top * 0.6, top, v)) * (0.55 + 0.3 * m);
+        rgb = mix3([46, 44, 36], [58, 66, 44], smooth(0.45, 0.7, m));
+      } else if (cell === 7) {
+        // 둥근 그을림 얼룩
+        const r = Math.hypot(u - 0.5, v - 0.5) * 2 + (n - 0.5) * 0.55;
+        a = (1 - smooth(0.25, 0.92, r)) * 0.85;
+      }
+      if (edge < pad) a = 0;
+      col[0] = clamp255(rgb[0]);
+      col[1] = clamp255(rgb[1]);
+      col[2] = clamp255(rgb[2]);
+      col[3] = clamp255(a * 255);
+    });
+    const ctx = c.getContext('2d');
+    const rng = new Random(611);
+    // 2: 탄흔 무리 — 밝게 떨어져 나간 둘레 + 어두운 구멍
+    {
+      const ox = cw * 2;
+      const oy = 0;
+      for (let k = 0; k < 46; k++) {
+        const r = Math.abs(rng.gaussian()) * cw * 0.17;
+        const ang = rng.next() * Math.PI * 2;
+        const px = ox + cw / 2 + Math.cos(ang) * r;
+        const py = oy + ch / 2 + Math.sin(ang) * r;
+        if (px < ox + 14 || px > ox + cw - 14 || py < oy + 14 || py > oy + ch - 14) continue;
+        const s = 1.8 + rng.next() * 3;
+        ctx.fillStyle = 'rgba(150,145,136,0.42)';
+        ctx.beginPath();
+        ctx.ellipse(px, py, s * 1.8, s * (1.3 + rng.next() * 0.8), rng.next() * 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(22,20,18,0.92)';
+        ctx.beginPath();
+        ctx.ellipse(px, py, s, s * 0.85, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // 6: 금 — 가운데에서 가지 치며 뻗는 가는 선
+    {
+      const ox = cw * 2;
+      const oy = ch;
+      ctx.strokeStyle = 'rgba(24,22,20,0.85)';
+      ctx.lineCap = 'round';
+      const branch = (x, y, ang, len, wdt, depth) => {
+        let px = x;
+        let py = y;
+        ctx.lineWidth = wdt;
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        const steps = Math.max(2, Math.round(len / 6));
+        for (let i = 0; i < steps; i++) {
+          ang += (rng.next() - 0.5) * 0.7;
+          px += Math.cos(ang) * 6;
+          py += Math.sin(ang) * 6;
+          px = Math.max(ox + 8, Math.min(ox + cw - 8, px));
+          py = Math.max(oy + 8, Math.min(oy + ch - 8, py));
+          ctx.lineTo(px, py);
+          if (depth < 3 && rng.next() < 0.18) {
+            ctx.stroke();
+            branch(px, py, ang + (rng.next() < 0.5 ? -1 : 1) * (0.5 + rng.next() * 0.6), len * 0.5, wdt * 0.7, depth + 1);
+            ctx.lineWidth = wdt;
+            ctx.beginPath();
+            ctx.moveTo(px, py);
+          }
+        }
+        ctx.stroke();
+      };
+      for (let k = 0; k < 5; k++) branch(ox + cw / 2, oy + ch / 2, (k / 5) * Math.PI * 2 + rng.next() * 0.6, 110 + rng.next() * 40, 2.2, 0);
+    }
+    return finish(c, { repeat: false });
+  });
+}
+
+// 곡물 저장탑 (둘레 u 0..1 = 남쪽(+z)부터 동쪽으로 한 바퀴, 캔버스 위 = 탑 꼭대기). 슬립폼 이음 줄(1.2m 마다),
+// 위에서 흘러내린 빗물 세로줄, 큰 구멍(holes) 아래 녹물·위로 번진 그을음, 아래쪽 습기 띠,
+// 남쪽(플레이어 쪽) 아래 절반에 몰린 탄흔. 구멍은 거의 검은 들쭉날쭉한 자리 + 부서진 밝은 테두리 + 철근.
+export function siloTexture(w, h, { r, height, holes, pocks }) {
+  return cached(`silo${w}x${h}`, () => {
+    const circ = Math.PI * 2 * r;
+    const f = makeFbm(621, 4, 5);
+    const g = makeFbm(622, 16, 3);
+    const streak = rectFbm(623, 48, 3, 3);
+    const pxPerM = h / height;
+    const holePx = holes.map((o) => ({
+      cx: ((((o.ang / (Math.PI * 2)) % 1) + 1) % 1) * w,
+      cy: (1 - o.y) * h,
+      hw: ((o.w / circ) * w) / 2,
+      hh: (o.h * pxPerM) / 2,
+    }));
+    const c = pixelCanvas(w, h, (x, y, col) => {
+      const u = x / w;
+      const v = y / h; // 0 = 꼭대기
+      const n = f(u, v * 1.2, 0.5);
+      let s = 134 + (n - 0.5) * 22 + (g(u, v, 0.5) - 0.5) * 12;
+      const hp = hashPx(x, y, 17);
+      if (hp < 0.05) s += (hp / 0.05 - 0.5) * 30;
+      // 슬립폼 이음 (1.2m 마다 가는 가로줄)
+      const lift = (y / pxPerM) % 1.2;
+      if (lift < 0.035) s -= 12;
+      // 빗물 세로줄 (위에서 시작해 길이가 제각각)
+      const sN = streak(u, v * 0.5, 0.5);
+      s -= smooth(0.5, 0.8, sN) * (1 - smooth(0.2 + sN * 0.7, 1.0, v)) * 26;
+      // 아래쪽 습기 띠
+      const hm = height * (1 - v);
+      s -= (1 - smooth(0.6, 1.8 + n * 0.8, hm)) * 28;
+      let rr = s;
+      let gg = s * 0.985;
+      let bb = s * 0.95;
+      // 구멍 아래 녹물 줄 / 위로 번진 그을음
+      for (const o of holePx) {
+        let dx = Math.abs(x - o.cx);
+        dx = Math.min(dx, w - dx);
+        const below = y - (o.cy + o.hh * 0.6);
+        if (below > 0 && dx < o.hw * 0.9) {
+          const k = (1 - smooth(o.hw * 0.25, o.hw * 0.9, dx + (n - 0.5) * o.hw)) * (1 - smooth(0, pxPerM * (3 + n * 4), below));
+          rr = rr * (1 - k * 0.35) + 120 * k * 0.35;
+          gg = gg * (1 - k * 0.45) + 70 * k * 0.45;
+          bb = bb * (1 - k * 0.55) + 40 * k * 0.55;
+        }
+        const above = o.cy - o.hh - y;
+        if (above > -o.hh && dx < o.hw * 2.2) {
+          const reach = pxPerM * (2.5 + n * 2);
+          const k = (1 - smooth(o.hw * (0.6 + Math.max(0, above) / reach), o.hw * 2.2, dx)) * (1 - smooth(0, reach, Math.max(0, above)));
+          rr *= 1 - k * 0.7;
+          gg *= 1 - k * 0.7;
+          bb *= 1 - k * 0.7;
+        }
+      }
+      col[0] = clamp255(rr);
+      col[1] = clamp255(gg);
+      col[2] = clamp255(bb);
+    });
+    const ctx = c.getContext('2d');
+    const rng = new Random(631);
+    // 탄흔: 남쪽(u≈0, 1) 아래쪽에 몰림
+    for (let k = 0; k < pocks; k++) {
+      const uu = (rng.gaussian() * 0.16 + 1) % 1;
+      const vv = 1 - Math.min(0.95, Math.abs(rng.gaussian()) * 0.32 + 0.02);
+      const px = uu * w;
+      const py = vv * h;
+      const s = 0.7 + rng.next() * 1.2;
+      ctx.fillStyle = 'rgba(178,174,166,0.32)';
+      ctx.beginPath();
+      ctx.arc(px, py, s * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(46,44,42,0.85)';
+      ctx.beginPath();
+      ctx.arc(px, py, s * 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // 큰 구멍: 들쭉날쭉한 검은 자리 + 밝게 부서진 테두리 + 철근
+    for (const o of holePx) {
+      for (const pass of [0, 1]) {
+        ctx.fillStyle = pass === 0 ? 'rgba(188,182,170,0.9)' : 'rgba(14,13,12,1)';
+        const grow = pass === 0 ? 1.28 : 1;
+        ctx.beginPath();
+        const N = 22;
+        for (let i = 0; i <= N; i++) {
+          const a = (i / N) * Math.PI * 2;
+          const jag = 0.72 + rng.next() * 0.36;
+          const px = o.cx + Math.cos(a) * o.hw * grow * jag;
+          const py = o.cy + Math.sin(a) * o.hh * grow * jag;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.fill();
+      }
+      ctx.strokeStyle = 'rgba(70,52,40,0.95)';
+      ctx.lineWidth = 1.2;
+      for (let k = 0; k < 4; k++) {
+        const py = o.cy + (k / 3 - 0.5) * o.hh * 1.4;
+        ctx.beginPath();
+        ctx.moveTo(o.cx - o.hw * 1.1, py);
+        ctx.quadraticCurveTo(o.cx, py + (rng.next() - 0.3) * o.hh * 0.8, o.cx + o.hw * (0.2 + rng.next() * 0.9), py + rng.next() * 3);
+        ctx.stroke();
+      }
+    }
+    return finish(c);
+  });
+}
+
+// 소련식 무늬 콘크리트 담장 판 (ПО-2 마름모 무늬, 판 한 장 = 텍스처 한 장: u = 길이, v = 높이).
+// 가장자리 테두리 + 마름모 격자를 빛(왼쪽 위)으로 음영을 넣어 돋을새김처럼, 위에서 흘러내린 빗물 줄,
+// 아래쪽 흙탕물 튄 자국·이끼, 위쪽 걸이 고리 아래 녹물.
+export function fencePanelTexture(w = 512, h = 256) {
+  return cached(`fencePanel${w}x${h}`, () => {
+    const f = makeFbm(641, 4, 4);
+    const streak = rectFbm(642, 32, 2, 3);
+    const cols = 12;
+    const rows = 6;
+    const border = 0.045;
+    const c = pixelCanvas(w, h, (x, y, col) => {
+      const u = x / w;
+      const v = y / h; // 0 = 위
+      const n = f(u, v, 0.5);
+      let s = 150 + (n - 0.5) * 22;
+      const hp = hashPx(x, y, 23);
+      if (hp < 0.05) s += (hp / 0.05 - 0.5) * 26;
+      // 무늬: 테두리 안쪽만
+      const bu = Math.min(u, 1 - u) * 4.0;
+      const bv = Math.min(v, 1 - v) * 2.2;
+      const inB = Math.min(bu, bv);
+      if (inB < border) s += 10;
+      else if (inB < border + 0.012) s -= 18; // 테두리 안쪽 그늘
+      else {
+        const cu = ((u - border / 4) * cols) % 1;
+        const cv = ((v - border / 2.2) * rows) % 1;
+        const du = cu - 0.5;
+        const dv = cv - 0.5;
+        const d = Math.abs(du) * 2 + Math.abs(dv) * 2;
+        if (d < 0.86) {
+          // 마름모 피라미드 면: 왼쪽 위를 향한 면은 밝게, 오른쪽 아래는 어둡게
+          const lit = (du < 0 ? 1 : -1) * 0.55 + (dv < 0 ? 1 : -1) * 0.8;
+          s += lit * 13;
+        } else if (d < 0.97) s -= 14; // 홈
+      }
+      // 빗물 세로줄 (위에서)
+      const sN = streak(u, v * 0.6, 0.5);
+      s -= smooth(0.5, 0.78, sN) * (1 - smooth(0.15 + sN * 0.6, 0.95, v)) * 22;
+      let rr = s;
+      let gg = s * 0.985;
+      let bb = s * 0.95;
+      // 아래 흙탕물·이끼
+      const bot = 1 - smooth(0.68 + (n - 0.5) * 0.18, 0.95, v);
+      const mossy = smooth(0.55, 0.7, f(u * 3 + 5, v * 2, 0.5));
+      rr = rr * (0.62 + 0.38 * bot);
+      gg = gg * (0.66 + 0.34 * bot) + (1 - bot) * mossy * 8;
+      bb = bb * (0.6 + 0.4 * bot);
+      // 걸이 고리 아래 녹물 (u = 0.2, 0.8)
+      for (const hu of [0.2, 0.8]) {
+        const dx = Math.abs(u - hu) * w;
+        const k = (1 - smooth(1.5, 6 + n * 5, dx)) * (1 - smooth(0.04, 0.5 + n * 0.3, v));
+        rr = rr * (1 - k * 0.3) + 118 * k * 0.3;
+        gg = gg * (1 - k * 0.4) + 72 * k * 0.4;
+        bb = bb * (1 - k * 0.5) + 44 * k * 0.5;
+      }
+      col[0] = clamp255(rr);
+      col[1] = clamp255(gg);
+      col[2] = clamp255(bb);
+    });
+    return finish(c);
+  });
+}
+
+// 썩은 건초: 왼쪽 절반 = 곤포 옆면 (짚 결이 u 방향), 오른쪽 절반 = 곤포 마구리 (말린 소용돌이). 오래 비 맞아 거무스름한 회갈색,
+// 바랜 짚 가닥, 검게 썩은 얼룩과 약간의 곰팡이.
+export function hayTexture(size = 256) {
+  return cached(`hay${size}`, () => {
+    const f = makeFbm(651, 4, 4);
+    const fib = rectFbm(652, 2, 64, 2);
+    const c = pixelCanvas(size, size, (x, y, col) => {
+      const u = x / size;
+      const v = y / size;
+      const n = f(u, v, 0.55);
+      let fiber;
+      if (u < 0.5) fiber = fib(u * 2, v, 0.5);
+      else {
+        const dx = u - 0.75;
+        const dy = v - 0.5;
+        const rr = Math.hypot(dx, dy) * 4;
+        const ang = Math.atan2(dy, dx);
+        fiber = fib(ang / (Math.PI * 2) + 0.5, rr * 0.45 + ang * 0.02, 0.5);
+        fiber = fiber * 0.6 + (Math.sin((rr * 9 + ang / Math.PI) * Math.PI) * 0.5 + 0.5) * 0.4;
+      }
+      let s = 104 + (fiber - 0.5) * 70 + (n - 0.5) * 30;
+      const rot = smooth(0.58, 0.72, n);
+      s *= 1 - rot * 0.4;
+      const mold = smooth(0.62, 0.75, f(u * 2 + 3, v * 2, 0.5)) * 0.35;
+      col[0] = clamp255(s * 1.06 - mold * 10);
+      col[1] = clamp255(s * 0.96 + mold * 8);
+      col[2] = clamp255(s * 0.76);
+    });
+    return finish(c);
+  });
+}
+
+// 벽돌 잔해 더미: 먼지 낀 모르타르 바탕 위 깨진 벽돌·콘크리트 조각 (밝기만 다른 무채색 — 색은 정점색으로 축사 벽돌에 맞춘다)
+export function rubbleTexture(size = 256) {
+  return cached(`rubble${size}`, () => {
+    const f = makeFbm(661, 4, 4);
+    const c = pixelCanvas(size, size, (x, y, col) => {
+      const n = f(x / size, y / size, 0.55);
+      const s = 96 + (n - 0.5) * 40 + (hashPx(x, y, 29) - 0.5) * 22;
+      col[0] = col[1] = clamp255(s);
+      col[2] = clamp255(s * 0.95);
+    });
+    const ctx = c.getContext('2d');
+    const rng = new Random(662);
+    for (let k = 0; k < 420; k++) {
+      const x = rng.next() * size;
+      const y = rng.next() * size;
+      const L = 4 + rng.next() * 14;
+      const W = L * (0.35 + rng.next() * 0.4);
+      const a = rng.next() * Math.PI;
+      const sh = 110 + rng.next() * 110;
+      for (const [dx, dy] of [
+        [0, 0],
+        [size, 0],
+        [-size, 0],
+        [0, size],
+        [0, -size],
+      ]) {
+        ctx.save();
+        ctx.translate(x + dx, y + dy);
+        ctx.rotate(a);
+        ctx.fillStyle = 'rgba(20,18,16,0.55)';
+        ctx.fillRect(-L / 2 + 1.5, -W / 2 + 1.5, L, W);
+        ctx.fillStyle = `rgb(${sh | 0},${(sh * 0.96) | 0},${(sh * 0.9) | 0})`;
+        ctx.fillRect(-L / 2, -W / 2, L, W);
+        ctx.restore();
+      }
+    }
+    return finish(c);
+  });
+}

@@ -14,6 +14,7 @@ import { Noise2D } from './noise.js';
 import { clamp, smoothstep, polylineDistance } from '../core/mathUtils.js';
 import { groundTextures, groundMacroTexture } from './textures.js';
 import { terrainShaderParts, ROAD_RANGE, TRACK_RANGE, MAX_PARCELS } from './terrainShader.js';
+import { farRoadSegments } from './Distant.js';
 
 const SID = Object.fromEntries(Object.entries(SURFACES).map(([k, v]) => [k, v.id]));
 
@@ -198,11 +199,94 @@ export class Terrain {
     return u * damp * tdamp + U.fine.amp * tdamp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9) + U.trenchOffset * (1 - tdamp);
   }
 
+  // 맵 밖(원경) 지형 높이 (heightAt 이 높이 격자 밖에서 쓴다): 기본 기복 + 먼 언덕 + 맵 밖으로 이어지는 수로·농로
+  farHeight(x, z) {
+    let h = this.baseHeight(x, z) + this.farHills(x, z) + this.farRoadDh(x, z);
+    if (Math.abs(z - MAP.canal.z) < 9) h += this.canalDh(x, z);
+    return h;
+  }
+
+  // 먼 언덕 (CONFIG.distant.terrain.hills 노이즈 + MAP.distant.hills 둔덕): 맵 가장자리 밖 start ~ full 사이에서 커지고,
+  // 수로 둘레는 눌러 수로가 낮은 골을 따라간다
+  farHills(x, z) {
+    const H = CONFIG.distant.terrain.hills;
+    const out = Math.max(Math.abs(x), Math.abs(z)) - this.half;
+    if (out <= H.start) return 0;
+    const nz = this.noise;
+    let v = 0.7 * nz.noise(x / H.size[0] + 51.3, z / H.size[0] - 17.9) + 0.3 * nz.noise(x / H.size[1] - 8.4, z / H.size[1] + 33.1);
+    if (v < 0) v *= H.valley;
+    let h = H.amp * v;
+    for (const b of (MAP.distant && MAP.distant.hills) || []) {
+      const d = Math.hypot(x - b.x, z - b.z);
+      if (d < b.r) h += b.h * 0.5 * (1 + Math.cos((Math.PI * d) / b.r));
+    }
+    const cv = H.canalValley;
+    return h * smoothstep(H.start, H.full, out) * smoothstep(cv[0], cv[1], Math.abs(z - this.canalZ(x)));
+  }
+
+  // 맵 밖으로 이어지는 농로의 첫 구간 (맵 가장자리에서 시작하는 직선, MAP.distant.roads): 단면을 판다
+  farRoadCarves() {
+    if (this._farCarves) return this._farCarves;
+    const out = [];
+    for (const r of (MAP.distant && MAP.distant.roads) || []) {
+      const [a, b] = r.points;
+      if (!b || Math.max(Math.abs(a[0]), Math.abs(a[1])) < this.half - 1) continue;
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      out.push({ ax: a[0], az: a[1], ux: (b[0] - a[0]) / len, uz: (b[1] - a[1]) / len, len, hw: CONFIG.distant.terrain.roadHalf });
+    }
+    this._farCarves = out;
+    return out;
+  }
+
+  farRoadDh(x, z) {
+    const R = CONFIG.terrain.road;
+    let dh = 0;
+    for (const c of this.farRoadCarves()) {
+      const t = (x - c.ax) * c.ux + (z - c.az) * c.uz;
+      if (t < -1 || t > c.len) continue;
+      const d = Math.abs((x - c.ax) * c.uz - (z - c.az) * c.ux);
+      if (d > c.hw + R.ditchOffset + R.ditchHalf + 1.2) continue;
+      dh += this.roadSectionDh(d, c.hw) * (1 - smoothstep(c.len - 60, c.len, t));
+    }
+    return dh;
+  }
+
+  // 농로 단면 높이 변화 (applyRoads 와 같은 식, 수로 위 예외 없음): 길 중심 거리 d, 반폭 hw
+  roadSectionDh(d, hw) {
+    const R = CONFIG.terrain.road;
+    let dh = 0;
+    if (d < hw + 0.3) {
+      const inner = 1 - smoothstep(hw - 0.2, hw + 0.3, d);
+      dh -= R.sink * inner;
+      dh += R.crown * (1 - Math.min(1, (d / hw) ** 2)) * inner;
+      dh -= R.rutDepth * flatProfile(Math.abs(d - R.rutOffset), R.rutFlat, R.rutWall);
+    }
+    dh += 0.05 * bump((d - hw) / 0.7, 0.4);
+    const dd = Math.abs(d - (hw + R.ditchOffset));
+    dh -= R.ditchDepth * flatProfile(dd, R.ditchHalf * 0.35, R.ditchHalf * 0.65);
+    dh += 0.07 * bump((d - hw - R.ditchOffset - R.ditchHalf) / 1.1, 0.35);
+    return dh;
+  }
+
+  // 높이 격자 쌍선형 표본 (가장자리 포함, 격자 밖 좌표는 가장자리로 고정) — 원경 지형의 맵 가장자리 정점용
+  gridSample(x, z) {
+    const n = this.n;
+    const fx = clamp((x + this.half) / this.res, 0, n - 1.0001);
+    const fz = clamp((z + this.half) / this.res, 0, n - 1.0001);
+    const i = fx | 0;
+    const j = fz | 0;
+    const tx = fx - i;
+    const tz = fz - j;
+    const k = j * n + i;
+    const h = this.h;
+    return h[k] * (1 - tx) * (1 - tz) + h[k + 1] * tx * (1 - tz) + h[k + n] * (1 - tx) * tz + h[k + n + 1] * tx * tz;
+  }
+
   heightAt(x, z) {
     const fx = (x + this.half) / this.res;
     const fz = (z + this.half) / this.res;
     const n = this.n;
-    if (fx < 0 || fz < 0 || fx >= n - 1 || fz >= n - 1) return this.baseHeight(x, z);
+    if (fx < 0 || fz < 0 || fx >= n - 1 || fz >= n - 1) return this.farHeight(x, z);
     const i = fx | 0;
     const j = fz | 0;
     const tx = fx - i;
@@ -848,9 +932,11 @@ export class Terrain {
   trenchProfile(line, T, withParapet) {
     const { x0, x1, z0, z1 } = bbox(line);
     const ext = T.topHalf + (withParapet ? T.parapet.width : 1.6) + 0.6;
-    // 참호는 플레이어에게서 항상 100m 이상 떨어져 있어 렌더 메시는 1m 격자면 충분
-    // (충돌·높이 질의는 0.5m 격자 그대로). 원거리 LOD 도 흉벽 띠가 보이게 1.25m
-    this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0, 1.0, 1.25, 1.25);
+    // 참호는 플레이어에게서 항상 100m 이상 떨어져 있어 렌더 메시는 참호를 따라가는 방향 1m 격자면 충분
+    // (충돌·높이 질의는 0.5m 격자 그대로). 동서로 뻗은 참호선은 흉벽 단면(남북)을 0.5m 로 잡아 원거리 LOD 에서도
+    // 흉벽 마루가 깎이지 않게 한다 (200m 밖에서 흉벽 앞면이 밝은 띠로 읽히도록)
+    if (withParapet) this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0, 0.5, 1.0, 0.5);
+    else this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0, 1.0, 1.25, 1.25);
     const tmp = this._tmp;
     this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
       const d = polylineDistance(line, x, z, tmp);
@@ -1356,11 +1442,12 @@ export class Terrain {
 
   paintTrenches(m) {
     const T = MAP.trench;
+    const E = CONFIG.enemyPosition.spoil;
     const nz = this.noise;
     const tmp = {};
     for (const line of T.lines) {
       const { x0, x1, z0, z1 } = bbox(line);
-      const ext = T.topHalf + T.parapet.width + 1.2;
+      const ext = T.topHalf + T.parapet.width + E.apron + 1.5;
       this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
         const d = polylineDistance(line, x, z, tmp);
         if (d > ext) return;
@@ -1372,10 +1459,20 @@ export class Terrain {
         }
         const wallW = front ? T.parapet.width : T.parados.width * 0.9;
         const t = (d - T.topHalf * 0.85) / wallW;
-        // 흉벽: 주변 흑토보다 밝은 황갈색 띠 (200m 에서 참호선이 읽히게), 군데군데 풀 덩이
-        const sub = d < T.topHalf ? 0.85 : (1 - smoothstep(0.75, 1.15, t + n * 0.12)) * (front ? 0.9 : 0.62);
+        // 흉벽: 주변 흑토보다 밝은 황갈색 띠 (200m 에서 참호선이 읽히게). 앞면·마루는 갓 파낸 하층토,
+        // 그 앞으로 흩뿌려진 흙이 얼룩덜룩하게 apron m 까지 옅어진다 (먼 곳에서 마스크 밉맵이 띠를 주변과 섞어도 밝게 남도록 넓게)
+        let sub;
+        if (d < T.topHalf) sub = 0.85;
+        else if (front) {
+          const wall = 1 - smoothstep(0.85, 1.25, t + n * 0.12);
+          const out = d - (T.topHalf * 0.85 + wallW);
+          const patch = smoothstep(-0.3, 0.35, nz.noise(x / E.patch + 11.3, z / E.patch - 5.1) + 0.3 * nz.noise(x / 0.9 + 2, z / 0.9 + 7));
+          const apron = (1 - smoothstep(E.apron * 0.3, E.apron, out + n * 1.6)) * E.strength * (0.4 + 0.6 * patch);
+          sub = Math.max(wall * E.crest, apron);
+        } else sub = (1 - smoothstep(0.75, 1.15, t + n * 0.12)) * E.parados;
         this.paint(m, k, GM.subsoil, sub);
-        if (d > T.topHalf) this.paint(m, k, GM.grass, smoothstep(0.55, 0.9, nz.noise(x / 1.6 + 3, z / 1.6)) * 0.45);
+        // 풀 덩이: 후벽과 흉벽 앞 흙 얼룩 사이에만 (흉벽 앞면·마루는 갓 파낸 흙)
+        if (d > T.topHalf && (!front || t > 0.95)) this.paint(m, k, GM.grass, smoothstep(0.55, 0.9, nz.noise(x / 1.6 + 3, z / 1.6)) * 0.45 * (1 - sub));
       });
     }
     for (const line of T.commLines) {
@@ -1592,13 +1689,8 @@ export class Terrain {
         root.add(lod);
       }
     }
-    // 원경 지형
-    const farRing = { pos: [], nor: [], colr: [], idx: [] };
-    const ringTris = this.buildFar(farRing);
-    const farMesh = this.makeMesh(farRing, farMat);
-    farMesh.receiveShadow = false;
-    farMesh.name = 'terrainFar';
-    root.add(farMesh);
+    // 원경 지형 (맵 밖 3~5km, 낮은 해상도 — buildFar)
+    const ringTris = this.buildFar(root, material, farMat);
     // 밭 고랑 형상 (근거리 골판)
     this.ridgeTriangleCount = 0;
     if (material.userData.ridgeMaterial) root.add(this.buildRidges(material.userData.ridgeMaterial));
@@ -1897,44 +1989,334 @@ export class Terrain {
     return tris;
   }
 
-  buildFar(g) {
-    const W = CONFIG.world;
-    const V = CONFIG.ground.variation;
-    const ext = W.farExtent;
-    const step = W.farRes;
+  // ------------------------------------------------------------------ 원경 지형 (맵 밖, CONFIG.distant.terrain)
+  // 맵 가장자리에 맞춘 격자: 맵 둘레는 edgeStep 간격, 바깥으로 갈수록 growth 배씩 넓어진다 (distant.maxRange 원 밖 칸은 버림).
+  // 수로·농로가 맵 밖으로 이어지는 곳은 단면이 꺾이는 자리에 격자선을 더 넣고 (수로 굽이는 정점을 옮겨 따라감),
+  // 맵 가장자리 정점은 맵 높이 격자에서 읽어 맵 지형과 맞물린다 (조금 낮춰 맵 지형 가장자리 스커트 뒤로 숨김).
+  // 근거리 띠(nearBand)는 근거리 지면 셰이더, 나머지는 원거리 셰이더 — 두 메시가 정점을 함께 써 틈이 없다.
+  // 바깥 메시는 칸을 맵 중심에서 가까운 순으로 쌓아 setFarRange 가 drawRange 만 줄인다.
+  farAxis(groups) {
+    const T = CONFIG.distant.terrain;
     const half = this.half;
-    const nv = Math.round((2 * ext) / step) + 1;
-    const base = g.pos.length / 3;
-    const hAt = (x, z) => (Math.abs(x) <= half && Math.abs(z) <= half ? this.gridHeight(x, z) : this.baseHeight(x, z)) - 0.05;
-    for (let j = 0; j < nv; j++) {
-      const z = -ext + j * step;
-      for (let i = 0; i < nv; i++) {
-        const x = -ext + i * step;
-        g.pos.push(x, hAt(x, z), z);
-        const sx = (hAt(x + step, z) - hAt(x - step, z)) / (2 * step);
-        const sz = (hAt(x, z + step) - hAt(x, z - step)) / (2 * step);
-        const nl = Math.hypot(sx, 1, sz);
-        g.nor.push(-sx / nl, 1 / nl, -sz / nl);
-        const v = 1 + V.amp[0] * this.noise.noise(x / V.size[0] + 17, z / V.size[0] - 4);
-        g.colr.push(v, v, v);
-      }
+    const n = Math.round((2 * half) / T.edgeStep);
+    let lines = [];
+    for (let i = 0; i <= n; i++) lines.push({ v: -half + (2 * half * i) / n, edge: i === 0 || i === n });
+    let o = 0;
+    let s = T.edgeStep;
+    while (half + o < CONFIG.distant.maxRange) {
+      s = Math.min(T.maxStep, s * T.growth);
+      o += s;
+      lines.push({ v: half + o }, { v: -(half + o) });
     }
-    let tris = 0;
-    for (let j = 0; j < nv - 1; j++) {
-      for (let i = 0; i < nv - 1; i++) {
-        const cx = -ext + (i + 0.5) * step;
-        const cz = -ext + (j + 0.5) * step;
-        if (Math.abs(cx) < half && Math.abs(cz) < half) continue; // 맵 안쪽은 비움
-        const a = base + j * nv + i;
-        const b = a + 1;
-        const c = a + nv;
-        const d = c + 1;
-        g.idx.push(a, c, b, b, c, d);
-        tris += 2;
-      }
+    for (const g of groups) {
+      lines = lines.filter((l) => l.edge || Math.abs(l.v - g.c) > g.clear);
+      for (const d of g.offs) lines.push({ v: g.c + d, canal: !!g.canal });
     }
-    return tris;
+    return lines.sort((a, b) => a.v - b.v);
   }
+
+  buildFar(root, nearMat, farMat) {
+    const D = CONFIG.distant;
+    const T = D.terrain;
+    const V = CONFIG.ground.variation;
+    const half = this.half;
+    const C = MAP.canal;
+    const nz = this.noise;
+    // 수로 단면이 꺾이는 자리 (수로 중심에서 북쪽 +): 남쪽 둑·비탈·바닥·북쪽 사격 발판·흙 둔덕
+    const canalRows = [-6.2, -5.0, -3.9, -3.05, -2.7, -2.4, -1.65, -0.9, 0, 0.9, 1.5, 2.05, 2.45, 2.8, 3.15, 3.55, 4.3, 5.2, 6.25];
+    // 농로 단면 (길 중심에서): 바퀴 자국·길 가장자리·배수로
+    const roadCols = [-5.6, -4.55, -3.95, -3.35, -2.75, -2.3, -1.28, -0.85, -0.42, 0, 0.42, 0.85, 1.28, 2.3, 2.75, 3.35, 3.95, 4.55, 5.6];
+    const carves = this.farRoadCarves();
+    const xs = this.farAxis(carves.filter((c) => Math.abs(c.ux) < 1e-3).map((c) => ({ c: c.ax, offs: roadCols, clear: 6.4 })));
+    const zs = this.farAxis([{ c: C.z, offs: canalRows.map((o) => -o), clear: 7.2, canal: true }]);
+    const NX = xs.length;
+    const NZ = zs.length;
+    // 격자 정점 (맵 안쪽 정점도 법선 계산용으로 만든 뒤 쓰는 것만 남긴다)
+    const P = new Float32Array(NX * NZ * 3);
+    for (let j = 0; j < NZ; j++) {
+      for (let i = 0; i < NX; i++) {
+        const x = xs[i].v;
+        let z = zs[j].v;
+        if (zs[j].canal) z += this.canalZ(x) - C.z;
+        const inside = Math.abs(x) <= half + 1e-6 && Math.abs(z) <= half + 1e-6;
+        const k = (j * NX + i) * 3;
+        P[k] = x;
+        P[k + 1] = (inside ? this.gridSample(x, z) : this.farHeight(x, z)) - T.drop;
+        P[k + 2] = z;
+      }
+    }
+    // 칸 → 삼각형 (높이차가 작은 대각선으로 나눔). 근거리 띠 / 바깥 (맵 중심 거리순)
+    const nearIdx = [];
+    const farCells = [];
+    const used = new Uint8Array(NX * NZ);
+    for (let j = 0; j < NZ - 1; j++) {
+      for (let i = 0; i < NX - 1; i++) {
+        const cx = (xs[i].v + xs[i + 1].v) * 0.5;
+        const cz = (zs[j].v + zs[j + 1].v) * 0.5;
+        if (Math.abs(cx) < half && Math.abs(cz) < half) continue; // 맵 안쪽은 맵 지형
+        const dist = Math.hypot(cx, cz);
+        if (dist > D.maxRange) continue;
+        const a = j * NX + i;
+        const b = a + 1;
+        const c = a + NX;
+        const d = c + 1;
+        const t = Math.abs(P[a * 3 + 1] - P[d * 3 + 1]) <= Math.abs(P[b * 3 + 1] - P[c * 3 + 1]) ? [a, c, d, a, d, b] : [a, c, b, b, c, d];
+        used[a] = used[b] = used[c] = used[d] = 1;
+        if (Math.max(Math.abs(cx), Math.abs(cz)) - half < T.nearBand) nearIdx.push(...t);
+        else farCells.push({ dist, t });
+      }
+    }
+    // 쓰는 정점만: 위치·법선(격자 이웃 차분)·정점색 (큰 규모 밝기 변화 + 수로·농로 둘레 굽은 AO)
+    const remap = new Int32Array(NX * NZ).fill(-1);
+    const pos = [];
+    const nor = [];
+    const colr = [];
+    const at = (i, j) => (j * NX + i) * 3;
+    for (let j = 0; j < NZ; j++) {
+      for (let i = 0; i < NX; i++) {
+        const v = j * NX + i;
+        if (!used[v]) continue;
+        remap[v] = pos.length / 3;
+        const k = v * 3;
+        const x = P[k];
+        const y = P[k + 1];
+        const z = P[k + 2];
+        pos.push(x, y, z);
+        const i0 = at(Math.max(0, i - 1), j);
+        const i1 = at(Math.min(NX - 1, i + 1), j);
+        const j0 = at(i, Math.max(0, j - 1));
+        const j1 = at(i, Math.min(NZ - 1, j + 1));
+        // 법선 = (z 방향 접선) x (x 방향 접선)
+        const ax = P[i1] - P[i0];
+        const ay = P[i1 + 1] - P[i0 + 1];
+        const az = P[i1 + 2] - P[i0 + 2];
+        const bx = P[j1] - P[j0];
+        const by = P[j1 + 1] - P[j0 + 1];
+        const bz = P[j1 + 2] - P[j0 + 2];
+        let nx = by * az - bz * ay;
+        let ny = bz * ax - bx * az;
+        let nzv = bx * ay - by * ax;
+        const nl = Math.hypot(nx, ny, nzv) || 1;
+        nx /= nl;
+        ny /= nl;
+        nzv /= nl;
+        nor.push(nx, ny, nzv);
+        let c = 1 + V.amp[0] * nz.noise(x / V.size[0] + 17, z / V.size[0] - 4) + V.amp[1] * nz.noise(x / V.size[1] - 21, z / V.size[1] + 9);
+        const nearLine = zs[j].canal || carves.some((cv) => Math.abs(cv.ux) < 1e-3 && Math.abs(x - cv.ax) < 6.4);
+        if (nearLine && Math.hypot(x, z) < 1500) c *= this.aoAt(x, z, y + T.drop, true);
+        colr.push(c, c, c);
+      }
+    }
+    farCells.sort((p, q) => p.dist - q.dist);
+    const farIdx = [];
+    this.farEnds = [];
+    for (const cell of farCells) {
+      for (const v of cell.t) farIdx.push(remap[v]);
+      this.farEnds.push([cell.dist, farIdx.length]);
+    }
+    for (let q = 0; q < nearIdx.length; q++) nearIdx[q] = remap[nearIdx[q]];
+    // 두 메시가 정점 속성을 함께 쓴다
+    const vcount = pos.length / 3;
+    const attrs = {
+      position: new THREE.Float32BufferAttribute(pos, 3),
+      normal: new THREE.Float32BufferAttribute(nor, 3),
+      color: new THREE.Float32BufferAttribute(colr, 3),
+    };
+    const make = (idx, mat, name, shadow) => {
+      const geo = new THREE.BufferGeometry();
+      for (const [k, a] of Object.entries(attrs)) geo.setAttribute(k, a);
+      geo.setIndex(vcount > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.name = name;
+      // 근거리 띠는 맵 안 근거리 지형처럼 그림자를 받는다 (이동 가능 구역 경계에서 그림자가 맵 가장자리에서 끊기지 않게)
+      mesh.receiveShadow = shadow;
+      mesh.matrixAutoUpdate = false;
+      if (mat.userData.onTerrainRender) mesh.onBeforeRender = mat.userData.onTerrainRender;
+      root.add(mesh);
+      return mesh;
+    };
+    this.farNearMesh = make(nearIdx, farRingMaterial(nearMat, 'near'), 'terrainFarNear', true);
+    this.farMesh = make(farIdx, farRingMaterial(farMat, 'far'), 'terrainFar', false);
+    this.setFarRange(D.range);
+    // 맵 밖으로 이어지는 수로의 물 고인 구간 (World.buildPuddles 가 그린다)
+    for (const [a, b] of (MAP.distant && MAP.distant.canalWater) || []) this.puddles.push({ type: 'canal', x0: a, x1: b });
+    this.farVertexCount = vcount;
+    return (nearIdx.length + farIdx.length) / 3;
+  }
+
+  // 원경 지형을 그리는 거리 (맵 중심에서 m) — 그래픽 품질 프리셋 (World.setDistantRange)
+  setFarRange(r) {
+    if (!this.farMesh) return;
+    let count = 0;
+    for (const [d, e] of this.farEnds) {
+      if (d > r) break;
+      count = e;
+    }
+    this.farMesh.geometry.setDrawRange(0, count);
+  }
+}
+
+// 원경 지형 재질: 근거리/원거리 지형 재질(createTerrainMaterial)을 감싸 같은 유니폼·텍스처를 쓰고,
+// 혼합 마스크 밖(맵 밖) 지면을 맵 배치 데이터로 칠한다 — 맵 가장자리에 맞춘 큰 밭 구획(갈아엎은 밭·그루터기·묵은 풀밭,
+// 경계의 풀 둑과 흙길, 맵 둘레 흙길), 맵 밖 농로·마을 길 (MAP.distant, 바퀴 자국은 셰이더의 길 거리장 식 그대로),
+// 맵 밖으로 이어지는 수로 (바닥 진흙·비탈 풀·북쪽 발판·파낸 흙 둔덕). 거칠기 하한(roughnessMin)으로 원경 흙이 해 쪽에서 번들거리지 않게
+function farRingMaterial(base, variant) {
+  const D = CONFIG.distant;
+  const T = D.terrain;
+  const F = T.fields;
+  const C = MAP.canal;
+  const segs = farRoadSegments().slice(0, 32);
+  const nR = Math.max(1, segs.length);
+  const roads = [];
+  for (let i = 0; i < nR; i++) roads.push(segs[i] ? new THREE.Vector4(...segs[i]) : new THREE.Vector4(1e5, 1e5, 1e5, 1e5));
+  const f = (v) => {
+    const s = Number(v).toFixed(5);
+    return s.includes('.') ? s : s + '.0';
+  };
+  const R = CONFIG.terrain.road;
+  const benchIn = C.floorHalf + ((C.depth - C.bench.depth) * (C.topHalf - C.floorHalf)) / C.depth;
+  const pars = `
+#define TF_NROADS ${nR}
+uniform vec4 uFarRoad[TF_NROADS];
+const vec2 TF_FIELD = vec2(${f(F.size[0])}, ${f(F.size[1])});
+float tfHash(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+// 재질 m 을 a 만큼 덧칠 (나머지는 1-a 배). m: 0 흑토 1 그루터기 2 진흙 3 하층토 4 자갈길, 그 밖 = 풀
+void tfPaint(inout vec4 A, inout vec4 B, int m, float a) {
+  a = clamp(a, 0.0, 1.0);
+  A *= 1.0 - a;
+  B.r *= 1.0 - a;
+  if (m == 0) A.r += a;
+  else if (m == 1) A.g += a;
+  else if (m == 2) A.b += a;
+  else if (m == 3) A.a += a;
+  else if (m == 4) B.r += a;
+}
+float tfSeg(vec2 p, vec4 s) {
+  vec2 ab = s.zw - s.xy;
+  float t = clamp(dot(p - s.xy, ab) / max(dot(ab, ab), 1e-3), 0.0, 1.0);
+  return length(p - s.xy - ab * t);
+}
+// 맵 밖 지면 재질 비율 (A = 흑토·그루터기·진흙·하층토, B = 자갈길·길 거리·궤도 거리·구획)
+void tFarGround(vec2 wp, out vec4 A, out vec4 B) {
+  A = vec4(0.0);
+  B = vec4(0.0, 1.0, 1.0, 0.0);
+  float mac = texture(tMacro, wp / 97.0 + vec2(0.31, 0.77)).g;
+  float macF = texture(tMacro, wp / T_MAC_FAR).r;
+  // ---- 밭 구획: 맵 가장자리(±T_HALF)가 경계가 되는 격자, 칸마다 반으로 나누기도 한다
+  vec2 q = (wp + vec2(T_HALF)) / TF_FIELD;
+  vec2 qc = floor(q);
+  vec2 lo = qc;
+  vec2 hi = qc + 1.0;
+  vec2 id = qc;
+  if (tfHash(qc + 17.0) < ${f(F.split[0])}) {
+    float s = step(qc.x + 0.5, q.x);
+    lo.x += 0.5 * s;
+    hi.x -= 0.5 * (1.0 - s);
+    id.x += 0.5 * s;
+  }
+  if (tfHash(qc + 41.0) < ${f(F.split[1])}) {
+    float s = step(qc.y + 0.5, q.y);
+    lo.y += 0.5 * s;
+    hi.y -= 0.5 * (1.0 - s);
+    id.y += 0.5 * s;
+  }
+  float kind = tfHash(id * 1.37 + 5.1);
+  if (kind < ${f(F.plowed)}) {
+    tfPaint(A, B, 0, 1.0);
+    tfPaint(A, B, 2, smoothstep(0.6, 0.8, mac) * 0.55);
+    tfPaint(A, B, 5, smoothstep(0.7, 0.9, macF) * 0.3);
+  } else if (kind < ${f(F.plowed + F.stubble)}) {
+    tfPaint(A, B, 1, 0.95);
+    tfPaint(A, B, 5, smoothstep(0.45, 0.8, mac) * 0.5);
+    tfPaint(A, B, 0, smoothstep(0.72, 0.9, macF) * 0.3);
+  } else {
+    tfPaint(A, B, 0, smoothstep(0.66, 0.86, mac) * 0.35);
+    tfPaint(A, B, 2, smoothstep(0.75, 0.9, macF) * 0.3);
+  }
+  // 경계까지 거리 (m) — 풀 둑, 일부 경계는 흙길 (경계선마다 같은 값이 나오게 선 좌표로 정한다)
+  vec2 d0 = (q - lo) * TF_FIELD;
+  vec2 d1 = (hi - q) * TF_FIELD;
+  float e = min(min(d0.x, d1.x), min(d0.y, d1.y));
+  float trk = 1e4;
+  if (tfHash(vec2(lo.x * 3.1, qc.y) + 2.3) < ${f(F.trackChance)}) trk = min(trk, d0.x);
+  if (tfHash(vec2(hi.x * 3.1, qc.y) + 2.3) < ${f(F.trackChance)}) trk = min(trk, d1.x);
+  if (tfHash(vec2(qc.x, lo.y * 3.1) + 7.9) < ${f(F.trackChance)}) trk = min(trk, d0.y);
+  if (tfHash(vec2(qc.x, hi.y * 3.1) + 7.9) < ${f(F.trackChance)}) trk = min(trk, d1.y);
+  // 맵 둘레는 항상 흙길 (맵 가장자리 바로 밖, 맵 안 지면과의 경계를 길로 나눈다)
+  float outM = max(abs(wp.x), abs(wp.y)) - T_HALF;
+  trk = min(trk, abs(outM - ${f(F.track + 0.4)}));
+  e = min(e, outM);
+  float fwE = fwidth(e) + 0.02;
+  tfPaint(A, B, 5, (1.0 - smoothstep(${f(F.verge)} - fwE, ${f(F.verge)} + fwE, e)) * 0.8);
+  float fwT = fwidth(trk) + 0.02;
+  float tw = (1.0 - smoothstep(${f(F.track)} - fwT, ${f(F.track)} + fwT, trk)) * min(1.0, ${f(F.track)} / fwT);
+  // 밭 사이 흙길: 짓밟힌 흙 + 바퀴 자국 진흙 (자갈은 조금만 — 큰 농로보다 어둡게)
+  tfPaint(A, B, 0, tw * 0.45);
+  tfPaint(A, B, 4, tw * 0.25);
+  tfPaint(A, B, 2, tw * (1.0 - smoothstep(0.15, 0.6, abs(trk - ${f(R.rutOffset)}))) * 0.6);
+  // ---- 맵 밖 농로·마을 길 (바퀴 자국·배수로는 셰이더의 길 거리장 식이 그린다)
+  float dr = 1e4;
+  for (int i = 0; i < TF_NROADS; i++) dr = min(dr, tfSeg(wp, uFarRoad[i]));
+  if (dr < T_ROAD_RANGE) {
+    B.g = dr / T_ROAD_RANGE;
+    float hw = ${f(T.roadHalf)};
+    float fwR = fwidth(dr) + 0.02;
+    float gw = (1.0 - smoothstep(hw - 0.35 - fwR, hw + 0.2 + fwR, dr)) * min(1.0, hw / fwR);
+    tfPaint(A, B, 4, gw * 0.92);
+    tfPaint(A, B, 5, smoothstep(hw, hw + 0.4, dr) * (1.0 - smoothstep(hw + ${f(R.ditchOffset + R.ditchHalf)}, T_ROAD_RANGE, dr)) * 0.75);
+    tfPaint(A, B, 2, (1.0 - smoothstep(${f(R.ditchHalf * 0.35)}, ${f(R.ditchHalf)} + fwR, abs(dr - hw - ${f(R.ditchOffset)}))) * 0.85);
+  }
+  // ---- 맵 밖으로 이어지는 수로 (북쪽 +)
+  float dn = ${f(C.z)} + ${f(C.wiggleAmp)} * sin(wp.x / ${f(C.wiggleLen)}) - wp.y;
+  float dc = abs(dn);
+  if (dc < 16.0) {
+    float n = texture(tMacro, wp / 7.0).b - 0.5;
+    tfPaint(A, B, 5, (1.0 - smoothstep(8.0, 16.0, dc)) * 0.85);
+    bool bench = dn > 0.0 && dc > ${f(benchIn - 0.15)};
+    if (dc < ${f(C.topHalf + 0.1)} && !bench) {
+      float wet = 1.0 - smoothstep(${f(C.floorHalf - 0.1)}, ${f(C.floorHalf + 0.9)} + 0.3 * n, dc);
+      tfPaint(A, B, 5, smoothstep(${f(C.floorHalf + 0.4)}, ${f(C.topHalf)}, dc + 0.3 * n) * 0.6);
+      tfPaint(A, B, 2, wet * (0.85 + 0.15 * n));
+    } else if (dn > 0.0) {
+      if (dc <= ${f(C.bench.outer + 0.1)}) {
+        tfPaint(A, B, 0, 0.55);
+        tfPaint(A, B, 2, 0.45);
+      } else {
+        float t = (dc - ${f(C.bench.outer)}) / ${f(C.berm.face + C.berm.back)};
+        float spoil = 1.0 - smoothstep(0.4, 1.0, t + n * 0.3);
+        tfPaint(A, B, 2, spoil * 0.55);
+        tfPaint(A, B, 3, spoil * (0.45 + 0.3 * n));
+        tfPaint(A, B, 5, smoothstep(0.3, 0.75, t + 0.5 * n) * 0.75);
+      }
+    }
+  }
+}
+`;
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+  mat.name = 'terrain_ring_' + variant;
+  mat.userData.terrainUniforms = base.userData.terrainUniforms;
+  mat.userData.onTerrainRender = base.userData.onTerrainRender;
+  const uFarRoad = { value: roads };
+  mat.onBeforeCompile = (shader, renderer) => {
+    base.onBeforeCompile(shader, renderer);
+    shader.uniforms.uFarRoad = uFarRoad;
+    const fs = shader.fragmentShader;
+    const out = fs
+      .replace('void terrainSurface(', `${pars}\nvoid terrainSurface(`)
+      .replace('parcel = clamp(parcel, 0, T_MAX_PARCELS - 1);', 'if (suv != suvC) tFarGround(wp, sA, sB);\n  parcel = clamp(parcel, 0, T_MAX_PARCELS - 1);')
+      .replace('float roughnessFactor = tRough;', `float roughnessFactor = max(tRough, ${f(T.roughnessMin)});`);
+    if (out.split('tFarGround').length < 3 || !out.includes(`max(tRough, ${f(T.roughnessMin)})`)) {
+      console.warn('[Terrain] 원경 지형 셰이더 끼워 넣기 실패 — 지형 셰이더가 바뀌었습니다 (맵 밖 지면은 기본 얼룩으로 그립니다)');
+    }
+    shader.fragmentShader = out;
+  };
+  mat.customProgramCacheKey = () => 'terrainSplat_ring_' + variant;
+  return mat;
 }
 
 // 지형 재질: 표준(PBR) 재질 + 혼합 셰이더. 조명·그림자·안개·톤매핑은 Three.js 표준 경로 그대로.

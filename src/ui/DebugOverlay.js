@@ -1,6 +1,8 @@
 // =============================================================================
 // DebugOverlay (F3) — 적 위치와 제압 막대·상태, 적이 기억하는 플레이어 추정 위치,
-// 사격 위치 후보, 탄도 궤적 선, FPS. 기본 꺼짐.
+// 사격 위치 후보, 탄도 궤적 선, 성능 측정. 기본 꺼짐.
+// F3 을 누를 때마다 끔 → 전체 → 성능만 → 끔. '성능만' 은 디버그 표시(마커·이름표·궤적 선)를 그리지 않아
+// 실제 게임 화면 그대로의 FPS·프레임 시간·draw call·삼각형 수를 잰다 (사용자 PC 에서 측정·보고용).
 // =============================================================================
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
@@ -9,19 +11,26 @@ import { MAP } from '../world/mapData.js';
 import { STATE_NAMES } from '../ai/EnemyAI.js';
 
 const LEVEL_COLORS = ['#7fd06a', '#e8d250', '#f09a40', '#f05a4a'];
+const MODES = ['off', 'full', 'perf'];
+const MODE_NAMES = { full: '전체', perf: '성능만' };
 const _v = new THREE.Vector3();
 const _w = new THREE.Vector3();
+const _size = new THREE.Vector2();
 
 export class DebugOverlay {
   constructor(game) {
     this.game = game;
-    this.enabled = CONFIG.debug.startEnabled;
+    this.mode = CONFIG.debug.startEnabled ? 'full' : 'off';
+    this.enabled = this.mode !== 'off';
     this.root = document.getElementById('debug-overlay');
     this.panel = document.getElementById('debug-panel');
     this.labelsEl = document.getElementById('debug-labels');
     this.labels = new Map();
     this.fps = 60;
     this.frameMs = 16;
+    // 성능 측정 창 (1초): 프레임 수·시간·가장 긴 프레임, draw call·삼각형 수 범위. out = 직전 1초 결과
+    this.perf = { t: 0, n: 0, worst: 0, cMin: Infinity, cMax: 0, tMin: Infinity, tMax: 0, out: null };
+    this.gpu = null;
     this.group = new THREE.Group();
     this.group.name = 'debug';
     this.group.visible = false;
@@ -81,25 +90,34 @@ export class DebugOverlay {
     this.trailLines.frustumCulled = false;
     this.group.add(this.trailLines);
     game.events.on(EV.BULLET_EXPIRED, (e) => {
-      if (!this.enabled || e.bullet.trail.length < 6) return;
+      if (this.mode !== 'full' || e.bullet.trail.length < 6) return;
       this.trails.push({ pts: e.bullet.trail.slice(), player: e.bullet.shooter === game.player.body });
       while (this.trails.length > CONFIG.debug.bulletTrailCount) this.trails.shift();
       this.trailsDirty = true;
     });
-    this.setEnabled(this.enabled);
+    this.setMode(this.mode);
   }
 
-  setEnabled(v) {
-    this.enabled = v;
-    this.root.classList.toggle('hidden', !v);
-    this.group.visible = v;
-    this.game.ballistics.recordTrails = v;
-    if (!v) this.trails.length = 0;
+  // 'off' | 'full' (전체 디버그) | 'perf' (성능 측정만 — 장면에 디버그 표시를 그리지 않는다)
+  setMode(mode) {
+    const full = mode === 'full';
+    this.mode = mode;
+    this.enabled = mode !== 'off';
+    this.root.classList.toggle('hidden', !this.enabled);
+    this.labelsEl.style.display = full ? '' : 'none';
+    this.group.visible = full;
+    this.game.ballistics.recordTrails = full;
+    if (!full) this.trails.length = 0;
     this.trailsDirty = true;
   }
 
+  setEnabled(v) {
+    this.setMode(v ? 'full' : 'off');
+  }
+
+  // F3: 끔 → 전체 → 성능만 → 끔
   toggle() {
-    this.setEnabled(!this.enabled);
+    this.setMode(MODES[(MODES.indexOf(this.mode) + 1) % MODES.length]);
   }
 
   reset() {
@@ -128,11 +146,84 @@ export class DebugOverlay {
     this.trailsDirty = false;
   }
 
+  // 직전 프레임(주 장면 + 1인칭 총 + 그 프레임의 그림자 패스)의 렌더 통계를 1초 창에 모은다.
+  // 그림자 맵은 render.shadowRefreshTime 간격으로만 다시 그리므로 draw call·삼각형 수는 최소~최대로 보인다
+  measure(dt) {
+    const p = this.perf;
+    if (dt <= 0 || dt > 3) return; // 탭 전환·로딩 직후의 아주 긴 간격은 버린다 (셰이더 컴파일 끊김은 '최악'에 남긴다)
+    const info = this.game.renderer.info.render;
+    p.t += dt;
+    p.n++;
+    if (dt > p.worst) p.worst = dt;
+    if (info.calls > 0) {
+      p.cMin = Math.min(p.cMin, info.calls);
+      p.cMax = Math.max(p.cMax, info.calls);
+      p.tMin = Math.min(p.tMin, info.triangles);
+      p.tMax = Math.max(p.tMax, info.triangles);
+    }
+    if (p.t < 1) return;
+    p.out = { fps: p.n / p.t, ms: (p.t / p.n) * 1000, worst: p.worst * 1000, cMin: p.cMin, cMax: p.cMax, tMin: p.tMin, tMax: p.tMax };
+    this.fps = p.out.fps;
+    this.frameMs = p.out.ms;
+    Object.assign(p, { t: 0, n: 0, worst: 0, cMin: Infinity, cMax: 0, tMin: Infinity, tMax: 0 });
+  }
+
+  // GPU 이름 (보고용): 브라우저가 알려 주는 렌더러 문자열
+  gpuName() {
+    if (this.gpu !== null) return this.gpu;
+    let s = '';
+    try {
+      const gl = this.game.renderer.getContext();
+      s = gl.getParameter(gl.RENDERER) || '';
+      // Chrome 은 RENDERER 가 'WebKit WebGL' 이라 확장으로 실제 이름을 읽는다 (Firefox 는 RENDERER 가 이미 실제 이름)
+      if (/^webkit webgl$/i.test(s)) {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (ext) s = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || s;
+      }
+    } catch {
+      s = '';
+    }
+    this.gpu = String(s || '알 수 없음').replace(/\s+/g, ' ').slice(0, 100);
+    return this.gpu;
+  }
+
+  // 성능 표시 줄 (사용자 PC 에서 측정·보고용)
+  perfLines() {
+    const g = this.game;
+    const r = g.renderer;
+    const R = CONFIG.render;
+    const o = this.perf.out;
+    const k = (v) => `${Math.round(v / 1000)}k`;
+    const lines = [`[F3 디버그: ${MODE_NAMES[this.mode]}]  F3 → ${this.mode === 'full' ? '성능만' : '끔'}`];
+    if (o) {
+      lines.push(`FPS ${o.fps.toFixed(1)}  프레임 ${o.ms.toFixed(1)}ms  최악 ${o.worst.toFixed(1)}ms  (1초 평균)`);
+      if (o.cMax > 0) lines.push(`draw ${o.cMin}~${o.cMax}  삼각형 ${k(o.tMin)}~${k(o.tMax)}  (큰 값 = 그림자 맵을 다시 그린 프레임)`);
+    } else lines.push('FPS 측정 중…');
+    r.getDrawingBufferSize(_size);
+    const pr = r.getPixelRatio();
+    const prMax = Math.min(window.devicePixelRatio, R.pixelRatioMax);
+    const attr = r.getContextAttributes();
+    const dyn = R.dynamicResolution ? (pr < prMax - 0.001 ? ', 동적 해상도로 낮춤' : ', 동적 해상도') : '';
+    lines.push(
+      `렌더 ${_size.x}×${_size.y}  픽셀 비율 ${pr.toFixed(2)} (상한 ${prMax.toFixed(2)}, 기기 ${window.devicePixelRatio}${dyn})  AA ${attr && attr.antialias ? '켬' : '끔'}`,
+    );
+    const P = CONFIG.quality.presets[g.quality];
+    const V = CONFIG.vegetation;
+    lines.push(
+      `품질 ${P ? P.label : g.quality}  식생 ${Math.round(V.density * 100)}% 거리 ×${V.lodScale}  그림자 ${R.shadows ? R.shadowMapSize : '끔'}  ` +
+        `지형 LOD ${CONFIG.terrain.mesh.lodDistance}m  원경 ${CONFIG.distant.range}m`,
+    );
+    lines.push(`GPU ${this.gpuName()}`);
+    return lines;
+  }
+
   update(dt) {
-    const rawFps = dt > 0 ? 1 / dt : 60;
-    this.fps += (rawFps - this.fps) * 0.05;
-    this.frameMs += (dt * 1000 - this.frameMs) * 0.05;
+    this.measure(dt);
     if (!this.enabled) return;
+    if (this.mode === 'perf') {
+      this.panel.textContent = this.perfLines().join('\n');
+      return;
+    }
     const g = this.game;
     const ais = g.director.ais;
     // 적 표시
@@ -225,14 +316,14 @@ export class DebugOverlay {
 
   updatePanel(ais) {
     const g = this.game;
-    const info = g.renderer.info.render;
     const plan = g.director.plan;
     let planText = '없음';
     if (plan) planText = `${plan.ai.s.name} → ${plan.to.id} (${plan.state === 'pending' ? '출발 대기' : '이동 중'})`;
     else planText = `다음 시도 ${Math.max(0, g.director.nextAttempt - g.time).toFixed(0)}초 후`;
     const pl = g.player;
     const lines = [
-      `FPS ${this.fps.toFixed(0)} (${this.frameMs.toFixed(1)}ms)  draw ${info.calls}  tri ${(info.triangles / 1000).toFixed(0)}k`,
+      ...this.perfLines(),
+      '',
       `탄 ${g.ballistics.active.length}  먼지 ${g.effects.dust.count}  빛 ${g.effects.glow.count}  파편 ${g.effects.debris.n}`,
       `플레이어 제압 ${pl.body.suppression.value.toFixed(0)}  스태미나 ${pl.stamina.toFixed(0)}  숨 ${pl.breath.toFixed(2)}  거치 ${pl.rested ? pl.restKind : '-'}`,
       `탄창 ${pl.weapon.mag ? pl.weapon.mag.rounds : '-'}${pl.weapon.chambered ? '+1' : ''}  예광 ${pl.weapon.chamberTracer ? 'Y' : 'n'}  총 ${pl.weapon.totalRounds()}발`,

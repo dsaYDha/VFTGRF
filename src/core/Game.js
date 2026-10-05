@@ -167,6 +167,36 @@ export class Game {
     }, 400);
   }
 
+  // 동적 해상도: 2초 평균이 목표보다 낮으면 픽셀 비율을 낮추고, 여유가 있으면 천천히 올린다
+  adaptResolution(dt) {
+    const R = CONFIG.render;
+    if (!R.dynamicResolution || this.state !== 'playing' || dt <= 0 || dt > 0.25) return;
+    this.dynAcc = (this.dynAcc || 0) + dt;
+    this.dynFrames = (this.dynFrames || 0) + 1;
+    if (this.dynAcc < 2) return;
+    const fps = this.dynFrames / this.dynAcc;
+    this.dynAcc = 0;
+    this.dynFrames = 0;
+    const maxPr = Math.min(window.devicePixelRatio, R.pixelRatioMax);
+    const pr = this.renderer.getPixelRatio();
+    let next = pr;
+    if (fps < R.targetFps - 6) {
+      next = Math.max(R.pixelRatioMin, pr - 0.15);
+      this.dynGood = 0;
+    } else if (fps > R.targetFps + 1 && pr < maxPr) {
+      // 여유가 연속 3번(6초) 확인될 때만 올린다 (깜빡임 방지)
+      this.dynGood = (this.dynGood || 0) + 1;
+      if (this.dynGood >= 3) {
+        next = Math.min(maxPr, pr + 0.05);
+        this.dynGood = 0;
+      }
+    } else this.dynGood = 0;
+    if (Math.abs(next - pr) > 0.001) {
+      this.renderer.setPixelRatio(next);
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+  }
+
   onResize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -214,6 +244,7 @@ export class Game {
     this.debug.update(rawDt);
     input.endFrame();
 
+    this.adaptResolution(rawDt);
     const r = this.renderer;
     r.info.reset();
     r.clear();

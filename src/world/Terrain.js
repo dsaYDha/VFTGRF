@@ -362,7 +362,9 @@ export class Terrain {
       z1 = Math.max(z1, z);
     }
     const ext = T.topHalf + (withParapet ? T.parapet.width : 1.6) + 0.6;
-    this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 0.5);
+    // 참호는 플레이어에게서 항상 100m 이상 떨어져 있어 렌더 메시는 1m 격자면 충분
+    // (충돌·높이 질의는 0.5m 격자 그대로)
+    this.addDetail(x0 - ext, z0 - ext, x1 + ext, z1 + ext, 1.0);
     const tmp = this._tmp;
     this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
       const d = polylineDistance(line, x, z, tmp);
@@ -392,7 +394,7 @@ export class Terrain {
     // 엄체호: 통나무 지붕 위로 덮은 흙 둔덕
     for (const dgt of MAP.dugouts) {
       const ext = Math.max(dgt.w, dgt.d) * 0.5 + 1.8;
-      this.addDetail(dgt.x - ext, dgt.z - ext, dgt.x + ext, dgt.z + ext, 0.5);
+      this.addDetail(dgt.x - ext, dgt.z - ext, dgt.x + ext, dgt.z + ext, 1.0);
       const c = Math.cos(dgt.rot);
       const s = Math.sin(dgt.rot);
       this.stamp(dgt.x - ext, dgt.z - ext, dgt.x + ext, dgt.z + ext, (x, z, k) => {

@@ -146,11 +146,11 @@ export class Vegetation {
     addWind(mat, 0.035);
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
-    const chunk = 24;
+    const chunk = 30;
     for (const f of MAP.fields.sunflower) {
       const cells = new Map();
       const rowSp = 0.95;
-      const inRow = 1.4;
+      const inRow = 1.6;
       for (let x = f.x0 + 1; x < f.x1 - 1; x += rowSp) {
         for (let z = f.z0 + 1; z < f.z1 - 1; z += inRow) {
           const px = x + rng.range(-0.15, 0.15);

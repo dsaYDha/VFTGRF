@@ -138,10 +138,33 @@ export class AIDirector {
     return true;
   }
 
+  // 목적 노드의 빈 사격 위치 중 마지막 경유점(없으면 현재 위치)에서 가장 가까운 곳
+  pickDestFp(ai, plan) {
+    let ref = ai.pos;
+    if (ai.strandedDest) {
+      const pts = ai.strandedDest.path;
+      if (pts.length > 1) ref = pts[pts.length - 2];
+    } else if (ai.node) {
+      const e = this.nav.edges[this.nav.edgeKey(ai.node.id, plan.to.id)];
+      if (e && e.length) ref = e[e.length - 1];
+    }
+    let best = null;
+    let bd = Infinity;
+    for (const fp of plan.to.fps) {
+      if (fp.occupiedBy) continue;
+      const d = Math.hypot(fp.coverPos.x - ref.x, fp.coverPos.z - ref.z);
+      if (d < bd) {
+        bd = d;
+        best = fp;
+      }
+    }
+    return best;
+  }
+
   depart() {
     const plan = this.plan;
     const ai = plan.ai;
-    const destFp = this.nav.freeFp(plan.to);
+    const destFp = this.pickDestFp(ai, plan);
     if (!destFp) return false;
     let path;
     let startIdx = 0;

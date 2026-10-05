@@ -65,6 +65,7 @@ export class StructureBuilder {
     this.inst = inst;
     this.wires = []; // [x,y,z,x,y,z,...] 선분들
     this.extras = []; // 별도 메시
+    this.windows = []; // 축사 창문 중앙 (AI 사격 위치 정렬용)
   }
 
   buildAll(materials) {
@@ -190,6 +191,11 @@ export class StructureBuilder {
           if (openings.some((op) => s1 > op.s0 - 0.4 && s0 < op.s1 + 0.4)) continue;
           openings.push({ s0, s1, y0: 1.05, y1: 1.85 });
         }
+      }
+      for (const op of openings) {
+        if (op.hole || op.door || op.y0 < 1.0) continue;
+        const sm = (op.s0 + op.s1) / 2;
+        this.windows.push({ barn: b.id, side, x: ax + ux * sm, z: az + uz * sm, y0: floorY + op.y0, y1: floorY + op.y1 });
       }
       const collapses = b.collapse.filter((c) => c.side === side).map((c) => ({ s0: centerS(c.s0), s1: centerS(c.s1), h: c.h }));
       for (const c of collapses) {

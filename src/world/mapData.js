@@ -435,15 +435,17 @@ export const AI_MAP = {
         { rim: 0.32, fire: 'prone', cover: 'prone', coverRef: 'terrain', face: FACE },
       ],
     },
+    // 진출선 엄폐물: 차량 기준 로컬 좌표 (x = 차체 길이 방향, z = 폭 방향, -z 쪽이 적 진영)
     L1: {
       kind: 'line',
       cap: 2,
       next: [],
       light: 'outdoor',
       line: true,
+      vehicle: 'apc',
       fps: [
-        { x: -49.5, z: 8.6, fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE, fireOffset: [-1.4, 0.8] },
-        { x: -43.5, z: 6.6, fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE, fireOffset: [1.5, -0.4] },
+        { local: [-1.4, -2.7], fireLocal: [-3.7, -2.1], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
+        { local: [1.6, -2.7], fireLocal: [4.1, -2.0], fire: 'kneel', cover: 'kneel', coverRef: 'APC', face: FACE },
       ],
     },
     L2: {
@@ -452,9 +454,10 @@ export const AI_MAP = {
       next: [],
       light: 'outdoor',
       line: true,
+      vehicle: 'tractor',
       fps: [
-        { x: 52.2, z: 3.6, fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE, fireOffset: [-1.3, 0.4] },
-        { x: 56.6, z: 4.4, fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE, fireOffset: [1.3, 0.5] },
+        { local: [-1.9, 0.0], fireLocal: [-1.7, 1.75], fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE },
+        { local: [-2.5, -0.8], fireLocal: [-1.9, -1.9], fire: 'kneel', cover: 'kneel', coverRef: 'TRACTOR', face: FACE },
       ],
     },
   },

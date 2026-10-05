@@ -58,6 +58,30 @@ export class Navigation {
     };
     let x = fd.x;
     let z = fd.z;
+    let fireLocalW = null;
+    if (node.vehicle) {
+      // 차량 기준 로컬 좌표 → 월드
+      const v = MAP[node.vehicle];
+      const c = Math.cos(v.rot);
+      const sn = Math.sin(v.rot);
+      const w = (lx, lz) => [v.x + lx * c + lz * sn, v.z - lx * sn + lz * c];
+      [x, z] = w(fd.local[0], fd.local[1]);
+      fireLocalW = w(fd.fireLocal[0], fd.fireLocal[1]);
+    } else if (node.kind === 'building' && fd.fire === 'stand') {
+      // 가장 가까운 창문 중앙으로 맞춘다
+      const wins = (this.world.structures && this.world.structures.windows) || [];
+      let best = null;
+      let bd = 3.5;
+      for (const wi of wins) {
+        if (wi.side !== 'south') continue;
+        const d = Math.abs(wi.x - x) + Math.abs(wi.z - z) * 0.5;
+        if (Math.abs(wi.z - z) < 2.5 && d < bd) {
+          bd = d;
+          best = wi;
+        }
+      }
+      if (best) x = best.x;
+    }
     if (node.kind === 'trench') {
       // 참호선 위 그 x 의 점에서 앞벽(남쪽) 쪽으로 붙는다
       const line = MAP.trench.lines[node.trenchLine];
@@ -92,7 +116,8 @@ export class Navigation {
       this.world.addFireStep(x, z, floor, step, fp.yaw, top);
     }
     const fo = fd.fireOffset || [0, 0];
-    fp.firePos.set(x + fo[0], 0, z + fo[1]);
+    if (fireLocalW) fp.firePos.set(fireLocalW[0], 0, fireLocalW[1]);
+    else fp.firePos.set(x + fo[0], 0, z + fo[1]);
     fp.firePos.y = fd.step ? fp.pos.y : t.heightAt(fp.firePos.x, fp.firePos.z);
     if (node.kind !== 'crater') {
       const co = fd.coverOffset || [0, 0];

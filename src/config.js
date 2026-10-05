@@ -9,6 +9,10 @@ export const CONFIG = {
   // ---------------------------------------------------------------- 렌더링
   render: {
     pixelRatioMax: 1.5,
+    // 프레임이 떨어지면 렌더 해상도를 자동으로 낮춘다 (일반 노트북 60fps 목표)
+    dynamicResolution: true,
+    pixelRatioMin: 0.65,
+    targetFps: 58,
     antialias: true,
     shadows: true,
     shadowMapSize: 2048,

@@ -85,6 +85,10 @@ export class Player {
     this.deadTime = 0;
     this.body.damage.reset();
     this.body.suppression.reset();
+    // 플레이어의 엄폐물은 앞쪽 흙 둔덕·수로 벽 (근접 탄착 5m 규칙)
+    this.body.coverRef = 'terrain';
+    this.body.inCover = true;
+    this.body.coverFacing.set(0, 0, -1);
     this.body.weapon.reset();
     this.updateBody(0);
     this.updateCamera(0);

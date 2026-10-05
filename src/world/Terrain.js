@@ -14,8 +14,8 @@ const SID = Object.fromEntries(Object.entries(SURFACES).map(([k, v]) => [k, v.id
 // 지면 기본 색 (sRGB)
 const SURFACE_COLORS = {
   [SID.plowed]: 0x2f2721,
-  [SID.grass]: 0x77704f,
-  [SID.road]: 0x3e342b,
+  [SID.grass]: 0x6c6550,
+  [SID.road]: 0x43392f,
   [SID.wetMud]: 0x302a24,
   [SID.rubble]: 0x6c6760,
   [SID.sunflower]: 0x2e2620,
@@ -208,8 +208,8 @@ export class Terrain {
     }
   }
 
-  addDetail(x0, z0, x1, z1, res) {
-    this.detailRegions.push({ x0, z0, x1, z1, res });
+  addDetail(x0, z0, x1, z1, resX, resZ = resX) {
+    this.detailRegions.push({ x0, z0, x1, z1, resX, resZ });
   }
 
   // 건물 바닥 평탄화
@@ -289,7 +289,7 @@ export class Terrain {
     const rimW = 0.55 * R;
     const rimH = 0.12 * D + 0.06;
     const ext = R + rimW * 1.7;
-    this.addDetail(c.x - ext, c.z - ext, c.x + ext, c.z + ext, R < 1.7 ? 0.5 : 1.0);
+    this.addDetail(c.x - ext, c.z - ext, c.x + ext, c.z + ext, 1.0);
     this.stamp(c.x - ext, c.z - ext, c.x + ext, c.z + ext, (x, z, k) => {
       const r = Math.hypot(x - c.x, z - c.z);
       if (r > ext) return;
@@ -310,7 +310,8 @@ export class Terrain {
 
   applyCanal() {
     const C = MAP.canal;
-    this.addDetail(C.xMin, C.z - 7, C.xMax, C.z + 7, 0.5);
+    // 수로는 동서로 길어 횡단면(z)만 촘촘하면 된다
+    this.addDetail(C.xMin, C.z - 7, C.xMax, C.z + 7, 1.0, 0.5);
     this.stamp(C.xMin, C.z - 7.5, C.xMax, C.z + 7.5, (x, z, k) => {
       const zc = this.canalZ(x);
       const dz = z - zc;
@@ -411,7 +412,7 @@ export class Terrain {
     this.rubbleMounds = mounds;
     for (const m of mounds) {
       const ext = m.r + 0.5;
-      this.addDetail(m.x - ext, m.z - ext, m.x + ext, m.z + ext, 0.5);
+      this.addDetail(m.x - ext, m.z - ext, m.x + ext, m.z + ext, 1.0);
       this.stamp(m.x - ext, m.z - ext, m.x + ext, m.z + ext, (x, z, k) => {
         const r = Math.hypot(x - m.x, z - m.z) / m.r;
         if (r >= 1) return;
@@ -493,8 +494,8 @@ export class Terrain {
         for (const r of F.sunflower) if (x > r.x0 + edge && x < r.x1 - edge && z > r.z0 + edge && z < r.z1 - edge) s = SID.sunflower;
         const fy = F.farmYard;
         if (x > fy.x0 + edge && x < fy.x1 - edge && z > fy.z0 + edge && z < fy.z1 - edge) {
-          const v = nz.noise(x / 14 + 5, z / 14 - 2);
-          s = v > 0.35 ? SID.rubble : v < -0.3 ? SID.grass : SID.road;
+          const v = nz.noise(x / 17 + 5, z / 17 - 2);
+          s = v > 0.55 ? SID.rubble : v < -0.12 ? SID.grass : SID.road;
         }
         this.surf[j * sn + i] = s;
       }
@@ -582,20 +583,32 @@ export class Terrain {
 
   // ------------------------------------------------------------------ 메시
   chunkResolution(x0, z0, x1, z1) {
-    let res = 2.5;
+    let rx = 2.5;
+    let rz = 2.5;
     for (const r of this.detailRegions) {
       if (r.x1 < x0 || r.x0 > x1 || r.z1 < z0 || r.z0 > z1) continue;
-      if (r.res < res) res = r.res;
+      rx = Math.min(rx, r.resX);
+      rz = Math.min(rz, r.resZ);
     }
     for (const rd of MAP.roads) {
       for (let i = 0; i < rd.points.length - 1; i++) {
         const [ax, az] = rd.points[i];
         const [bx, bz] = rd.points[i + 1];
         if (Math.max(ax, bx) + 4 < x0 || Math.min(ax, bx) - 4 > x1 || Math.max(az, bz) + 4 < z0 || Math.min(az, bz) - 4 > z1) continue;
-        res = Math.min(res, 1.0);
+        // 선분이 실제로 청크를 지나는지 (대략: 몇 점 샘플)
+        let hit = false;
+        for (let k = 0; k <= 20 && !hit; k++) {
+          const px = ax + ((bx - ax) * k) / 20;
+          const pz = az + ((bz - az) * k) / 20;
+          if (px > x0 - 4 && px < x1 + 4 && pz > z0 - 4 && pz < z1 + 4) hit = true;
+        }
+        if (hit) {
+          rx = Math.min(rx, 1.25);
+          rz = Math.min(rz, 1.25);
+        }
       }
     }
-    return res;
+    return [rx, rz];
   }
 
   gridHeight(x, z) {
@@ -623,10 +636,10 @@ export class Terrain {
       for (let ci = 0; ci < nchunk; ci++) {
         const x0 = -half + ci * cs;
         const z0 = -half + cj * cs;
-        const res = this.chunkResolution(x0 - 0.5, z0 - 0.5, x0 + cs + 0.5, z0 + cs + 0.5);
+        const [rx, rz] = this.chunkResolution(x0 - 0.5, z0 - 0.5, x0 + cs + 0.5, z0 + cs + 0.5);
         const key = `${Math.floor((x0 + half) / gs)}_${Math.floor((z0 + half) / gs)}`;
         if (!groups.has(key)) groups.set(key, { pos: [], nor: [], colr: [], mask: [], idx: [] });
-        triCount += this.buildChunk(groups.get(key), x0, z0, cs, res, col);
+        triCount += this.buildChunk(groups.get(key), x0, z0, cs, rx, rz, col);
       }
     }
     const meshGroup = new THREE.Group();
@@ -658,14 +671,13 @@ export class Terrain {
     return mesh;
   }
 
-  vertexAttribs(x, z, h, res, g, col) {
-    // 법선
-    const e = res;
-    const hx = this.gridHeight(x + e, z) - this.gridHeight(x - e, z);
-    const hz = this.gridHeight(x, z + e) - this.gridHeight(x, z - e);
-    let nx = -hx;
-    let ny = 2 * e;
-    let nzz = -hz;
+  vertexAttribs(x, z, h, rx, rz, g, col) {
+    // 법선 (청크 해상도 간격의 중앙차분)
+    const sx = (this.gridHeight(x + rx, z) - this.gridHeight(x - rx, z)) / (2 * rx);
+    const sz = (this.gridHeight(x, z + rz) - this.gridHeight(x, z - rz)) / (2 * rz);
+    let nx = -sx;
+    let ny = 1;
+    let nzz = -sz;
     const nl = Math.hypot(nx, ny, nzz);
     nx /= nl;
     ny /= nl;
@@ -692,37 +704,38 @@ export class Terrain {
     g.mask.push(m[0], m[1], m[2]);
   }
 
-  buildChunk(g, x0, z0, size, res, col) {
-    const nv = Math.round(size / res) + 1;
+  buildChunk(g, x0, z0, size, rx, rz, col) {
+    const nvx = Math.round(size / rx) + 1;
+    const nvz = Math.round(size / rz) + 1;
     const base = g.pos.length / 3;
-    for (let j = 0; j < nv; j++) {
-      const z = z0 + j * res;
-      for (let i = 0; i < nv; i++) {
-        const x = x0 + i * res;
+    for (let j = 0; j < nvz; j++) {
+      const z = z0 + j * rz;
+      for (let i = 0; i < nvx; i++) {
+        const x = x0 + i * rx;
         const h = this.gridHeight(x, z);
         g.pos.push(x, h, z);
-        this.vertexAttribs(x, z, h, res, g, col);
+        this.vertexAttribs(x, z, h, rx, rz, g, col);
       }
     }
-    for (let j = 0; j < nv - 1; j++) {
-      for (let i = 0; i < nv - 1; i++) {
-        const a = base + j * nv + i;
+    for (let j = 0; j < nvz - 1; j++) {
+      for (let i = 0; i < nvx - 1; i++) {
+        const a = base + j * nvx + i;
         const b = a + 1;
-        const c = a + nv;
+        const c = a + nvx;
         const d = c + 1;
         // 대각선 방향을 번갈아 가며
         if ((i + j) % 2 === 0) g.idx.push(a, c, b, b, c, d);
         else g.idx.push(a, c, d, a, d, b);
       }
     }
-    let tris = (nv - 1) * (nv - 1) * 2;
+    let tris = (nvx - 1) * (nvz - 1) * 2;
     // 스커트 (해상도가 다른 청크 사이 틈 가림)
     const sd = CONFIG.world.skirtDepth;
     const edges = [
-      { list: [...Array(nv).keys()].map((i) => i), out: [0, -1] },
-      { list: [...Array(nv).keys()].map((i) => (nv - 1) * nv + i), out: [0, 1] },
-      { list: [...Array(nv).keys()].map((j) => j * nv), out: [-1, 0] },
-      { list: [...Array(nv).keys()].map((j) => j * nv + nv - 1), out: [1, 0] },
+      { list: [...Array(nvx).keys()].map((i) => i) },
+      { list: [...Array(nvx).keys()].map((i) => (nvz - 1) * nvx + i) },
+      { list: [...Array(nvz).keys()].map((j) => j * nvx) },
+      { list: [...Array(nvz).keys()].map((j) => j * nvx + nvx - 1) },
     ];
     for (const e of edges) {
       const start = g.pos.length / 3;

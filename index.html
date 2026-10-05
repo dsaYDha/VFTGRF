@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>제압사격 — 1단계: 이동 저지</title>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- 전투 중 HUD (최소한) -->
+    <div id="hud" class="hidden">
+      <canvas id="compass" width="620" height="46"></canvas>
+      <div id="hud-top-right">
+        <div id="hud-timer">5:00</div>
+        <div id="hud-advances"></div>
+      </div>
+      <div id="hud-bottom-left">
+        <div id="hud-posture"></div>
+        <div id="hud-wound"></div>
+        <div id="hud-stamina"><div id="hud-stamina-bar"></div></div>
+      </div>
+      <div id="hud-bottom-right">
+        <div id="hud-ammo-check"></div>
+        <div id="hud-firemode"></div>
+        <div id="hud-sight"></div>
+      </div>
+      <div id="hud-rested">거치</div>
+      <div id="hud-messages"></div>
+      <div id="hud-boundary"></div>
+    </div>
+    <div id="fx-vignette"></div>
+    <div id="fx-flash"></div>
+    <div id="fx-blackout"></div>
+
+    <div id="debug-overlay" class="hidden">
+      <div id="debug-panel"></div>
+      <div id="debug-labels"></div>
+    </div>
+
+    <div id="screen-loading" class="screen">
+      <div class="loading-box">
+        <div class="loading-title">제압사격</div>
+        <div id="loading-text">지형 생성 중…</div>
+        <div class="loading-bar"><div id="loading-fill"></div></div>
+      </div>
+    </div>
+    <div id="screen-briefing" class="screen hidden"></div>
+    <div id="screen-pause" class="screen hidden"></div>
+    <div id="screen-result" class="screen hidden"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

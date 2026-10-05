@@ -397,23 +397,23 @@ export function camoAtlas() {
         const b = g(uu + 0.3, v, 0.5);
         const c = h(uu, v, 0.5);
         // 흐린 올리브·갈색·회녹색 얼룩 (양측이 비슷한 복장)
-        let r = 170;
-        let gg = 166;
-        let bb = 140;
+        let r = 104;
+        let gg = 100;
+        let bb = 78;
         if (a > 0.55) {
-          r = 120;
-          gg = 112;
-          bb = 82;
+          r = 82;
+          gg = 76;
+          bb = 56;
         }
         if (b > 0.6) {
-          r = 92;
-          gg = 98;
-          bb = 74;
+          r = 66;
+          gg = 72;
+          bb = 52;
         }
         if (c > 0.68) {
-          r = 70;
-          gg = 64;
-          bb = 52;
+          r = 48;
+          gg = 44;
+          bb = 36;
         }
         col[0] = r;
         col[1] = gg;
@@ -439,9 +439,9 @@ export function grassBladeTexture() {
       const hgt = h * (0.45 + rng.next() * 0.55);
       const lean = (rng.next() - 0.5) * 40;
       const b = rng.next();
-      const r = clamp255(150 + b * 70);
-      const g = clamp255(132 + b * 60);
-      const bl = clamp255(86 + b * 40);
+      const r = clamp255(150 + b * 60);
+      const g = clamp255(138 + b * 52);
+      const bl = clamp255(104 + b * 40);
       ctx.strokeStyle = `rgb(${r},${g},${bl})`;
       ctx.lineWidth = 1.2 + rng.next() * 1.8;
       ctx.beginPath();

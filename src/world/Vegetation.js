@@ -10,9 +10,16 @@ import { polylineDistance } from '../core/mathUtils.js';
 // 바람 흔들림을 넣는 공용 셰이더 패치 (높이 비례)
 export const windUniforms = { uTime: { value: 0 } };
 
-function addWind(material, strength) {
+function addWind(material, strength, fixNormal = false) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = windUniforms.uTime;
+    if (fixNormal) {
+      // 양면 카드의 뒷면 법선 반전을 막아 양쪽 모두 같은 밝기로
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <normal_fragment_begin>',
+        '#include <normal_fragment_begin>\n normal = normalize(vNormal);',
+      );
+    }
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nuniform float uTime;')
       .replace(
@@ -40,8 +47,8 @@ function sunflowerGeometry() {
   const stalk = new THREE.CylinderGeometry(0.014, 0.022, 1, 3, 1, true);
   stalk.translate(0, 0.5, 0);
   parts.push(stalk);
-  const head = new THREE.CylinderGeometry(0.13, 0.11, 0.05, 6, 1, false);
-  head.rotateX(Math.PI / 2 - 0.35);
+  const head = new THREE.CircleGeometry(0.13, 6);
+  head.rotateX(-0.35);
   head.translate(0, 0.94, 0.07);
   parts.push(head);
   for (const [y, a] of [
@@ -143,7 +150,7 @@ export class Vegetation {
     for (const f of MAP.fields.sunflower) {
       const cells = new Map();
       const rowSp = 0.95;
-      const inRow = 1.25;
+      const inRow = 1.4;
       for (let x = f.x0 + 1; x < f.x1 - 1; x += rowSp) {
         for (let z = f.z0 + 1; z < f.z1 - 1; z += inRow) {
           const px = x + rng.range(-0.15, 0.15);
@@ -194,10 +201,10 @@ export class Vegetation {
       alphaTest: 0.5,
       side: THREE.DoubleSide,
     });
-    addWind(mat, 0.25);
+    addWind(mat, 0.25, true);
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
-    const chunk = 30;
+    const chunk = 60;
     const cells = new Map();
     const put = (x, z, scale) => {
       if (this.isBlocked(x, z)) return;
@@ -211,14 +218,21 @@ export class Vegetation {
       const z = rng.range(-290, 290);
       const s = this.terrain.surfaceAt(x, z);
       if (s !== 1) continue;
+      // 수로 바로 앞(북쪽 15m)은 낮은 풀만: 수로에서 고개를 내밀면 시야가 트여야 한다
+      const dz = this.terrain.canalZ(x) - z;
+      if (dz > 0 && dz < 15) {
+        if (rng.next() < 0.5) continue;
+        put(x, z, rng.range(0.12, 0.26));
+        continue;
+      }
       put(x, z, rng.range(0.35, 0.8));
     }
-    // 수로 둑 (남쪽은 촘촘, 북쪽 둔덕은 드문드문)
+    // 수로 둑: 남쪽은 촘촘하고 키 큰 풀, 북쪽 둔덕은 드문드문 낮은 풀
     for (let x = -280; x < 280; x += 0.55) {
       for (const off of [-4.5, -3.2, 2.6, 3.6, 4.8]) {
-        if (rng.next() < (off < 0 ? 0.45 : 0.2)) continue;
+        if (rng.next() < (off < 0 ? 0.8 : 0.2)) continue;
         const z = this.terrain.canalZ(x) + off + rng.range(-0.6, 0.6);
-        put(x + rng.range(-0.3, 0.3), z, rng.range(0.45, 0.95));
+        put(x + rng.range(-0.3, 0.3), z, off < 0 ? rng.range(0.12, 0.24) : rng.range(0.45, 0.95));
       }
     }
     // 도로변
@@ -255,8 +269,8 @@ export class Vegetation {
         dummy.scale.set(sc * rng.range(0.9, 1.5), sc, sc * rng.range(0.9, 1.5));
         dummy.updateMatrix();
         im.setMatrixAt(i, dummy.matrix);
-        const v = rng.range(0.75, 1.05);
-        im.setColorAt(i, col.setRGB(v * 0.95, v * 0.88, v * 0.68));
+        const v = rng.range(0.42, 0.68);
+        im.setColorAt(i, col.setRGB(v * 0.95, v * 0.9, v * 0.78));
       });
       im.instanceMatrix.needsUpdate = true;
       im.instanceColor.needsUpdate = true;

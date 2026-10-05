@@ -342,10 +342,12 @@ export class StructureBuilder {
       this.batch.add('interior', place(boxGeo(sz, sz * 0.8, 0.2), px, y + s.h * hy, pz, ang));
     }
     // 컨베이어 관 (기울어진 녹슨 통)
-    const cl = 21;
+    // 아래 끝 (s.x+16, 지면) → 위 끝 (s.x+2, 꼭대기)
+    const cl = 26;
     const g = boxGeo(0.9, 0.9, cl, 2);
-    place(g, s.x + 7.5, y + 9.8, s.z + 1.2, [0, Math.PI / 2 - 0.06, -0.95, 'YXZ']);
+    place(g, s.x + 9, y + 11, s.z + 1.2, [-1.0, -Math.PI / 2, 0, 'YXZ']);
     this.batch.add('rust', g, 0x9a8a7a);
+    this.batch.add('rust', place(boxGeo(1.6, 2.2, 1.6, 2), s.x + 16.2, y + 1.1, s.z + 1.2), 0x8a7a6a);
     // 사다리 보호틀
     for (let k = 0; k < 2; k++) {
       const px = s.x + Math.sin(-0.5) * (s.r + 0.35) + k * 0.5;

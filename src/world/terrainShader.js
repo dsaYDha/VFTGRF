@@ -143,20 +143,20 @@ float tFurrow(float s) {
 // 재질 한 층 읽기. 밭 재질(0·1)은 고랑 방향 좌표, 나머지는 월드 좌표.
 // anti > 0 이면 크기·회전이 다른 두 번째 샘플과 섞어 타일 반복을 깬다 (가까운 곳만).
 // 반환 n.xy = 월드 x·z 기울기 성분(부호 있음), n.z = 높이(0..1), a.a = 거칠기 배수
-void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 dWx, vec2 dWy, vec2 fperp, vec2 fdir, out vec4 a, out vec4 n) {
+// 텍스처는 암시적 미분(texture)으로 읽는다 (textureGrad 는 GPU·소프트웨어 렌더러에서 훨씬 느림).
+// 분기 안에서 읽는 샘플은 분기 경계에서 섞는 몫이 0 이 되도록 짜여 있어 경계의 미분 오차가 보이지 않는다.
+void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 fperp, vec2 fdir, out vec4 a, out vec4 n) {
   bool fr = li < 2;
   vec2 uv = fr ? vec2(dot(wp, fperp), dot(wp, fdir)) : wp;
-  vec2 gx = fr ? vec2(dot(dWx, fperp), dot(dWx, fdir)) : dWx;
-  vec2 gy = fr ? vec2(dot(dWy, fperp), dot(dWy, fdir)) : dWy;
   float k = 1.0 / T_TILE[li];
   float l = float(li);
   a = vec4(0.0);
   n = vec4(0.0);
   if (anti < 0.996) {
     vec3 c1 = vec3(uv * k, l);
-    a = textureGrad(tAlb, c1, gx * k, gy * k);
+    a = texture(tAlb, c1);
 #ifndef T_FAR
-    n = textureGrad(tGNrm, c1, gx * k, gy * k);
+    n = texture(tGNrm, c1);
 #endif
   }
 #ifndef T_FAR
@@ -164,8 +164,8 @@ void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 dWx, vec2 dWy
     float k2 = k / T_ANTI_TILE;
     mat2 rm = fr ? mat2(1.0) : mat2(0.8, 0.6, -0.6, 0.8);
     vec3 c2 = vec3(rm * uv * k2 + vec2(0.37, 0.71), l);
-    vec4 a2 = textureGrad(tAlb, c2, rm * gx * k2, rm * gy * k2);
-    vec4 n2 = textureGrad(tGNrm, c2, rm * gx * k2, rm * gy * k2);
+    vec4 a2 = texture(tAlb, c2);
+    vec4 n2 = texture(tGNrm, c2);
     n2.xy = transpose(rm) * (n2.xy * 2.0 - 1.0) * 0.5 + 0.5;
     a = mix(a, a2, anti);
     n = mix(n, n2, anti);
@@ -185,8 +185,6 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   vec3 V = normalize(P - cameraPosition);
   float dist = vTDist;
   vec2 wp = P.xz;
-  vec2 dWx = dFdx(wp);
-  vec2 dWy = dFdy(wp);
 
   // ---- 혼합 마스크 (맵 밖은 큰 노이즈로 밭/풀밭 얼룩)
   vec2 suv = (wp + T_HALF) / (2.0 * T_HALF);
@@ -198,7 +196,7 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   // 큰 규모 색 변화 (r: 큰 얼룩, b: 중간 얼룩)
   vec4 macA = texture(tMacro, wp / T_MAC_A);
   if (suv != suvC) {
-    float farM = textureGrad(tMacro, wp / T_MAC_FAR, dWx / T_MAC_FAR, dWy / T_MAC_FAR).r;
+    float farM = texture(tMacro, wp / T_MAC_FAR).r;
     sA = vec4(smoothstep(0.56, 0.62, farM), (1.0 - smoothstep(0.38, 0.44, farM)) * 0.9, 0.0, 0.0);
     sB = vec4(0.0, 1.0, 1.0, 0.0);
     parcel = 0;
@@ -269,12 +267,12 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
 #endif
   vec4 a1;
   vec4 n1;
-  tLayer(tGAlb, i1, mixT, wp, dWx, dWy, fperp, fdir, a1, n1);
+  tLayer(tGAlb, i1, mixT, wp, fperp, fdir, a1, n1);
   vec4 a2 = a1;
   vec4 n2 = n1;
   // 두 번째 층: 높이 기반 혼합에서 몫이 0 이 될 수밖에 없으면 (비율 차 >= 0.22 + 높이 혼합) 읽지 않는다
   bool two = w2 > 0.05 && w1 - w2 < 0.22 + T_HB;
-  if (two) tLayer(tGAlbLo, i2, 0.0, wp, dWx, dWy, fperp, fdir, a2, n2);
+  if (two) tLayer(tGAlbLo, i2, 0.0, wp, fperp, fdir, a2, n2);
 #ifndef T_FAR
   // 높이 기반 혼합: 경계에서 돌·풀 포기처럼 높은 쪽이 이긴다
   float sc1 = w1 + T_HB * n1.z;
@@ -301,7 +299,7 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   if (dist < T_DETAIL_F1) {
     float dF = (1.0 - smoothstep(T_DETAIL_F0, T_DETAIL_F1, dist)) * T_DETAIL_STR;
     vec2 ud = wp / T_DETAIL_TILE;
-    vec4 dn = textureGrad(tGNrm, vec3(ud, 6.0), dWx / T_DETAIL_TILE, dWy / T_DETAIL_TILE);
+    vec4 dn = texture(tGNrm, vec3(ud, 6.0));
     alb *= 1.0 + (dn.b - 0.5) * 0.9 * dF;
     nxz += (dn.xy * 2.0 - 1.0) * dF;
   }

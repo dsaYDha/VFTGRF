@@ -195,7 +195,7 @@ export class Terrain {
       if (x < t.x0 || x > t.x1 || z < t.z0 || z > t.z1) continue;
       tdamp *= U.trenchDamp + (1 - U.trenchDamp) * smoothstep(td[0], td[1], polylineDistance(t.line, x, z));
     }
-    return u * damp * tdamp + U.fine.amp * tdamp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9);
+    return u * damp * tdamp + U.fine.amp * tdamp * nz.noise(x / U.fine.size + 3.3, z / U.fine.size - 9.9) + U.trenchOffset * (1 - tdamp);
   }
 
   heightAt(x, z) {

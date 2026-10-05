@@ -743,21 +743,144 @@ export function brickTexture(kind = 'red') {
   });
 }
 
+// 픽셀 좌표 해시 0..1 (골재 알갱이·기공 같은 1px 단위 무늬)
+function hashPx(x, y, seed) {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// 일반 콘크리트 (저장탑·창고·방벽·배수관 등, 미터 단위로 반복): 고운 골재 노이즈 회색 + 옅은 얼룩 + 빗물 세로줄.
+// 큰 검은 반점(젖소 무늬)이 생기지 않게 큰 규모 명암은 약하게만 둔다.
 export function concreteTexture() {
   return cached('concrete', () => {
-    const f = makeFbm(51, 4, 6);
-    const g = makeFbm(52, 32, 2);
-    return pixelTexture(512, (u, v, col) => {
-      const n = f(u, v, 0.55);
-      const pits = g(u, v, 0.5);
-      let s = 128 + (n - 0.5) * 70;
-      if (pits > 0.72) s -= 40;
+    const f = makeFbm(51, 4, 5);
+    const grain = makeFbm(53, 96, 2);
+    const streak = rectFbm(54, 40, 2, 2);
+    return pixelTexture(512, (u, v, col, x, y) => {
+      const n = f(u, v, 0.5);
+      let s = 128 + (n - 0.5) * 24 + (grain(u, v, 0.5) - 0.5) * 20;
+      const h = hashPx(x, y, 7);
+      if (h < 0.06) s += (h / 0.06 - 0.5) * 34; // 골재 알갱이 (밝고 어두운 점)
+      else if (h > 0.996) s -= 30; // 작은 기공
       // 빗물 자국 (세로 줄)
-      s -= Math.max(0, Math.sin(u * 60 + n * 4)) * 6;
+      s -= smooth(0.56, 0.82, streak(u, v, 0.5)) * 11;
       col[0] = clamp255(s * 1.0);
-      col[1] = clamp255(s * 0.99);
+      col[1] = clamp255(s * 0.985);
       col[2] = clamp255(s * 0.95);
     });
+  });
+}
+
+// 수로 라이닝 프리캐스트 판 아틀라스: 판 하나(1 x 2m) = 가로 한 칸 (variants 칸). UV v = 0 이 수로 바닥 쪽 끝이고,
+// 캔버스 위쪽이 비탈 위쪽 끝이다. 고운 골재 노이즈 회색 + 위에서 흘러내린 빗물 얼룩 세로줄 + 바닥 쪽 습기로 짙어진 띠
+// (물때 선이 들쭉날쭉) + 아래쪽·이음매의 약간의 이끼와 위쪽의 옅은 지의류 + 가장자리(이음매)의 어두운 선과 깨진 모서리,
+// 일부 칸에는 가는 금. 큰 검은 반점 무늬는 없다.
+export function canalSlabTexture(w = 1024, h = 512, variants = 4) {
+  return cached(`canalSlab${w}x${h}x${variants}`, () => {
+    const c = canvas(w, h);
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    const d = img.data;
+    const cw = Math.floor(w / variants);
+    const grain = rectFbm(1301, 40, 80, 2);
+    const mottle = rectFbm(1302, 3, 6, 3);
+    const streak = rectFbm(1303, 34, 2, 2);
+    const streakLen = rectFbm(1307, 9, 3, 2);
+    const tide = rectFbm(1308, 5, 1, 2);
+    const moss = rectFbm(1304, 7, 14, 4);
+    const lichen = rectFbm(1305, 12, 24, 3);
+    const chip = rectFbm(1306, 20, 40, 2);
+    // 가는 금 (칸 1, 3): 무작위 걸음으로 그린 1px 선
+    const crack = new Uint8Array(w * h);
+    const rng = new Random(1309);
+    for (let vi = 0; vi < variants; vi++) {
+      if (vi % 2 === 0) continue;
+      const lines = 2 + rng.int(0, 2);
+      for (let l = 0; l < lines; l++) {
+        let px = vi * cw + rng.range(0.1, 0.9) * cw;
+        let py = rng.range(0.15, 0.85) * h;
+        let a = rng.range(0, Math.PI * 2);
+        const steps = 60 + rng.int(0, 160);
+        for (let s = 0; s < steps; s++) {
+          a += rng.range(-0.45, 0.45);
+          px += Math.cos(a);
+          py += Math.sin(a);
+          const ix = Math.round(px);
+          const iy = Math.round(py);
+          if (ix < vi * cw + 2 || ix >= (vi + 1) * cw - 2 || iy < 2 || iy >= h - 2) break;
+          crack[iy * w + ix] = 2;
+          for (const [ox, oy] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+          ]) {
+            const k = (iy + oy) * w + ix + ox;
+            if (!crack[k]) crack[k] = 1;
+          }
+        }
+      }
+    }
+    const lim = [72, 80, 52];
+    for (let y = 0; y < h; y++) {
+      const V = y / h; // 0 = 비탈 위쪽 끝, 1 = 바닥 쪽 끝
+      for (let x = 0; x < w; x++) {
+        const vi = Math.min(variants - 1, Math.floor(x / cw));
+        const lx = x - vi * cw;
+        const U = lx / cw;
+        const uo = U + vi * 0.37; // 칸마다 다른 무늬
+        let s = 118 + (vi - 1.5) * 2.5;
+        s += (grain(uo, V, 0.5) - 0.5) * 18 + (mottle(uo, V, 0.5) - 0.5) * 16;
+        const hp = hashPx(x, y, 3);
+        if (hp < 0.06) s += (hp / 0.06 - 0.6) * 26;
+        else if (hp > 0.995) s -= 30;
+        // 빗물 얼룩: 위쪽 끝(흙 둑)에서 흘러내린 세로줄, 줄마다 길이·진하기가 다르고 드문드문하다
+        const reach = 0.2 + 0.8 * streakLen(uo, 0.5, 0.5);
+        const st = smooth(0.6, 0.85, streak(uo, V * 0.5, 0.5)) * (1 - smooth(reach - 0.2, reach + 0.1, V)) * (0.35 + 0.65 * mottle(uo * 2.3, 0.4, 0.5));
+        s -= st * 10;
+        // 습기 띠: 들쭉날쭉한 물때 선 아래가 짙고, 바닥 끝은 더 짙다
+        const tideV = 0.7 + (tide(uo, 0.3, 0.5) - 0.5) * 0.16;
+        const damp = smooth(tideV - 0.03, tideV + 0.06, V);
+        s -= damp * 26 + smooth(0.9, 1.0, V) * 14;
+        // 가장자리(이음매) 때와 깨진 모서리
+        const ex = Math.min(lx, cw - 1 - lx);
+        const ey = Math.min(y, h - 1 - y);
+        const e = Math.min(ex, ey);
+        const ch = chip(uo, V, 0.5);
+        const ew = 1.6 + 2.2 * ch;
+        let edge = 0;
+        if (e < ew) edge = 1 - e / ew;
+        const chipped = e < 7 && ch > 0.68;
+        if (chipped) s += 8 - e * 0.6; // 떨어져 나간 모서리: 조금 밝은 새 단면
+        s -= edge * 46;
+        if (crack[y * w + x] === 2) s -= 34;
+        else if (crack[y * w + x] === 1) s -= 9;
+        let r = s;
+        let g = s * 0.985;
+        let b = s * 0.95;
+        // 습기 띠는 조금 차갑고 푸르스름하게
+        g += damp * 2;
+        b += damp * 3;
+        // 이끼: 아래쪽 습기 띠와 이음매 가까이
+        const mo = smooth(0.56, 0.7, moss(uo, V, 0.55)) * Math.min(1, damp * 0.85 + smooth(10, 0, e) * 0.55 + 0.05);
+        r += (lim[0] - r) * mo * 0.7;
+        g += (lim[1] - g) * mo * 0.7;
+        b += (lim[2] - b) * mo * 0.7;
+        // 지의류: 위쪽의 옅은 점
+        const li = smooth(0.72, 0.82, lichen(uo, V, 0.5)) * (1 - damp) * 0.16;
+        r += (176 - r) * li;
+        g += (180 - g) * li;
+        b += (164 - b) * li;
+        const i = (y * w + x) * 4;
+        d[i] = clamp255(r);
+        d[i + 1] = clamp255(g);
+        d[i + 2] = clamp255(b);
+        d[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return finish(c, { repeat: false });
   });
 }
 
@@ -818,6 +941,85 @@ export function burntTexture() {
       col[0] = clamp255(r);
       col[1] = clamp255(gg);
       col[2] = clamp255(b);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 중간 지대 차량 잔해 (장갑차·민간 차량·트랙터)
+// 불탄 차체 (미터 단위 반복, 한 장 = 2m 로 쓴다): 그을음 낀 어두운 회갈색 바탕 + 열에 변색된 녹(적갈색~주황갈색)
+// + 회백색 재·산화 얼룩 + 남은 도장 조각 + 위에서 흘러내린 녹물 세로줄 + 1px 반점.
+// 큰 검은 덩어리 무늬(젖소 무늬)가 생기지 않게 명암 차이는 중간·작은 얼룩에만 주고 색끼리 밝기를 가깝게 둔다.
+// kind: 'armor' = 장갑차 (그을음이 짙고 올리브 도장이 남음), 'car' = 민간 차량·트랙터 (주황빛 녹과 재가 많음)
+// 캔버스 위쪽 = 부품 위쪽 (상자 옆면 UV v 가 위로 증가) → 녹물 줄은 세로로 흐른다.
+export function wreckTexture(kind = 'car', size = 512) {
+  return cached(`wreck:${kind}:${size}`, () => {
+    const armor = kind === 'armor';
+    const s0 = armor ? 301 : 311;
+    const big = makeFbm(s0, 2, 5); // 넓고 부드러운 색 변화 (경계 없이 이어짐)
+    const sootN = makeFbm(s0 + 1, 3, 5);
+    const mottle = makeFbm(s0 + 2, 24, 3); // 녹 표면의 고운 얼룩
+    const flake = makeFbm(s0 + 3, 12, 3); // 재·남은 도장 조각 (작게)
+    const streak = rectFbm(s0 + 4, 36, 3, 3);
+    const rustD = armor ? [66, 50, 40] : [84, 54, 38];
+    const rustL = armor ? [92, 64, 46] : [118, 74, 46];
+    const soot = armor ? [38, 36, 34] : [44, 39, 35];
+    const ashC = armor ? [98, 95, 90] : [112, 107, 100];
+    const paintC = armor ? [64, 67, 52] : [78, 80, 78];
+    return pixelTexture(size, (u, v, col, x, y) => {
+      const n = big(u, v, 0.55);
+      const m = mottle(u, v, 0.55);
+      // 녹 바탕: 어두운 녹 ↔ 밝은 녹이 경계 없이 이어지고, 고운 얼룩이 겹친다
+      let c = mix3(rustD, rustL, smooth(0.3, 0.72, n * 0.7 + m * 0.45));
+      // 그을음 (넓고 부드럽게 짙어짐, 장갑차는 더 많이)
+      const ts = smooth(armor ? 0.36 : 0.4, armor ? 0.62 : 0.66, sootN(u, v, 0.5) + (m - 0.5) * 0.2) * (armor ? 0.88 : 0.74);
+      c = mix3(c, soot, ts);
+      // 작은 조각: 남은 도장(그을음이 덜 탄 곳) / 회백색 재·산화
+      const fl = flake(u, v, 0.5) + (m - 0.5) * 0.25;
+      c = mix3(c, paintC, smooth(0.62, 0.7, fl) * (armor ? 0.6 : 0.35) * (1 - ts * 0.5));
+      c = mix3(c, ashC, smooth(armor ? 0.25 : 0.33, armor ? 0.17 : 0.22, fl) * (armor ? 0.4 : 0.5));
+      // 녹물 세로줄 (어둡고 붉게)
+      const st = smooth(0.56, 0.8, streak(u, v, 0.5)) * 0.45;
+      c = mix3(c, [rustD[0] * 0.78, rustD[1] * 0.7, rustD[2] * 0.68], st);
+      // 고운 명암 + 1px 반점 (녹 알갱이·재 가루)
+      const k = 0.9 + m * 0.2;
+      const h = hashPx(x, y, s0);
+      const sp = h < 0.06 ? (h / 0.06 - 0.5) * 20 : 0;
+      col[0] = clamp255(c[0] * k + sp);
+      col[1] = clamp255(c[1] * k + sp * 0.9);
+      col[2] = clamp255(c[2] * k + sp * 0.8);
+    });
+  });
+}
+
+// 궤도 (u = 궤도 길이 방향, 한 장 = 링크 4개 → uvScale 0.6m 이면 링크 간격 15cm, v = 폭 방향):
+// 링크 판·가로 돌기(그라우저)·가운데 안내 돌기, 링크 사이 틈과 틈에 낀 진흙, 모서리의 녹
+export function trackTexture() {
+  return cached('track', () => {
+    const f = makeFbm(321, 8, 3);
+    const mud = makeFbm(322, 4, 4);
+    return pixelTexture(256, (u, v, col, x, y) => {
+      const lu = (u * 4) % 1; // 링크 안 위치
+      const n = f(u, v, 0.5);
+      let c = [44 + (n - 0.5) * 14, 43 + (n - 0.5) * 13, 42 + (n - 0.5) * 12];
+      // 가로 돌기 (밝은 모서리 = 닳은 쇠)
+      if (lu > 0.3 && lu < 0.46) c = mix3(c, [74, 72, 68], lu < 0.34 ? 0.9 : 0.5);
+      // 가운데 안내 돌기 자리
+      if (Math.abs(v - 0.5) < 0.06 && lu > 0.22 && lu < 0.7) c = mix3(c, [70, 68, 64], 0.6);
+      // 핀 구멍 (양 끝)
+      if ((v < 0.08 || v > 0.92) && (lu < 0.14 || lu > 0.86)) c = [22, 21, 20];
+      // 녹 (가장자리·돌기, 옅게)
+      c = mix3(c, [78, 56, 42], smooth(0.6, 0.74, n) * 0.4);
+      // 링크 사이 틈
+      if (lu < 0.07 || lu > 0.95) c = [18, 17, 16];
+      // 틈에 낀 진흙
+      const md = smooth(0.56, 0.7, mud(u, v, 0.5) + (lu < 0.12 || lu > 0.9 ? 0.12 : 0));
+      c = mix3(c, [52, 45, 37], md * 0.6);
+      const h = hashPx(x, y, 323);
+      const sp = h < 0.04 ? (h / 0.04 - 0.5) * 14 : 0;
+      col[0] = clamp255(c[0] + sp);
+      col[1] = clamp255(c[1] + sp);
+      col[2] = clamp255(c[2] + sp);
     });
   });
 }
@@ -929,30 +1131,419 @@ export function camoAtlas() {
 
 // ---------------------------------------------------------------------------
 // 알파 텍스처 (식생, 위장망)
-export function grassBladeTexture() {
-  return cached('grassBlade', () => {
-    const w = 128;
-    const h = 128;
-    const c = canvas(w, h);
+
+// 알파 테스트용 식생 텍스처: 캔버스 그림 → 밉맵 단계마다 '알파 > cutoff' 인 텍셀 비율(덮는 비율)을 원본과 같게 맞춘다.
+// 보통 밉맵은 멀리서 가는 줄기·잎의 알파를 평균으로 옅게 만들어 알파 테스트에서 통째로 사라지게 한다
+// (먼 해바라기밭·풀이 비어 보이거나 칼같이 끊김). 투명 텍셀의 색은 밉맵 평균색으로 채워(pull-push)
+// 가장자리가 검게 번지지 않게 한다. 결과는 밉맵을 직접 지정한 DataTexture (첫 행 = 텍스처 아래, 캔버스와 위아래 반대).
+function coverageTexture(c, cutoff = 0.5) {
+  const w = c.width;
+  const h = c.height;
+  const src = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const levels = [];
+  let cur = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = ((h - 1 - y) * w + x) * 4;
+      const di = (y * w + x) * 4;
+      const a = src[si + 3] / 255;
+      cur[di] = (src[si] / 255) * a;
+      cur[di + 1] = (src[si + 1] / 255) * a;
+      cur[di + 2] = (src[si + 2] / 255) * a;
+      cur[di + 3] = a;
+    }
+  }
+  levels.push({ data: cur, width: w, height: h });
+  let lw = w;
+  let lh = h;
+  while (lw > 1 || lh > 1) {
+    const nw = Math.max(1, lw >> 1);
+    const nh = Math.max(1, lh >> 1);
+    const sx = lw > 1 ? 2 : 1;
+    const sy = lh > 1 ? 2 : 1;
+    const nxt = new Float32Array(nw * nh * 4);
+    const inv = 1 / (sx * sy);
+    for (let y = 0; y < nh; y++) {
+      for (let x = 0; x < nw; x++) {
+        const o = (y * nw + x) * 4;
+        for (let dy = 0; dy < sy; dy++) {
+          for (let dx = 0; dx < sx; dx++) {
+            const i = ((y * sy + dy) * lw + x * sx + dx) * 4;
+            nxt[o] += cur[i] * inv;
+            nxt[o + 1] += cur[i + 1] * inv;
+            nxt[o + 2] += cur[i + 2] * inv;
+            nxt[o + 3] += cur[i + 3] * inv;
+          }
+        }
+      }
+    }
+    levels.push({ data: nxt, width: nw, height: nh });
+    cur = nxt;
+    lw = nw;
+    lh = nh;
+  }
+  // 색 (premultiplied → 원래 색). 투명 텍셀은 한 단계 거친 밉맵의 색
+  const cols = new Array(levels.length);
+  for (let L = levels.length - 1; L >= 0; L--) {
+    const { data, width, height } = levels[L];
+    const col = new Float32Array(width * height * 3);
+    const up = cols[L + 1];
+    const uw = L + 1 < levels.length ? levels[L + 1].width : 1;
+    const uh = L + 1 < levels.length ? levels[L + 1].height : 1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const k = y * width + x;
+        const a = data[k * 4 + 3];
+        if (a > 1e-4) {
+          col[k * 3] = data[k * 4] / a;
+          col[k * 3 + 1] = data[k * 4 + 1] / a;
+          col[k * 3 + 2] = data[k * 4 + 2] / a;
+        } else if (up) {
+          const u = Math.min(uh - 1, y >> 1) * uw + Math.min(uw - 1, x >> 1);
+          col[k * 3] = up[u * 3];
+          col[k * 3 + 1] = up[u * 3 + 1];
+          col[k * 3 + 2] = up[u * 3 + 2];
+        } else col.fill(0.5, k * 3, k * 3 + 3);
+      }
+    }
+    cols[L] = col;
+  }
+  const coverage = (data, s) => {
+    let n = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] * s > cutoff) n++;
+    return n / (data.length / 4);
+  };
+  const cov0 = coverage(levels[0].data, 1);
+  const mips = levels.map(({ data, width, height }, L) => {
+    // 덮는 비율이 원본 이상이 되는 가장 작은 알파 배수 (이분 탐색)
+    let s = 1;
+    if (L > 0 && cov0 > 0) {
+      let lo = 1;
+      let hi = 64;
+      if (coverage(data, lo) < cov0) {
+        for (let it = 0; it < 14; it++) {
+          const mid = (lo + hi) * 0.5;
+          if (coverage(data, mid) >= cov0) hi = mid;
+          else lo = mid;
+        }
+        s = hi;
+      }
+    }
+    const out = new Uint8Array(width * height * 4);
+    const col = cols[L];
+    for (let k = 0; k < width * height; k++) {
+      out[k * 4] = clamp255(col[k * 3] * 255 + 0.5);
+      out[k * 4 + 1] = clamp255(col[k * 3 + 1] * 255 + 0.5);
+      out[k * 4 + 2] = clamp255(col[k * 3 + 2] * 255 + 0.5);
+      out[k * 4 + 3] = clamp255(Math.min(1, data[k * 4 + 3] * s) * 255 + 0.5);
+    }
+    return { data: out, width, height };
+  });
+  const t = new THREE.DataTexture(mips[0].data, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.mipmaps = mips;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.generateMipmaps = false;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  t.anisotropy = maxAniso;
+  t.needsUpdate = true;
+  return t;
+}
+
+// 끝이 가늘어지는 잎·줄기 하나 (2차 곡선 띠). pts = [[x,y],[cx,cy],[x,y]], 폭 w0 → w1 (px)
+function taperedBlade(ctx, x0, y0, cx, cy, x1, y1, w0, w1) {
+  const n = 7;
+  const L = [];
+  const R = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const u = 1 - t;
+    const px = u * u * x0 + 2 * u * t * cx + t * t * x1;
+    const py = u * u * y0 + 2 * u * t * cy + t * t * y1;
+    let tx = 2 * u * (cx - x0) + 2 * t * (x1 - cx);
+    let ty = 2 * u * (cy - y0) + 2 * t * (y1 - cy);
+    const tl = Math.hypot(tx, ty) || 1;
+    tx /= tl;
+    ty /= tl;
+    const hw = (w0 + (w1 - w0) * t) * 0.5;
+    L.push([px - ty * hw, py + tx * hw]);
+    R.push([px + ty * hw, py - tx * hw]);
+  }
+  ctx.beginPath();
+  ctx.moveTo(L[0][0], L[0][1]);
+  for (const p of L) ctx.lineTo(p[0], p[1]);
+  for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// 말라 죽은 해바라기 빌보드 아틀라스 (중·원거리 교차 카드용). 변형 variants 개 × (옆모습, 앞모습) = 가로로 칸 2×variants 개.
+// 한 칸 = 카드 cardW × cardH (m), 카드 아래 끝 = 지면 아래 bottom. 모양은 근거리 3D 모형과 같은 수치(shape)로 그린다:
+//  shape = { stem: [[x, y, 반지름]...], head: {x, y, radius, tiltDeg, thick}, leaves: [{y, az, len}...], leafWidth }
+//  옆모습 = 모형의 x-y 평면 (머리가 +x 쪽으로 숙임), 앞모습 = z-y 평면 (숙인 꽃판 얼굴이 보임).
+//  변형 0: 기본, 1: 목이 더 꺾여 꽃판이 낮게, 2: 줄기가 조금 휘고 꽃판이 작음, 3: 꽃판이 떨어져 나간 줄기
+// 색은 sRGB 의 진한 회갈색~검정 (인스턴스 색·조명이 곱해진다)
+export function sunflowerCardTexture(shape, { tile = 128, cardW = 0.925, cardH = 1.85, bottom = 0.05, variants = 4 } = {}) {
+  return cached('sunflowerCard', () => {
+    const th = Math.round((tile * cardH) / cardW);
+    const c = canvas(tile * 2 * variants, th);
+    const ctx = c.getContext('2d');
+    const k = tile / cardW;
+    const rng = new Random(171);
+    ctx.clearRect(0, 0, c.width, c.height);
+    const COL = {
+      stem: [58, 50, 42],
+      stemTop: [46, 39, 33],
+      face: [30, 25, 21],
+      back: [56, 47, 39],
+      leaf: [74, 63, 50],
+      leafDark: [54, 46, 37],
+    };
+    for (let v = 0; v < variants; v++) {
+      const headless = v === 3;
+      const drop = v === 1 ? 0.09 : 0;
+      const tilt = ((shape.head.tiltDeg + (v === 1 ? 14 : v === 2 ? -6 : 0)) * Math.PI) / 180;
+      const hr = shape.head.radius * (v === 2 ? 0.86 : 1);
+      const bend = v === 2 ? 0.05 : 0;
+      // 줄기 점 (모형 좌표): 변형별로 조금씩
+      const stem = shape.stem.map(([x, y, r], i) => {
+        const t = y / shape.stem[shape.stem.length - 1][1];
+        return [x + bend * t * t, y - (i >= shape.stem.length - 2 ? drop : 0), r];
+      });
+      const top = headless ? stem.filter((p) => p[1] < 1.52) : stem;
+      if (headless) top.push([top[top.length - 1][0] + 0.01, 1.5, top[top.length - 1][2] * 0.9]);
+      for (let view = 0; view < 2; view++) {
+        const ox = (v * 2 + view) * tile;
+        const X = (m) => ox + (m + cardW / 2) * k;
+        const Y = (m) => (cardH - bottom - m) * k;
+        // 줄기 (옆모습: x 오프셋, 앞모습: z = 0)
+        ctx.beginPath();
+        const L = [];
+        const R = [];
+        for (let i = 0; i < top.length; i++) {
+          const [sx, sy, sr] = top[i];
+          const a = top[Math.max(0, i - 1)];
+          const b = top[Math.min(top.length - 1, i + 1)];
+          let dx = view === 0 ? b[0] - a[0] : 0;
+          let dy = b[1] - a[1];
+          const dl = Math.hypot(dx, dy) || 1;
+          dx /= dl;
+          dy /= dl;
+          const hw = Math.max(0.6 / k, sr);
+          const px = view === 0 ? sx : 0;
+          L.push([X(px - dy * hw), Y(sy + dx * hw)]);
+          R.push([X(px + dy * hw), Y(sy - dx * hw)]);
+        }
+        const g = ctx.createLinearGradient(0, Y(0), 0, Y(1.7));
+        g.addColorStop(0, css(COL.stem));
+        g.addColorStop(1, css(COL.stemTop));
+        ctx.fillStyle = g;
+        ctx.moveTo(L[0][0], L[0][1]);
+        for (const p of L) ctx.lineTo(p[0], p[1]);
+        for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+        ctx.closePath();
+        ctx.fill();
+        if (headless) {
+          // 부러진 끝: 쪼개진 짧은 가닥
+          ctx.strokeStyle = css(COL.stemTop);
+          ctx.lineWidth = 1.2;
+          const tp = top[top.length - 1];
+          for (let s = 0; s < 3; s++) {
+            ctx.beginPath();
+            ctx.moveTo(X(view === 0 ? tp[0] : 0), Y(tp[1]));
+            ctx.lineTo(X((view === 0 ? tp[0] : 0) + (s - 1) * 0.02), Y(tp[1] + 0.03 + rng.next() * 0.04));
+            ctx.stroke();
+          }
+        }
+        // 잎: 줄기에서 나와 아래로 늘어진 오그라든 잎
+        const nLeaves = headless ? 2 : shape.leaves.length;
+        for (let li = 0; li < nLeaves; li++) {
+          const lf = shape.leaves[li];
+          const az = ((lf.az + v * 47) * Math.PI) / 180;
+          const ca = Math.cos(az);
+          const sa = Math.sin(az);
+          const dirV = view === 0 ? ca : sa; // 보이는 평면 안 뻗는 방향 성분
+          const perpV = view === 0 ? -sa : ca; // 잎 폭 방향 성분
+          let sx = 0;
+          for (const p of stem) if (p[1] <= lf.y) sx = p[0];
+          const bx = view === 0 ? sx : 0;
+          const len = lf.len * (0.9 + 0.2 * rng.next());
+          const wv = Math.max(0.3, Math.abs(perpV)) * shape.leafWidth;
+          ctx.fillStyle = css(rng.next() < 0.5 ? COL.leaf : COL.leafDark);
+          // 잎자루
+          ctx.strokeStyle = css(COL.leafDark);
+          ctx.lineWidth = 1.3;
+          ctx.beginPath();
+          ctx.moveTo(X(bx), Y(lf.y));
+          ctx.quadraticCurveTo(X(bx + dirV * 0.015), Y(lf.y + 0.012), X(bx + dirV * 0.03), Y(lf.y + 0.012));
+          ctx.stroke();
+          // 거의 수직으로 늘어지고 끝은 줄기 쪽으로 오그라든 잎 (근거리 3D 모형과 같은 점)
+          taperedBlade(
+            ctx,
+            X(bx + dirV * 0.03),
+            Y(lf.y + 0.012),
+            X(bx + dirV * 0.1),
+            Y(lf.y - len * 0.35),
+            X(bx + dirV * (0.05 + 0.02 * rng.next())),
+            Y(lf.y - len),
+            wv * k * 1.4,
+            wv * k * 0.3,
+          );
+        }
+        if (headless) continue;
+        // 꽃판: 옆모습은 기울어진 납작한 원판(두께), 앞모습은 숙인 얼굴(타원)
+        const hx = shape.head.x + bend;
+        const hy = shape.head.y - drop;
+        const ht = shape.head.thick;
+        if (view === 0) {
+          const pdx = Math.sin(tilt);
+          const pdy = Math.cos(tilt);
+          ctx.save();
+          ctx.translate(X(hx), Y(hy));
+          ctx.rotate(Math.atan2(-pdy, pdx));
+          // 둥근 등 (뒤쪽 = 회전 좌표 -y) + 얼굴 (+y, 거의 땅을 향함)
+          ctx.fillStyle = css(COL.back);
+          ctx.beginPath();
+          ctx.ellipse(0, -ht * 0.35 * k, hr * 0.92 * k, ht * 0.75 * k, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = css(COL.face);
+          ctx.beginPath();
+          ctx.ellipse(0, ht * 0.1 * k, hr * k, ht * 0.3 * k, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else {
+          const ry = hr * Math.cos(tilt) + ht * 0.5 * Math.sin(tilt);
+          ctx.fillStyle = css(COL.back);
+          ctx.beginPath();
+          ctx.ellipse(X(0), Y(hy + ht * 0.2), hr * k, ry * k, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = css(COL.face);
+          ctx.beginPath();
+          ctx.ellipse(X(0), Y(hy - ht * 0.15), hr * 0.92 * k, ry * 0.85 * k, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // 말라붙은 꽃받침 조각 (가장자리 들쭉날쭉)
+        ctx.strokeStyle = css(COL.back);
+        ctx.lineWidth = 1.1;
+        const cxp = view === 0 ? X(hx) : X(0);
+        const cyp = Y(hy);
+        for (let s = 0; s < 9; s++) {
+          const a = (s / 9) * Math.PI * 2 + rng.next() * 0.4;
+          const rx = hr * k * (view === 0 ? 0.55 : 1.0);
+          const ry2 = hr * k * (view === 0 ? 0.55 : Math.cos(tilt));
+          ctx.beginPath();
+          ctx.moveTo(cxp + Math.cos(a) * rx * 0.9, cyp + Math.sin(a) * ry2 * 0.9);
+          ctx.lineTo(cxp + Math.cos(a) * rx * 1.18, cyp + Math.sin(a) * ry2 * 1.18 + 2);
+          ctx.stroke();
+        }
+      }
+    }
+    return coverageTexture(c);
+  });
+}
+
+// 마른 풀 포기 카드 아틀라스 (가로 2칸): 밝은 중성 짚색 잎 (실제 색은 인스턴스 색이 정한다 — 바랜 짚색 / 회녹색)
+//  칸 0: 빽빽하게 선 포기, 칸 1: 성기고 꺾여 누운 잎이 많은 포기. 아래 가운데에서 부채꼴로 퍼진다
+export function grassTuftTexture() {
+  return cached('grassTuft', () => {
+    const tile = 128;
+    const c = canvas(tile * 2, tile);
     const ctx = c.getContext('2d');
     const rng = new Random(141);
-    ctx.clearRect(0, 0, w, h);
-    for (let k = 0; k < 46; k++) {
-      const x0 = 8 + rng.next() * (w - 16);
-      const hgt = h * (0.45 + rng.next() * 0.55);
-      const lean = (rng.next() - 0.5) * 40;
-      const b = rng.next();
-      const r = clamp255(150 + b * 60);
-      const g = clamp255(138 + b * 52);
-      const bl = clamp255(104 + b * 40);
-      ctx.strokeStyle = `rgb(${r},${g},${bl})`;
-      ctx.lineWidth = 1.2 + rng.next() * 1.8;
-      ctx.beginPath();
-      ctx.moveTo(x0, h);
-      ctx.quadraticCurveTo(x0 + lean * 0.3, h - hgt * 0.6, x0 + lean, h - hgt);
-      ctx.stroke();
+    ctx.clearRect(0, 0, c.width, c.height);
+    for (let v = 0; v < 2; v++) {
+      const ox = v * tile;
+      const n = v === 0 ? 70 : 44;
+      for (let i = 0; i < n; i++) {
+        const x0 = ox + tile * (0.5 + (rng.next() - 0.5) * (v === 0 ? 0.42 : 0.6));
+        const hgt = tile * (0.42 + rng.next() * 0.56) * (v === 1 ? 0.85 : 1);
+        const lean = (x0 - ox - tile / 2) * 0.9 + (rng.next() - 0.5) * 36;
+        const b = rng.next();
+        const s = b < 0.15 ? 0.78 : b > 0.85 ? 1.1 : 0.9 + rng.next() * 0.12;
+        ctx.fillStyle = `rgb(${clamp255(200 * s)},${clamp255(190 * s)},${clamp255(162 * s)})`;
+        const bent = rng.next() < (v === 0 ? 0.18 : 0.42);
+        const x1 = Math.max(ox + 2, Math.min(ox + tile - 2, x0 + lean * (bent ? 1.4 : 1)));
+        const y1 = bent ? tile - hgt * 0.45 : tile - hgt;
+        taperedBlade(ctx, x0, tile, x0 + lean * 0.25, tile - hgt * (bent ? 0.9 : 0.55), x1, y1, 2.4 + rng.next() * 1.4, 0.45);
+        // 씨 이삭 몇 개
+        if (!bent && rng.next() < 0.12) {
+          ctx.beginPath();
+          ctx.ellipse(x1, y1 + 4, 1.4, 5, Math.atan2(lean, hgt), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
-    return finish(c, { repeat: false });
+    return coverageTexture(c);
+  });
+}
+
+// 이전 이름 (다른 곳에서 부르면 같은 텍스처)
+export function grassBladeTexture() {
+  return grassTuftTexture();
+}
+
+// 마른 갈대 군락 카드 아틀라스 (가로 2칸, 한 칸 128x256): 가는 줄기, 늘어진 긴 잎, 줄기 끝 회갈색 이삭
+export function reedTexture() {
+  return cached('reed', () => {
+    const tw = 128;
+    const th = 256;
+    const c = canvas(tw * 2, th);
+    const ctx = c.getContext('2d');
+    const rng = new Random(181);
+    ctx.clearRect(0, 0, c.width, c.height);
+    for (let v = 0; v < 2; v++) {
+      const ox = v * tw;
+      const n = v === 0 ? 24 : 17;
+      for (let i = 0; i < n; i++) {
+        const x0 = ox + tw * (0.5 + (rng.next() - 0.5) * 0.55);
+        const hgt = th * (0.68 + rng.next() * 0.3);
+        const lean = (x0 - ox - tw / 2) * 0.35 + (rng.next() - 0.5) * 16;
+        const s = 0.85 + rng.next() * 0.25;
+        const x1 = Math.max(ox + 6, Math.min(ox + tw - 6, x0 + lean));
+        const y1 = th - hgt;
+        ctx.fillStyle = `rgb(${clamp255(196 * s)},${clamp255(180 * s)},${clamp255(138 * s)})`;
+        taperedBlade(ctx, x0, th, x0 + lean * 0.2, th - hgt * 0.5, x1, y1, 2.2, 1.0);
+        // 긴 잎: 줄기 중간에서 비스듬히 나와 늘어진다
+        for (let l = 0; l < 2; l++) {
+          if (rng.next() < 0.35) continue;
+          const t = 0.25 + rng.next() * 0.4;
+          const lx = x0 + (x1 - x0) * t;
+          const ly = th - hgt * t;
+          const dir = rng.next() < 0.5 ? -1 : 1;
+          const ll = 30 + rng.next() * 40;
+          ctx.fillStyle = `rgb(${clamp255(184 * s)},${clamp255(168 * s)},${clamp255(126 * s)})`;
+          taperedBlade(ctx, lx, ly, lx + dir * ll * 0.5, ly - ll * 0.45, Math.max(ox + 1, Math.min(ox + tw - 1, lx + dir * ll * 0.8)), ly + ll * 0.15, 3.2, 0.4);
+        }
+        // 이삭: 줄기 끝 윗부분에서 한쪽으로 기운 깃털 모양 원뿔꽃차례 (밝은 회갈색, 가는 가닥 여럿)
+        const side = lean >= 0 ? 1 : -1;
+        const plen = hgt * (0.13 + rng.next() * 0.07);
+        const np = 14 + Math.floor(rng.next() * 8);
+        ctx.lineWidth = 1.2;
+        for (let p = 0; p < np; p++) {
+          const t = rng.next();
+          const px = x1 - (x1 - x0) * t * 0.12;
+          const py = y1 + plen * t;
+          const ang = side * (0.35 + rng.next() * 0.6) + (rng.next() - 0.5) * 0.5;
+          const pl = (5 + rng.next() * 10) * (1 - 0.5 * t);
+          const k = 0.9 + rng.next() * 0.25;
+          ctx.strokeStyle = `rgba(${clamp255(176 * k)},${clamp255(162 * k)},${clamp255(140 * k)},0.95)`;
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.quadraticCurveTo(px + Math.sin(ang) * pl * 0.5, py - pl * 0.5, px + Math.sin(ang) * pl, py - pl * 0.35);
+          ctx.stroke();
+        }
+        // 꼭대기가 무게로 살짝 숙인 끝
+        ctx.strokeStyle = `rgba(${clamp255(168 * s)},${clamp255(154 * s)},${clamp255(132 * s)},0.95)`;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1 + 2);
+        ctx.quadraticCurveTo(x1 + side * 4, y1 - 6, x1 + side * 9, y1 - 2);
+        ctx.stroke();
+      }
+    }
+    return coverageTexture(c);
   });
 }
 
@@ -1029,6 +1620,52 @@ export function glowParticleTexture() {
         col[3] = clamp255((a * a * 0.6 + core * 0.8) * 255);
       },
       { repeat: false },
+    );
+  });
+}
+
+// 연기 기둥용 부드러운 원형 스프라이트: 가장자리로 갈수록 매끈하게 옅어지고, 안쪽은 낮은 주파수 얼룩만 약하게
+// (여러 장이 겹쳐 뭉게뭉게한 결이 생긴다. 윤곽이 울퉁불퉁한 덩어리 한 장처럼 보이지 않게)
+export function smokePuffTexture() {
+  return cached('smokePuff', () => {
+    const size = 128;
+    const f = makeFbm(613, 3, 4);
+    return pixelTexture(
+      size,
+      (u, v, col) => {
+        const dx = u - 0.5;
+        const dy = v - 0.5;
+        const r = Math.sqrt(dx * dx + dy * dy) * 2;
+        const n = f(u, v, 0.55);
+        const rr = r * (0.92 + (n - 0.5) * 0.22);
+        let a = Math.max(0, 1 - rr * rr);
+        a = a * a * (3 - 2 * a); // 부드러운 가장자리
+        a *= 0.72 + (n - 0.5) * 0.7;
+        col[0] = col[1] = col[2] = 255;
+        col[3] = clamp255(Math.min(1, Math.max(0, a)) * 255);
+      },
+      { repeat: false },
+    );
+  });
+}
+
+// 흐린 하늘 층운 구름 두께 (타일링, R = 두께 0..1, 색공간 없음). u 방향으로 길게 늘어진 무늬 (바람 방향에 맞춘다)
+// 주기 노이즈를 주기 노이즈로 비틀어(도메인 워프) 층운의 부드럽게 휘는 띠·덩어리를 만든다
+export function cloudTexture(size = 256) {
+  return cached('cloud' + size, () => {
+    const base = rectFbm(911, 3, 6, 5);
+    const warpA = makeFbm(912, 3, 3);
+    const warpB = makeFbm(913, 3, 3);
+    return pixelTexture(
+      size,
+      (u, v, col) => {
+        const wu = (warpA(u, v, 0.5) - 0.5) * 0.12;
+        const wv = (warpB(u, v, 0.5) - 0.5) * 0.12;
+        let d = base(u + wu, v + wv, 0.55);
+        d = sat((d - 0.5) * 2.3 + 0.5);
+        col[0] = col[1] = col[2] = clamp255(d * 255);
+      },
+      { srgb: false },
     );
   });
 }

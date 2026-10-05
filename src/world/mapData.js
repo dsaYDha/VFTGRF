@@ -17,47 +17,77 @@ function zigzag(x0, x1, zc, amp, seg, phase = 0) {
 }
 
 const CANAL_Z = 112;
+// 수로 중심선의 완만한 굽이 (Terrain.canalZ 와 같은 식)
+const CANAL_WIGGLE = { amp: 0.9, len: 95 };
+function canalCenterZ(x) {
+  return CANAL_Z + CANAL_WIGGLE.amp * Math.sin(x / CANAL_WIGGLE.len);
+}
+// 시작 위치: 수로 북쪽 사격 발판(둔덕 뒤) 위, 모래주머니 사격 위치. canal.bench 의 inner~outer 사이
+const SPAWN_X = -18;
 
 export const MAP = {
-  playerSpawn: { x: -18, z: CANAL_Z + 0.1, yaw: 0 },
+  playerSpawn: { x: SPAWN_X, z: canalCenterZ(SPAWN_X) - 2.42, yaw: 0, posture: 'crouch' },
   // 진출선: 파괴된 장갑차 ↔ 트랙터 잔해 (화면에 그리지 않음)
   advanceLine: { a: [-46, 11], b: [54, 6] },
 
   // ---------------------------------------------------------------- 수로 (플레이어 측)
+  // 단면 (수로 중심에서 북쪽 거리 d): 바닥 d <= floorHalf, 비탈 floorHalf~topHalf (사다리꼴: 윗폭 5.4m, 바닥폭 1.8m, 깊이 1.2m)
+  // 북쪽: 비탈을 깎아 만든 사격 발판(자연 지면보다 bench.depth 낮음, 콘크리트 구간 제외) → 수로를 팔 때 나온 흙 둔덕(흉벽).
+  //  발판에서 둔덕 마루까지 약 1.0m: 서면 상체가 드러나고, 앉으면 둔덕 위로 고개만 나온다. 수로 바닥으로 내려가면 완전히 숨는다.
   canal: {
     z: CANAL_Z,
-    wiggleAmp: 0.9,
-    wiggleLen: 95,
+    wiggleAmp: CANAL_WIGGLE.amp,
+    wiggleLen: CANAL_WIGGLE.len,
     xMin: -300,
     xMax: 300,
     depth: 1.2,
-    floorHalf: 0.8,
-    topHalf: 1.5,
-    // 콘크리트 측벽 구간
+    floorHalf: 0.9,
+    topHalf: 2.7,
+    edgeRound: 0.25, // 비탈 위 모서리를 둥글리는 반폭
+    slabSoil: 0.02, // 라이닝 판 위쪽 끝에 쌓인 흙 높이
+    // 사격 발판: 비탈이 이 깊이에 닿는 곳(inner, 단면에서 계산)부터 outer 까지 평평
+    bench: { depth: 0.43, outer: 2.8 },
+    // 북쪽 흙 둔덕: 발판 바깥 끝에서 face 폭만큼 가파르게 올라 마루(자연 지면 + height), 뒤쪽은 back 폭에 걸쳐 완만히
+    berm: { height: 0.62, heightVar: 0.06, face: 0.75, faceVar: 0.1, back: 2.7, gapHeight: 0.6 },
+    southBank: { width: 2.6, height: 0.2 },
+    // 북쪽 둔덕 중 크게 쌓인 흙무더기 (마루 높이 h, 자연 지면 기준)
+    mounds: [
+      { x: -205, len: 12, h: 0.82 },
+      { x: -112, len: 9, h: 0.86 },
+      { x: -40, len: 5, h: 0.76 },
+      { x: 72, len: 9, h: 0.84 },
+      { x: 152, len: 8, h: 0.88 },
+      { x: 236, len: 9, h: 0.8 },
+    ],
+    // 모래주머니 사격 위치 (x): 마루 가운데 사격 틈(berm.gapHeight 로 낮춤) 양옆에 모래주머니를 쌓는다. 시작 위치 포함
+    sandbagPositions: [-226, -128, -92, -48, SPAWN_X, 26, 58, 118, 184],
+    // 흙을 파낸 엎드려쏴 사격 홈 (x): 둔덕을 자연 지면 높이(floor)까지 파낸 엎드릴 자리(platform 길이), 앞쪽 끝에 총을 걸치는 낮은 흙 턱(lip)
+    notches: { list: [-238, -152, -64, -9, 41, 90, 136, 206], halfWidth: 0.5, edge: 0.35, floor: 0.06, platform: 1.15, lip: 0.16 },
+    // 콘크리트 라이닝 구간 (약 1x2m 프리캐스트 판을 양쪽 비탈에 깐다. 판 배치는 Terrain.buildCanalSlabs)
     linedSections: [
       [-72, -26],
       [38, 96],
       [-182, -150],
     ],
-    linedFloorHalf: 0.95,
-    linedTopHalf: 1.12,
-    berm: { width: 3.2, height: 0.15, heightVar: 0.06 },
-    southBank: { width: 2.6, height: 0.2 },
-    // 북쪽 둔덕 중 크게 쌓인 흙무더기
-    mounds: [
-      { x: -205, len: 12, h: 0.9 },
-      { x: -112, len: 9, h: 1.05 },
-      { x: -40, len: 6, h: 0.75 },
-      { x: 64, len: 10, h: 1.0 },
-      { x: 150, len: 8, h: 1.1 },
-      { x: 222, len: 9, h: 0.85 },
-    ],
     crossing: { x: 8, halfWidth: 3.2 }, // 농로가 지나가는 흙 둑 (배수관)
+    // 물이 길게 고인 구간
     waterSections: [
       [-138, -84],
+      [-61, -37],
       [18, 34],
       [104, 176],
       [-260, -215],
+    ],
+    // 바닥 물가의 마른 갈대 군락 (식생에서 그린다): x 중심, len 길이, side = 1 남쪽 물가 / -1 북쪽 물가
+    reeds: [
+      { x: -253, len: 7, side: 1 },
+      { x: -224, len: 5, side: -1 },
+      { x: -131, len: 9, side: -1 },
+      { x: -97, len: 6, side: 1 },
+      { x: -44, len: 4, side: 1 },
+      { x: 27, len: 5, side: 1 },
+      { x: 112, len: 8, side: -1 },
+      { x: 158, len: 11, side: 1 },
     ],
   },
 
@@ -225,6 +255,30 @@ export const MAP = {
     { x: 156, z: -52, state: 'stand' },
     { x: 266, z: -66, state: 'stand' },
   ],
+  // 콘크리트 전신주: 농로 서쪽을 따라가는 10kV 배전선 (수로 남쪽 → 수로 위를 건너 → 집단농장 쪽). 순서대로 전선이 이어진다.
+  // state: stand | lean (fall 방위로 lean 도 기움) | fallen (기초째 뽑혀 fall 방위로 누움) | broken (밑동 stub m 만 서고 윗동이 fall 방위로 누움)
+  // fall = 방위각 (도, 0 = 북, 90 = 동). 높이·단면·처짐은 CONFIG.midfield.poles
+  poles: [
+    { x: 2.6, z: 262, state: 'stand' },
+    { x: 2.6, z: 208, state: 'stand' },
+    { x: 2.4, z: 154, state: 'lean', fall: 250, lean: 5 },
+    { x: 0.3, z: 84, state: 'stand' },
+    { x: -8.6, z: 32, state: 'broken', fall: 305, stub: 1.3 },
+    { x: -8.1, z: -18, state: 'fallen', fall: 84 },
+    { x: 1.4, z: -68, state: 'lean', fall: 275, lean: 11 },
+  ],
+  // 작은 잔해 흩뿌리기 구역 (개수·종류는 CONFIG.midfield.debris): ring = 점 둘레 dist 범위, road = 농로(roads[road]) 옆 dist,
+  // craters = 포탄 구덩이 둘레 (반지름 배수 dist), rect = 사각형. w = 종류별 가중치
+  // (shard 포탄 파편, crate 빈 탄약 상자, camo 찢어진 위장망 조각, helmet 버려진 헬멧, pack 배낭)
+  debrisZones: [
+    { kind: 'ring', x: -46, z: 11, dist: [3.5, 15], w: { shard: 2.4, crate: 1.4, camo: 1.2, helmet: 1.6, pack: 1.2 } }, // 장갑차
+    { kind: 'ring', x: 54, z: 6, dist: [3, 10], w: { shard: 1.2, crate: 0.6, helmet: 0.4 } }, // 트랙터
+    { kind: 'ring', x: -102, z: -16, dist: [3, 9], w: { shard: 0.8, crate: 0.3, pack: 0.5 } }, // 승합차
+    { kind: 'ring', x: 126, z: 44, dist: [3, 9], w: { shard: 0.8, pack: 0.3 } }, // 승용차
+    { kind: 'road', road: 0, z0: -82, z1: 90, dist: [2.6, 10], w: { shard: 1.0, crate: 2.2, camo: 1.6, helmet: 1.4, pack: 1.6 } }, // 농로 옆 (버려진 장비)
+    { kind: 'craters', z0: -82, z1: 90, dist: [0.9, 2.4], w: { shard: 3.5, helmet: 0.3 } }, // 포탄 구덩이 둘레
+    { kind: 'rect', x0: -235, x1: 235, z0: -82, z1: 90, w: { shard: 2.0, crate: 0.8, camo: 1.0, helmet: 1.2, pack: 0.8 } }, // 밭 전체
+  ],
   trees: [
     { x: -96, z: 84, h: 5.5, broken: true },
     { x: 157, z: 37, h: 4.2, broken: true },
@@ -252,7 +306,24 @@ export const MAP = {
   // 구획마다 furrowDeg = 고랑(이랑) 줄이 뻗은 방위각(도, 0 = 남북, 90 = 동서), spacing = 고랑·줄 간격(m),
   // tint = 구획 색 배수 (구획마다 조금씩 다르게). 그루터기 밭의 spacing 은 그루터기 줄 간격.
   fields: {
-    sunflower: [{ x0: -238, x1: -120, z0: -62, z1: 66, rowDir: 'z', furrowDeg: 3, spacing: 0.7, tint: [0.97, 0.95, 0.93] }],
+    // 해바라기밭: spacing = 줄 간격 (줄은 고랑 방향). swaths = 바퀴 차량이 밀고 지나가 줄기가 쓰러진 띠 (지면 자국 없음,
+    // 궤도 차량 자국 MAP.vehicleTracks 중 밭을 지나는 것도 같은 띠가 된다)
+    sunflower: [
+      {
+        x0: -238,
+        x1: -120,
+        z0: -62,
+        z1: 66,
+        rowDir: 'z',
+        furrowDeg: 3,
+        spacing: 0.7,
+        tint: [0.97, 0.95, 0.93],
+        swaths: [
+          { half: 1.7, points: [[-203, -64], [-192, -24], [-181, 14], [-171, 68]] },
+          { half: 1.5, points: [[-240, -18], [-214, -12], [-190, -2], [-158, 4]] },
+        ],
+      },
+    ],
     plowed: [
       { x0: -114, x1: -11, z0: -80, z1: 8, furrowDeg: 84, spacing: 0.5, tint: [1.02, 0.99, 0.95] },
       { x0: -114, x1: -11, z0: 16, z1: 97, furrowDeg: 2, spacing: 0.55, tint: [0.93, 0.92, 0.92] },
@@ -322,12 +393,17 @@ export const MAP = {
     { x0: 88, x1: 108, z0: -124, z1: -99 }, // G1
   ],
 
-  // 원경 연기 기둥 (방위각 도, 거리 m)
+  // 원경 연기 기둥 (방위각 도, 거리 m, 크기 배수). 안개(시정 600m)에 섞여 희미한 실루엣으로만 보인다.
+  // 너무 멀면(2km+) 안개에 완전히 묻히므로 1~1.6km 에 둔다 (먼 마을 실루엣도 이 방위·거리를 따른다)
   distantSmoke: [
-    { bearing: 352, dist: 2600, size: 1.0 },
-    { bearing: 38, dist: 3200, size: 0.8 },
-    { bearing: 302, dist: 2900, size: 1.2 },
-    { bearing: 75, dist: 2400, size: 0.6 },
+    { bearing: 348, dist: 1250, size: 1.0 },
+    { bearing: 31, dist: 1550, size: 0.8 },
+    { bearing: 297, dist: 1100, size: 0.9 },
+  ],
+  // 건물 화재 연기 (가는 파티클 기둥, 회색~검정): 축사 B2 동쪽 무너진 끝 안쪽, 곡물 저장탑 뒤(북쪽)
+  smokeSources: [
+    { x: 60, z: -151, kind: 'fire', size: 1.0 },
+    { x: -118, z: -187, kind: 'fire', size: 0.8 },
   ],
 };
 

@@ -235,9 +235,211 @@ export class Terrain {
     return C.z + C.wiggleAmp * Math.sin(x / C.wiggleLen);
   }
 
+  // 수로 중심선 기울기 dz/dx
+  canalDzDx(x) {
+    const C = MAP.canal;
+    return (C.wiggleAmp / C.wiggleLen) * Math.cos(x / C.wiggleLen);
+  }
+
   isCanalLined(x) {
     for (const [a, b] of MAP.canal.linedSections) if (x >= a && x <= b) return true;
     return false;
+  }
+
+  // 북쪽 사격 발판 안쪽 끝: 비탈이 발판 깊이에 닿는 거리 (수로 중심에서)
+  canalBenchInner() {
+    const C = MAP.canal;
+    return C.floorHalf + ((C.depth - C.bench.depth) * (C.topHalf - C.floorHalf)) / C.depth;
+  }
+
+  // 북쪽 둔덕 마루 높이 (자연 지면 기준): 노이즈 + 흙무더기, 모래주머니 사격 틈은 berm.gapHeight 로 낮춘다
+  canalBermHeight(x) {
+    const C = MAP.canal;
+    const B = C.berm;
+    let h = B.height + B.heightVar * this.noise.noise(x / 23, 3.3);
+    for (const m of C.mounds) {
+      const t = Math.abs(x - m.x) / (m.len * 0.5);
+      if (t < 1.4) h += Math.max(0, m.h - h) * (1 - smoothstep(0.55, 1.4, t));
+    }
+    const slot = CONFIG.canal.sandbag.slot;
+    for (const sx of C.sandbagPositions) {
+      const dx = Math.abs(x - sx);
+      if (dx < slot) h = Math.min(h, B.gapHeight + Math.max(0, h - B.gapHeight) * smoothstep(slot * 0.5, slot, dx));
+    }
+    return h;
+  }
+
+  // 엎드려쏴 사격 홈 가중치 (0..1, 홈 가운데 1)
+  canalNotchWeight(x) {
+    const N = MAP.canal.notches;
+    let w = 0;
+    for (const nx of N.list) {
+      const dx = Math.abs(x - nx);
+      if (dx < N.halfWidth + N.edge) w = Math.max(w, 1 - smoothstep(N.halfWidth, N.halfWidth + N.edge, dx));
+    }
+    return w;
+  }
+
+  // 수로 단면: 자연 지면 대비 높이 변화. dn = 수로 중심에서 북쪽(+)·남쪽(-) 거리 (배수관 둑은 canalDh 에서 섞는다)
+  //  바닥(평평) → 사다리꼴 비탈(평면: 라이닝 판이 그대로 붙는다) → 북쪽: 사격 발판 → 둔덕 앞면 → 둥근 마루 → 완만한 뒤쪽
+  canalSection(x, dn) {
+    const C = MAP.canal;
+    const d = Math.abs(dn);
+    const D = C.depth;
+    const lined = this.isCanalLined(x);
+    const nz = this.noise;
+    // 사다리꼴 수로: 비탈 위 모서리는 edgeRound 반폭으로 둥글린다 (0.5m 격자가 꺾인 모서리를 깎아 판이 뜨지 않게, 판은 그 아래에서 끝난다)
+    const k = D / (C.topHalf - C.floorHalf);
+    const r = C.edgeRound;
+    const chan = (dd) => {
+      if (dd <= C.floorHalf) return -D;
+      if (dd >= C.topHalf + r) return 0;
+      const lin = -D + (dd - C.floorHalf) * k;
+      if (dd <= C.topHalf - r) return lin;
+      const e = dd - (C.topHalf - r);
+      return lin - (k * e * e) / (4 * r);
+    };
+    let h = chan(d);
+    // 진흙 바닥의 완만한 요철 (판 아래쪽 끝은 바닥 밑에 묻혀 있어 몇 cm 는 괜찮다)
+    if (d < C.floorHalf + 0.2) h += 0.03 * nz.noise(x / 7 + 1.3, 9.1) * (1 - smoothstep(C.floorHalf - 0.2, C.floorHalf + 0.2, d));
+    // 라이닝 없는 흙 비탈: 무너지고 패인 요철 (라이닝 구간 끝 판 옆에서는 잦아든다)
+    let rough = 0;
+    if (!lined) {
+      let gap = Infinity;
+      for (const [a, b] of C.linedSections) gap = Math.min(gap, Math.abs(x - a), Math.abs(x - b));
+      rough = 0.035 * nz.noise(x / 2.3 + 4.1, d * 1.4 + 0.7) * smoothstep(0.3, 2.0, gap);
+    }
+    // 라이닝 판 위쪽 끝에 흙이 조금 쌓여 판 끝과 맞닿는다 (판 끝 단면이 드러나 떠 보이지 않게)
+    if (lined && this.slabBand) h += C.slabSoil * bump((d - this.slabBand[1] + 0.15) / 1.0, 0.3);
+    if (dn <= 0) {
+      if (d > C.floorHalf) h += rough * (1 - smoothstep(C.topHalf, C.topHalf + 1, d));
+      return h + C.southBank.height * bump((d - C.topHalf) / C.southBank.width, 0.4);
+    }
+    const bench = C.bench;
+    const B = C.berm;
+    const y0 = lined ? chan(bench.outer) : -bench.depth;
+    if (d <= bench.outer) {
+      if (!lined && d > this.canalBenchInner()) h = -bench.depth;
+      return d > C.floorHalf ? h + rough * 0.7 : h;
+    }
+    // 둔덕: 발판 바깥 끝(y0)에서 마루(H)까지 가파른 앞면, 마루 뒤는 완만히 자연 지면으로
+    const H = this.canalBermHeight(x);
+    const face = B.face + B.faceVar * nz.noise(x / 13 + 5.1, 1.7);
+    const crest = bench.outer + face;
+    let hb;
+    if (d < crest) {
+      const t = (d - bench.outer) / face;
+      hb = y0 + (H - y0) * t * t * (3 - 2 * t);
+    } else {
+      const t = (d - crest) / B.back;
+      hb = t < 1 ? H * (1 - t * t * (3 - 2 * t)) : 0;
+    }
+    // 흙덩이 요철 (마루 윤곽이 칼같이 곧지 않게, 모래주머니 사격 틈에서는 작게)
+    let slotW = 0;
+    const slot = CONFIG.canal.sandbag.slot;
+    for (const sx of C.sandbagPositions) slotW = Math.max(slotW, 1 - smoothstep(slot * 0.5, slot * 1.5, Math.abs(x - sx)));
+    const lumps = 0.03 * nz.noise(x * 1.1 + 2.7, d * 1.1 - 3.3) + 0.035 * nz.noise(x / 1.3 - 8.1, d * 0.6 + 2.2) * (1 - 0.7 * slotW);
+    hb += (lumps + rough * 0.5) * (1 - smoothstep(crest + 1.5, crest + B.back, d));
+    // 엎드려쏴 사격 홈: 발판에서 짧게 올라 자연 지면 높이의 엎드릴 자리, 그 앞은 둔덕을 끝까지 파낸 홈
+    const wN = this.canalNotchWeight(x);
+    if (wN > 0) {
+      const N = C.notches;
+      const up = 0.35;
+      let hn;
+      if (d < bench.outer + up) {
+        const t = (d - bench.outer) / up;
+        hn = y0 + (N.floor - y0) * t * t * (3 - 2 * t);
+      } else if (d < bench.outer + up + N.platform) hn = N.floor;
+      else {
+        // 앞쪽 끝: 총을 걸치는 낮은 흙 턱, 그 너머는 자연 지면으로
+        const t = (d - bench.outer - up - N.platform) / 1.05;
+        hn = (t < 1 ? N.floor * (1 - t * t * (3 - 2 * t)) : 0) + N.lip * bump(t, 0.25);
+      }
+      hb += (hn - hb) * wN;
+    }
+    return hb;
+  }
+
+  // 수로가 자연 지면에 더하는 높이 (배수관 둑 포함)
+  canalDh(x, z) {
+    const C = MAP.canal;
+    const dn = this.canalZ(x) - z;
+    if (Math.abs(dn) > 7.5) return 0;
+    const cross = smoothstep(C.crossing.halfWidth * 0.5, C.crossing.halfWidth + 1.4, Math.abs(x - C.crossing.x));
+    let dh = this.canalSection(x, dn) * cross;
+    if (cross < 1) dh += (1 - cross) * 0.18 * (Math.abs(dn) < 5 ? 1 - Math.abs(dn) / 5 : 0);
+    return dh;
+  }
+
+  // 수로 둘레의 해석적 지면 높이 (격자 보간 없이) — 라이닝 판·잡동사니를 비탈에 정확히 붙일 때 쓴다
+  canalSurfaceY(x, z) {
+    return this.baseHeight(x, z) + this.canalDh(x, z);
+  }
+
+  // 라이닝 판 배치 (Terrain·Structures 공용, 결정적). 구간마다 판 폭 간격으로 남(-1)·북(+1) 비탈에 하나씩.
+  // kind: ok | missing (빠짐) | corner (모서리 깨짐) | cracked (금 가서 어긋남) | tilted (기울어짐·미끄러짐)
+  buildCanalSlabs() {
+    const K = CONFIG.canal;
+    const C = MAP.canal;
+    const P = K.slabChance;
+    const rng = new Random(CONFIG.world.seed + 211);
+    const run = C.topHalf - C.floorHalf;
+    const cosA = run / Math.hypot(run, C.depth);
+    // 판이 덮는 수평 거리 범위 (아래쪽 끝은 바닥 밑에 toe 만큼 묻힌다)
+    this.slabBand = [C.floorHalf, C.floorHalf + (K.slab.length - K.slab.toe) * cosA];
+    this.slabSections = [];
+    for (const [a, b] of C.linedSections) {
+      const w = K.slab.width;
+      const n = Math.floor((b - a) / w + 1e-6);
+      const sec = { a, b: a + n * w, w, n, north: [], south: [] };
+      for (let i = 0; i < n; i++) {
+        for (const side of [1, -1]) {
+          const r = rng.next();
+          let kind = 'ok';
+          if (r < P.missing) kind = 'missing';
+          else if (r < P.missing + P.corner) kind = 'corner';
+          else if (r < P.missing + P.corner + P.cracked) kind = 'cracked';
+          else if (r < P.missing + P.corner + P.cracked + P.tilted) kind = 'tilted';
+          const slab = { x0: a + i * w, x1: a + (i + 1) * w, side, kind, seed: rng.next(), variant: Math.floor(rng.next() * K.slabTexture.variants) };
+          (side > 0 ? sec.north : sec.south).push(slab);
+        }
+      }
+      this.slabSections.push(sec);
+    }
+  }
+
+  // x 위치 side(+1 북 / -1 남) 비탈의 라이닝 판 (없으면 null)
+  canalSlabAt(x, side, margin = 0) {
+    if (!this.slabSections) return null;
+    for (const sec of this.slabSections) {
+      if (x < sec.a + margin || x > sec.b - margin) continue;
+      const i = clamp(Math.floor((x - sec.a) / sec.w), 0, sec.n - 1);
+      return (side > 0 ? sec.north : sec.south)[i];
+    }
+    return null;
+  }
+
+  // 라이닝 구간의 렌더 지면 보정 (renderDrop 에 더함). 렌더 메시는 이 구간에서 0.25m 로 촘촘하고,
+  //  1) 0.5m 높이 격자의 쌍선형 보간 대신 해석적 단면을 따른다 — 둥근 위 모서리에서 흙이 판 끝보다 들쭉날쭉 낮아져
+  //     판 끝 단면이 톱니처럼 드러나지 않게 (충돌·heightAt 은 격자 그대로)
+  //  2) 판 아래는 내린다: 바닥 모서리 근처(정점 사이 직선이 비탈 평면보다 높아지는 곳)만 깊게, 판 가운데는 얕게(겹침 깜빡임 방지),
+  //     위쪽 끝은 내리지 않아 흙과 판 윗면이 맞닿는다. 빠진 판 자리는 얕은 홈
+  canalSlabDrop(x, z) {
+    if (!this.slabBand || Math.abs(z - MAP.canal.z) > 4.2 || !this.isCanalLined(x)) return 0;
+    const C = MAP.canal;
+    const dn = this.canalZ(x) - z;
+    const d = Math.abs(dn);
+    if (d > C.topHalf + C.edgeRound + 0.4) return 0;
+    const fit = this.gridHeight(x, z) - this.canalSurfaceY(x, z);
+    if (d < this.slabBand[0] + 0.02 || d > this.slabBand[1] + 0.03) return fit;
+    // 구간 양끝 정점은 내리지 않는다 (끝 판 옆면이 드러나지 않게, 대신 모서리에 흙이 조금 덮인다)
+    const s = this.canalSlabAt(x, dn > 0 ? 1 : -1, 0.2);
+    if (!s) return fit;
+    const K = CONFIG.canal;
+    if (s.kind === 'missing') return fit + K.holeDrop;
+    if (d > this.slabBand[1] - 0.08) return fit;
+    const w = smoothstep(this.slabBand[0] + 0.3, this.slabBand[0] + 0.5, d);
+    return fit + K.renderDrop * (1 - w) + K.renderDropMid * w;
   }
 
   // 수로 바로 위(배수관 둑 제외)인지 — 길·궤도 자국을 여기서는 파지 않는다
@@ -319,7 +521,8 @@ export class Terrain {
   // 렌더 지면을 평균면보다 내리는 양 (밭: 고랑 바닥 높이). 충돌·heightAt 은 평균면 그대로
   renderDrop(x, z) {
     if (!this.mask) return 0;
-    return CONFIG.terrain.furrow.ridge.geomDepth * 0.5 * this.furrowWeight(x, z);
+    // + 수로 라이닝 판 아래 (판이 덮는 곳만, 충돌·heightAt 은 비탈 그대로)
+    return CONFIG.terrain.furrow.ridge.geomDepth * 0.5 * this.furrowWeight(x, z) + this.canalSlabDrop(x, z);
   }
 
   // 지형과 선분 충돌. 맞으면 out 에 t, point, normal 기록
@@ -626,39 +829,15 @@ export class Terrain {
 
   applyCanal() {
     const C = MAP.canal;
-    // 수로는 동서로 길어 횡단면(z)만 촘촘하면 된다
-    this.addDetail(C.xMin, C.z - 7, C.xMax, C.z + 7, 1.0, 0.5);
-    this.stamp(C.xMin, C.z - 7.5, C.xMax, C.z + 7.5, (x, z, k) => {
-      const zc = this.canalZ(x);
-      const dz = z - zc;
-      const d = Math.abs(dz);
-      if (d > 7) return;
-      const north = dz < 0;
-      const lined = this.isCanalLined(x);
-      const fh = lined ? C.linedFloorHalf : C.floorHalf;
-      const th = lined ? C.linedTopHalf : C.topHalf;
-      const cross = smoothstep(C.crossing.halfWidth * 0.5, C.crossing.halfWidth + 1.4, Math.abs(x - C.crossing.x));
-      const depth = C.depth * cross;
-      let dh = 0;
-      if (d <= fh) dh = -depth;
-      else if (d < th) {
-        const t = (d - fh) / (th - fh);
-        dh = -depth * (1 - t * t * (3 - 2 * t));
-      }
-      if (north) {
-        // 북쪽 둔덕: 수로 가장자리 가까이에 쌓인 흙 (총을 걸칠 수 있다)
-        let bh = C.berm.height + C.berm.heightVar * this.noise.noise(x / 23, 3.3);
-        if (this.noise.noise(x / 41, 7.7) < -0.42) bh *= 0.25;
-        for (const m of C.mounds) {
-          const t = Math.abs(x - m.x) / (m.len * 0.5);
-          if (t < 1.4) bh = Math.max(bh, m.h * (1 - smoothstep(0.55, 1.4, t)));
-        }
-        dh += Math.max(0, bh) * bump((d - th * 0.92) / C.berm.width, 0.28) * cross;
-      } else {
-        dh += C.southBank.height * bump((d - th) / C.southBank.width, 0.4) * cross;
-      }
-      if (cross < 1) dh += (1 - cross) * 0.18 * (d < 5 ? 1 - d / 5 : 0);
-      this.h[k] += dh;
+    const half = 8.5; // 단면이 닿는 범위 (굽이 포함)
+    this.buildCanalSlabs();
+    // 수로는 동서로 길어 횡단면(z)만 촘촘하면 된다. 라이닝 구간(판 가장자리)·사격 홈·모래주머니 틈은 x 도 0.5m,
+    // 라이닝 구간 횡단면은 0.25m (렌더 지면이 해석적 단면을 따른다, canalSlabDrop)
+    this.addDetail(C.xMin, C.z - half, C.xMax, C.z + half, 1.0, 0.5);
+    for (const [a, b] of C.linedSections) this.addDetail(a - 1, C.z - 4.2, b + 1, C.z + 4.2, 0.5, 0.25, 1.0, 0.5);
+    for (const nx of [...C.notches.list, ...C.sandbagPositions]) this.addDetail(nx - 1.6, C.z - half, nx + 1.6, C.z - 1, 0.5, 0.5);
+    this.stamp(C.xMin, C.z - half, C.xMax, C.z + half, (x, z, k) => {
+      this.h[k] += this.canalDh(x, z);
     });
     // 수로 물웅덩이 구간
     for (const [a, b] of C.waterSections) {
@@ -875,18 +1054,25 @@ export class Terrain {
         else if (Math.abs(d - (rd.width / 2 + R.ditchOffset)) < R.ditchHalf * 0.7 && Math.abs(z - this.canalZ(x)) > 6) this.surf[k] = SID.wetMud;
       });
     }
-    // 수로
+    // 수로: 바닥 = 진흙(물 구간은 물), 비탈 = 진흙, 라이닝 판 = 콘크리트, 북쪽 사격 발판 = 파낸 흙(참호), 둔덕 = 하층토
+    // (식생은 이 지면 종류로 배치를 거른다: 진흙·물·콘크리트·참호 위에는 풀이 나지 않는다)
     const C = MAP.canal;
-    this.stampSurf(C.xMin, C.z - 4, C.xMax, C.z + 4, (x, z, k) => {
-      const d = Math.abs(z - this.canalZ(x));
-      const cross = Math.abs(x - C.crossing.x) < C.crossing.halfWidth;
-      if (cross) return;
-      const th = this.isCanalLined(x) ? C.linedTopHalf : C.topHalf;
-      if (d < th) {
+    const benchIn = this.canalBenchInner();
+    this.stampSurf(C.xMin, C.z - 8, C.xMax, C.z + 8, (x, z, k) => {
+      if (Math.abs(x - C.crossing.x) < C.crossing.halfWidth) return;
+      const dn = this.canalZ(x) - z;
+      const d = Math.abs(dn);
+      const lined = this.isCanalLined(x);
+      if (d <= C.floorHalf) {
         let wet = false;
         for (const [a, b] of C.waterSections) if (x >= a && x <= b) wet = true;
         this.surf[k] = wet && d < C.floorHalf * 0.9 ? SID.water : SID.wetMud;
-      } else if (d < th + 1.2 && z < this.canalZ(x)) this.surf[k] = SID.crater; // 파낸 흙
+      } else if (lined && d <= this.slabBand[1]) {
+        const slab = this.canalSlabAt(x, dn > 0 ? 1 : -1);
+        this.surf[k] = slab && slab.kind !== 'missing' ? SID.concrete : SID.wetMud;
+      } else if (dn > 0 && !lined && d > benchIn - 0.1 && d <= C.bench.outer + 0.15) this.surf[k] = SID.trench;
+      else if (d < C.topHalf) this.surf[k] = SID.wetMud;
+      else if (dn > 0 && d > C.bench.outer && d < C.bench.outer + C.berm.face + 1.6) this.surf[k] = SID.subsoil; // 파낸 흙 둔덕
     });
     // 참호: 바닥·벽은 참호, 흉벽·후벽은 파낸 하층토
     const T = MAP.trench;
@@ -1114,21 +1300,57 @@ export class Terrain {
     }
   }
 
-  // 수로: 실제 형상(기본 지면보다 얼마나 낮은지)에서 칠한다 — 수로 형상이 바뀌어도 따라간다
+  // 수로: 단면 구역별로 칠한다 — 바닥·아래 비탈 = 젖은 진흙, 위 비탈 = 마른 풀 + 흙, 사격 발판 = 짓밟힌 흙,
+  // 둔덕 = 파낸 흙(어두운 흙덩이 + 밝은 하층토, 뒤쪽은 풀이 덮음), 사격 홈 = 새로 파낸 하층토, 빠진 판 자리 = 드러난 흙
   paintCanal(m) {
     const C = MAP.canal;
     const nz = this.noise;
+    const benchIn = this.canalBenchInner();
     this.maskStamp(m, C.xMin, C.z - 9, C.xMax, C.z + 9, (x, z, k) => {
-      const below = this.baseHeight(x, z) - this.heightAt(x, z);
-      const above = -below;
-      const north = z < this.canalZ(x);
-      if (below > 0.15) {
-        this.paint(m, k, GM.grass, smoothstep(0.15, 0.4, below) * 0.5);
-        this.paint(m, k, GM.mud, smoothstep(0.35, 0.9, below) * (0.75 + 0.2 * nz.noise(x / 3, z / 3)));
-      } else if (north && above > 0.06) {
-        // 수로를 팔 때 나온 흙 둔덕: 풀이 덮었고 군데군데 하층토가 드러남
-        this.paint(m, k, GM.subsoil, smoothstep(0.06, 0.4, above) * smoothstep(0.1, 0.6, nz.noise(x / 4.5 + 7, z / 4.5)) * 0.6);
+      if (Math.abs(x - C.crossing.x) < C.crossing.halfWidth + 1.2) {
+        // 배수관 둑: 예전처럼 실제로 낮은 곳만 진흙
+        const below = this.baseHeight(x, z) - this.heightAt(x, z);
+        if (below > 0.15) this.paint(m, k, GM.mud, smoothstep(0.35, 0.9, below) * 0.8);
+        return;
       }
+      const dn = this.canalZ(x) - z;
+      const d = Math.abs(dn);
+      if (d > 7.6) return;
+      const lined = this.isCanalLined(x);
+      const n = nz.noise(x / 3, z / 3);
+      const benchZone = dn > 0 && !lined && d > benchIn - 0.15;
+      if (d < C.topHalf + 0.1 && !benchZone) {
+        const wet = 1 - smoothstep(C.floorHalf - 0.1, C.floorHalf + 0.9 + 0.3 * n, d);
+        this.paint(m, k, GM.grass, smoothstep(C.floorHalf + 0.4, C.topHalf, d + 0.3 * n) * 0.6);
+        this.paint(m, k, GM.plowed, (1 - wet) * smoothstep(0.2, 0.75, nz.noise(x / 1.7 + 3, z / 1.7)) * 0.45);
+        this.paint(m, k, GM.mud, wet * (0.82 + 0.15 * n));
+        if (lined && d > this.slabBand[0] && d < this.slabBand[1]) {
+          const slab = this.canalSlabAt(x, dn > 0 ? 1 : -1);
+          if (slab && slab.kind === 'missing') {
+            this.paint(m, k, GM.subsoil, 0.45 + 0.2 * n);
+            this.paint(m, k, GM.mud, 0.35);
+          }
+        }
+        return;
+      }
+      if (dn < 0) return; // 남쪽 둑 너머는 바탕 풀밭
+      if (benchZone && d <= C.bench.outer + 0.1) {
+        // 사격 발판: 짓밟힌 젖은 흙
+        this.paint(m, k, GM.plowed, 0.55);
+        this.paint(m, k, GM.mud, 0.45 + 0.2 * n);
+        return;
+      }
+      // 둔덕 (발판 바깥 끝 → 뒤쪽 끝 t = 0..1)
+      const t = (d - C.bench.outer) / (C.berm.face + C.berm.back);
+      if (t > 1.15) return;
+      const spoil = 1 - smoothstep(0.4, 1.0, t + n * 0.15);
+      this.paint(m, k, GM.mud, spoil * 0.55);
+      this.paint(m, k, GM.subsoil, spoil * (0.35 + 0.4 * smoothstep(-0.2, 0.5, nz.noise(x / 2.1 + 7, z / 2.1))));
+      this.paint(m, k, GM.plowed, spoil * smoothstep(0.25, 0.7, nz.noise(x / 1.3 - 5, z / 1.3)) * 0.4);
+      this.paint(m, k, GM.grass, smoothstep(0.3, 0.75, t + 0.25 * nz.noise(x / 3.3, z / 3.3 + 4)) * 0.75);
+      // 사격 홈: 새로 파낸 하층토
+      const wN = this.canalNotchWeight(x);
+      if (wN > 0 && t < 0.75) this.paint(m, k, GM.subsoil, wN * 0.65);
     });
   }
 

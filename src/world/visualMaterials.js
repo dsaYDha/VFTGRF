@@ -1,5 +1,6 @@
 // 공용 시각 재질 (Three.js). 충돌 재질(config.materials)과는 별개
 import * as THREE from 'three';
+import { CONFIG } from '../config.js';
 import * as TX from './textures.js';
 
 export function createVisualMaterials() {
@@ -8,10 +9,16 @@ export function createVisualMaterials() {
     brickRed: lam({ map: TX.brickTexture('red') }),
     brickWhite: lam({ map: TX.brickTexture('silicate') }),
     concrete: lam({ map: TX.concreteTexture() }),
+    // 수로 라이닝 판 (판 하나 = 아틀라스 한 칸, UV 는 Structures.slabPartGeometry)
+    canalSlab: lam({ map: TX.canalSlabTexture(CONFIG.canal.slabTexture.width, CONFIG.canal.slabTexture.height, CONFIG.canal.slabTexture.variants) }),
     slate: lam({ map: TX.slateTexture(), side: THREE.DoubleSide }),
     rust: lam({ map: TX.rustTexture() }),
     rustDouble: lam({ map: TX.rustTexture(), side: THREE.DoubleSide }),
     burnt: lam({ map: TX.burntTexture() }),
+    // 중간 지대 차량 잔해: 불탄 장갑차 차체 / 불탄 민간 차량·트랙터 / 궤도 링크 (Structures.apc·car·tractor)
+    wreckArmor: lam({ map: TX.wreckTexture('armor', CONFIG.midfield.textureSize) }),
+    wreckCar: lam({ map: TX.wreckTexture('car', CONFIG.midfield.textureSize) }),
+    track: lam({ map: TX.trackTexture() }),
     wood: lam({ map: TX.woodTexture() }),
     bark: lam({ map: TX.barkTexture() }),
     sandbag: lam({ map: TX.sandbagTexture() }),

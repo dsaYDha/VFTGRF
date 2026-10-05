@@ -43,19 +43,21 @@ export class Player {
   }
 
   reset() {
+    // 시작 위치: 수로 북쪽 둔덕 뒤 사격 발판, 앉은 자세로 북쪽 (MAP.playerSpawn)
     const s = MAP.playerSpawn;
     const t = this.game.world.terrain;
+    const posture = s.posture || 'stand';
     this.pos.set(s.x, t.heightAt(s.x, s.z), s.z);
     this.lastInside.copy(this.pos);
     this.vel.set(0, 0, 0);
     this.vy = 0;
     this.yaw = s.yaw;
     this.pitch = 0.0;
-    this.posture = 'stand';
-    this.transFrom = 'stand';
+    this.posture = posture;
+    this.transFrom = posture;
     this.transT = 1;
     this.transDur = 0.4;
-    this.eyeHeight = CONFIG.player.eyeHeights.stand;
+    this.eyeHeight = CONFIG.player.eyeHeights[posture];
     this.bodyShift = 0; // 몸 모델 앞뒤 보정 (updateBody)
     this.forceAds = false; // 점검 시점에서 조준 상태 고정
     this.lean = 0;
@@ -90,6 +92,8 @@ export class Player {
     this.body.inCover = true;
     this.body.coverFacing.set(0, 0, -1);
     this.body.weapon.reset();
+    // 시작 자세로 바로 (서 있다가 앉는 모습이 첫 프레임에 적에게 보이지 않게)
+    this.body.model.snapPose(PLAYER_POSE[this.posture]);
     this.updateBody(0);
     this.updateCamera(0);
   }

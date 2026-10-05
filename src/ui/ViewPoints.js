@@ -53,8 +53,13 @@ export class ViewPoints {
     let ads = false;
     switch (i) {
       case 0: {
+        // 시작 위치에서 가장 가까운 엎드려쏴 사격 홈 (둔덕을 파낸 엎드릴 자리, 수로 북쪽 가장자리)
         const C = MAP.canal;
-        z = t.canalZ(x) - (C.floorHalf || 0.8) * 0.4;
+        const N = C.notches;
+        if (N && N.list.length) {
+          x = N.list.reduce((a, b) => (Math.abs(b - sp.x) < Math.abs(a - sp.x) ? b : a));
+          z = t.canalZ(x) - (C.bench.outer + 0.35 + N.platform * 0.4);
+        } else z = t.canalZ(x) - (C.floorHalf || 0.8) * 0.4;
         posture = 'prone';
         break;
       }

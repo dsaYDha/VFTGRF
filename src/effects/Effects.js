@@ -1,14 +1,14 @@
 // =============================================================================
-// Effects — 총구 화염·흙먼지, 재질별 탄착 효과(거리 보정), 예광탄, 파편, 탄흔, 원경 연기
+// Effects — 총구 화염·흙먼지, 재질별 탄착 효과(거리 보정), 예광탄, 파편, 탄흔, 연기 기둥(SmokeColumns: 건물 화재·원경)
 // 탄착 효과는 플레이어가 사격을 수정하는 핵심 단서이므로 멀리서도 보이게 크기를 키운다.
 // =============================================================================
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
-import { MAP } from '../world/mapData.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { DebrisSystem } from './DebrisSystem.js';
 import { TracerSystem } from './TracerSystem.js';
+import { SmokeColumns } from './SmokeColumns.js';
 import { smokeParticleTexture, glowParticleTexture, flashTexture, bulletHoleTexture } from '../world/textures.js';
 import { rand } from '../core/Random.js';
 
@@ -26,11 +26,10 @@ export class Effects {
     this.dust = new ParticleSystem({ max: E.maxDust, texture: smokeParticleTexture(), fogMul: E.particleFogMul });
     this.glow = new ParticleSystem({ max: E.maxGlow, texture: glowParticleTexture(), additive: true, fogMul: 0.4, renderOrder: 4 });
     this.flashes = new ParticleSystem({ max: 96, texture: flashTexture(), additive: true, fogMul: 0.3, renderOrder: 4 });
-    this.distant = new ParticleSystem({ max: 1400, texture: smokeParticleTexture(), fogMul: 0.12, renderOrder: 0 });
     this.debris = new DebrisSystem(E.maxDebris, game.world.terrain);
     this.tracers = new TracerSystem(E.maxTracers);
     const scene = game.scene;
-    for (const s of [this.distant, this.dust, this.glow, this.flashes, this.tracers]) scene.add(s.mesh);
+    for (const s of [this.dust, this.glow, this.flashes, this.tracers]) scene.add(s.mesh);
     scene.add(this.debris.mesh);
     // 탄흔
     const hm = new THREE.MeshLambertMaterial({
@@ -49,7 +48,8 @@ export class Effects {
     const W = CONFIG.atmosphere;
     this.wind = new THREE.Vector3(...W.windDirection).normalize().multiplyScalar(W.windSpeed);
     this.dustWind = this.wind.clone().multiplyScalar(0.35);
-    this.initDistantSmoke();
+    // 연기 기둥 (건물 화재 + 원경): 파티클 기둥 하나의 시스템
+    this.smoke = new SmokeColumns(scene, game.world.terrain);
 
     game.events.on(EV.SHOT_FIRED, (e) => this.onShot(e));
     game.events.on(EV.BULLET_IMPACT, (e) => this.onImpact(e));
@@ -150,6 +150,7 @@ export class Effects {
     else if (fx === 'water') this.water(imp, s);
     else if (fx === 'concrete') this.mineral(imp, s, 0x9b9890, 0x8c8a84);
     else if (fx === 'brick') this.mineral(imp, s, 0x8f6656, 0x7a4a3a);
+    else if (fx === 'rubber') this.rubber(imp, s);
     else if (fx === 'metal') this.metal(imp, s);
     else if (fx === 'wood') this.wood(imp, s);
     else if (fx === 'sand') this.sand(imp, s);
@@ -266,6 +267,12 @@ export class Effects {
     if (Math.random() < 0.35) this.sparks(imp, s, 4);
   }
 
+  // 타이어(고무): 검은 고무 부스러기, 먼지 적게, 불꽃 없음
+  rubber(imp, s) {
+    this.spray(imp, 3, [1.5, 3.5], 2, { sys: this.dust, life: [0.8, 1.5], size: [0.14 * s, 0.6 * s], color: 0x3a3734, alpha: 0.6, drag: 2.6 });
+    this.chips(imp, 5, s, 0x1e1d1c, 0.03, [2, 5]);
+  }
+
   metal(imp, s) {
     this.sparks(imp, s, 12);
     this.glow.spawn({ x: imp.x, y: imp.y, z: imp.z, life: 0.06, size0: 0.45 * s, size1: 0.6 * s, color: 0xffd090, bright: 2.5, alpha: 1, fadeIn: 0 });
@@ -335,52 +342,13 @@ export class Effects {
     this.holes.instanceMatrix.needsUpdate = true;
   }
 
-  // ------------------------------------------------------------------ 원경 연기 기둥
-  initDistantSmoke() {
-    this.columns = MAP.distantSmoke.map((c) => {
-      const a = (c.bearing * Math.PI) / 180;
-      return { x: Math.sin(a) * c.dist, z: -Math.cos(a) * c.dist, size: c.size, acc: Math.random() };
-    });
-    // 미리 시뮬레이션해 처음부터 기둥이 서 있게
-    for (let t = 0; t < 90; t += 0.5) {
-      this.emitDistant(0.5);
-      this.distant.update(0.5, this.wind);
-    }
-  }
-
-  emitDistant(dt) {
-    for (const c of this.columns) {
-      c.acc += dt;
-      while (c.acc > 0.45) {
-        c.acc -= 0.45;
-        this.distant.spawn({
-          x: c.x + rand(-6, 6),
-          y: 8,
-          z: c.z + rand(-6, 6),
-          vx: rand(-0.5, 0.5),
-          vy: rand(4, 6.5) * c.size,
-          vz: rand(-0.5, 0.5),
-          life: rand(70, 95),
-          size0: 30 * c.size,
-          size1: rand(170, 240) * c.size,
-          color: 0x2e2c2a,
-          alpha: 0.3,
-          drag: 0.02,
-          fadeIn: 0.05,
-          rotVel: rand(-0.02, 0.02),
-        });
-      }
-    }
-  }
-
   update(dt) {
     this.tracers.update(this.game.ballistics.active, this.glow, dt, this.game.camera.position);
     this.dust.update(dt, this.dustWind);
     this.glow.update(dt, null);
     this.flashes.update(dt, null);
     this.debris.update(dt);
-    this.emitDistant(dt);
-    this.distant.update(dt, this.wind);
+    this.smoke.update(dt);
   }
 
   reset() {

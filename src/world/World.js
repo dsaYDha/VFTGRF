@@ -11,6 +11,7 @@ import { GeoBatch } from './geom.js';
 import { StructureBuilder, InstanceCollector } from './Structures.js';
 import { Vegetation, windUniforms } from './Vegetation.js';
 import { createVisualMaterials } from './visualMaterials.js';
+import { ContactShadows } from './ContactShadows.js';
 
 // 물웅덩이 재질: 흐린 하늘(지평선~천정 색)을 프레넬로 비추는 평평한 수면 (낮은 각도일수록 밝은 회색).
 // 안개·톤매핑은 표준 경로. 하늘색은 CONFIG.atmosphere 에서 읽고, 바꾸려면 userData.puddleUniforms 를 갱신.
@@ -85,6 +86,9 @@ export class World {
       rng: this.rng,
       inst: this.inst,
     });
+    // 접지 그림자 데칼: 구조물 코드에서 this.contactShadows?.add({...}) 로 새 물체 발자국을 더할 수 있다
+    this.contactShadows = new ContactShadows(this.terrain);
+    this.structures.contactShadows = this.contactShadows;
     this.structures.buildAll(this.materials);
   }
 
@@ -106,9 +110,12 @@ export class World {
     scene.add(this.vegetation.build());
     scene.add(this.buildPuddles());
     scene.add(this.buildDistantVillages());
+    // 차량·잔해·건물 아래 접지 그림자 (맵 데이터 + 구조물 코드가 더한 발자국, 메시 하나)
+    scene.add(this.contactShadows.addFromMap().build());
   }
 
-  // 원경의 먼 마을 실루엣 (안개에 묻히지 않게 직접 흐린 색으로 칠함, 접근 불가)
+  // 원경의 먼 마을 실루엣 (접근 불가). 다른 물체와 같은 안개를 받아 희미한 실루엣으로만 보인다
+  // (안개 식의 먼 곳 실루엣 몫 CONFIG.atmosphere.fog.farResidual)
   buildDistantVillages() {
     const rng = new Random(77);
     const parts = [];
@@ -152,8 +159,9 @@ export class World {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.computeBoundingSphere();
-    const col = new THREE.Color(A.fogColor).multiplyScalar(0.86);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col, fog: false }));
+    // 어두운 지붕·벽 색 (안개가 섞어 거의 안개색이 된다)
+    const col = new THREE.Color(A.fogColor).multiplyScalar(0.3);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col, fog: true }));
     mesh.name = 'distantVillages';
     mesh.renderOrder = -5;
     return mesh;

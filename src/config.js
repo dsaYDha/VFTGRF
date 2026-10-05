@@ -14,32 +14,125 @@ export const CONFIG = {
     pixelRatioMin: 0.65,
     targetFps: 58,
     antialias: true,
+    // 흐린 날: 아주 옅고 부드러운 그림자를 플레이어 주변에만 쓴다 (그 밖은 접지 그림자 데칼 — contactShadows)
     shadows: true,
     shadowMapSize: 2048,
-    shadowHalfExtent: 110, // 그림자 카메라 반경 (플레이어 주변)
+    shadowHalfExtent: 80, // 그림자 반경 (플레이어 중심, 지면 기준 m)
+    shadowFadeStart: 0.7, // 반경 대비 이 비율부터 가장자리까지 그림자가 서서히 사라진다
+    shadowRadius: 4, // PCF 흐림 반경 (텍셀) — 클수록 부드럽다
+    shadowRecenter: 8, // 플레이어가 이만큼 움직이면 그림자 영역을 다시 맞추고 다시 굽는다 (m)
+    shadowRefreshTime: 0.25, // 그 밖에는 이 간격으로만 그림자 맵을 다시 그린다 (움직이는 병사용, s)
     fovDeg: 62, // 기본 수직 시야각
     adsZoom: 1.3, // 가늠자 조준 시 확대 배율
     adsTransitionTime: 0.22,
     near: 0.08,
     far: 2600,
-    exposure: 1.0,
+    // 색감: ACESFilmic 톤매핑 뒤에 채도·색조 보정 (후처리 패스 없이 각 재질 셰이더 안에서, Atmosphere.js)
+    // grade.saturation 1 / tint [1,1,1] 이면 순수 ACESFilmic. 하늘·안개색·파티클은 톤매핑을 받지 않는다 (화면 값 그대로)
+    exposure: 1.55,
+    grade: { saturation: 0.74, tint: [0.955, 0.99, 1.055] },
   },
 
   // ---------------------------------------------------------------- 대기·조명
   atmosphere: {
+    // 안개색 = 하늘 지평선 색 (화면 출력 sRGB 값 그대로). 하늘 돔 지평선·배경·파티클 안개가 모두 이 색으로 녹아든다
     fogColor: 0x8d9192,
-    fogDensity: 0.0029, // FogExp2: 600m 에서 약 95% 가려짐 (시정 ~600m)
-    skyZenith: 0x5e6367,
-    skyHorizon: 0x8d9192,
-    cloudContrast: 0.08,
-    hemiSky: 0xc9ccce,
-    hemiGround: 0x4b4239,
-    hemiIntensity: 1.55,
-    sunColor: 0xf3ece2,
-    sunIntensity: 0.65,
-    sunDirection: [0.45, 0.8, 0.4], // 빛이 오는 방향(정규화 전)
+    // 적 AI 시야 감쇠(Perception)에 쓰는 FogExp2 밀도 — 렌더 안개(fog)와 별개 (바꾸면 적 발견률이 바뀐다)
+    fogDensity: 0.0029,
+    // 렌더 안개: 지형·식생(인스턴스 포함)·구조물·파티클·원경이 모두 같은 식 (Atmosphere.js 가 Three.js fog 청크를 바꿔 끼운다)
+    //  광학 깊이 tau = linear·d + (quad·d)²  → 투과율 T = (1 - farResidual)·e^-tau + farResidual·e^(-d/farLength)
+    //  d = 카메라에서의 실제 거리 (화면 깊이가 아니라서 고개를 돌려도 안개가 같다)
+    //  linear 항: 가까운 곳부터 대기 원근감, quad 항: 시정 600m 근처에서 빠르게 짙어짐,
+    //  farResidual: 먼 언덕·마을·연기 기둥이 희미한 실루엣으로 남는 몫
+    //  hazeHeight: 높이 안개 (지면 연무가 위로 갈수록 옅어짐, 높은 연기·탑 끝이 덜 묻힌다), m
+    //  현재 값 (지면 높이) → 100m 12%, 200m 30%, 300m 50%, 400m 67%, 600m 87%, 1.5km 95%, 3km 96%
+    fog: { linear: 0.00082, quad: 0.00237, farResidual: 0.06, farLength: 6000, hazeHeight: 90 },
+    skyZenith: 0x5e6367, // 물웅덩이·젖은 흙 반사용 하늘 위쪽 색
+    skyHorizon: 0x8d9192, // = fogColor (물웅덩이·젖은 흙 반사용)
+    // 절차적 흐린 하늘 돔: 층운 구름판의 명암 얼룩 (두꺼운 곳 = 구름 아래쪽이 더 어두운 회색), 아주 천천히 흐른다
+    sky: {
+      cloudLit: 0x868a8e, // 얇은 곳 (빛이 비쳐 밝은 회색)
+      cloudDark: 0x64686c, // 두꺼운 구름 아래쪽
+      zenithShade: 0.94, // 머리 위로 갈수록 이 배수까지 어두워짐
+      cover: 0.48, // 구름 두께 문턱 (높을수록 밝은 틈이 많다)
+      softness: 0.34, // 명암 경계 부드러움 (층운: 넓게 번진 얼룩)
+      detail: 0.32, // 작은 구름 무늬 세기
+      layerHeight: 1200, // 가상의 구름판 높이 (m) — 무늬 크기·이동 속도 환산용
+      tileSize: [5200, 1500], // 큰 층 / 작은 층 텍스처 한 장이 덮는 크기 (m)
+      speed: [7, 11], // 큰 층 / 작은 층 이동 속도 (m/s, 바람 방향) — 화면에선 아주 천천히
+      hazeMul: 1.0, // 지평선 연무 띠 두께 배수 (1 = 안개 식과 일치: 지평선 = 안개색, 고도 10° 약 80%, 20° 42%, 머리 위 10%)
+      sunGlow: 0x1c1a16, // 구름 뒤 해 쪽 하늘이 밝아지는 양 (더하는 색)
+      sunGlowPower: 5,
+      textureSize: 256,
+    },
+    // 조명: 반구광(하늘 회백색 / 땅 어두운 갈색) + 구름 뒤 해를 흉내 낸 약한 방향광
+    hemiSky: 0xd2d6d9,
+    hemiGround: 0x3d352d,
+    hemiIntensity: 2.2,
+    sunColor: 0xefe7db,
+    sunIntensity: 1.0,
+    sunAzimuthDeg: 235, // 해 방위각 (0 = 북, 시계방향) — 늦가을 오후, 남서쪽 낮은 해
+    sunElevationDeg: 22,
+    shadowIntensity: 0.7, // 그림자 진하기 (흐린 날이라 해 자체가 약해 실제로는 바닥이 10% 남짓 어두워질 뿐, 0..1)
     windDirection: [1, 0, -0.35],
     windSpeed: 4.5,
+  },
+
+  // ---------------------------------------------------------------- 접지 그림자 데칼 (차량·잔해·건물 아래, 한 메시)
+  // 실제 그림자는 플레이어 주변 render.shadowHalfExtent 안에서만 옅게 쓰고, 물체가 땅에 붙어 보이게 하는 건 이 데칼이 맡는다.
+  // soft: 발자국 바깥으로 번지는 폭(m), strength: 어둡기(0..1), inner: 발자국 안쪽 깊은 곳 어둡기 배수 (지붕 없는 건물 바닥 등)
+  contactShadows: {
+    color: 0x0c0b0a,
+    lift: 0.05, // 지형 위로 띄우는 높이 (m)
+    gridStep: 1.25, // 지형을 따라 휘는 격자 간격 (m)
+    innerWidth: 1.6, // 발자국 가장자리에서 안쪽으로 이 폭까지는 strength 그대로, 그 안은 inner 배
+    vehicle: { soft: 1.3, strength: 0.72, inner: 1 },
+    building: { soft: 1.5, strength: 0.5, inner: 0.45 },
+    rubble: { soft: 1.2, strength: 0.42, inner: 0.85 },
+    small: { soft: 0.7, strength: 0.4, inner: 1 },
+  },
+
+  // ---------------------------------------------------------------- 연기 기둥 (파티클, 위치는 MAP.smokeSources / MAP.distantSmoke)
+  // 지면 근처 발원점에서 짙게 시작해 올라가며 넓어지고 옅어진다. bendHeight 위에서 바람을 받아 휘어 길게 흘러간다.
+  // 부드러운 원형 스프라이트 수십 장이 각각 아주 천천히 돌고 커진다 (한 덩어리 풍선이 아니라 기둥).
+  smoke: {
+    maxParticles: 1000,
+    shade: 0.28, // 스프라이트 위쪽 밝게·아래쪽 어둡게 (하늘빛을 받는 부피감)
+    // 건물 화재: 가는 기둥, 회색~검정
+    fire: {
+      rate: 5, // 초당 스프라이트 수
+      life: [26, 34],
+      rise: [1.5, 2.3], // 초기 상승 속도 (m/s)
+      riseDrag: 0.045, // 상승 감쇠 (1/s) → 최종 높이 ≈ rise / riseDrag
+      windDrag: 0.09, // 바람에 실려 가는 정도 (1/s)
+      bendHeight: 14, // 이 높이(발원점 기준)에서 바람을 다 받는다 (그 아래는 바람이 약해 곧게 선다)
+      windMin: 0.12, // 발원점 바로 위에서 받는 바람 비율
+      size: [1.2, 2.1], // 처음 크기
+      grow: [10, 16], // 수명 끝 크기
+      spread: 0.5, // 발원점 퍼짐 반경 (m)
+      alpha: 0.36,
+      colorNear: [0x1d1b1a, 0x2a2826], // 발원점 근처 (검정에 가까움)
+      colorFar: [0x4a4a4a, 0x5d5e5f], // 흩어진 위쪽 (회색)
+      prewarm: 40, // 시작할 때 미리 흘려 두는 시간 (s)
+    },
+    // 원경 연기 기둥: 크고 느리다, 안개색에 섞여 옅게 보인다
+    // (발원점 근처는 지면 연무에 거의 묻히고, 200m 이상 올라간 부분이 하늘에 희미한 기둥으로 드러난다)
+    distant: {
+      rate: 1.1,
+      life: [100, 130],
+      rise: [7, 9],
+      riseDrag: 0.03, // 최종 높이 약 270m
+      windDrag: 0.03,
+      bendHeight: 150,
+      windMin: 0.1,
+      size: [16, 26],
+      grow: [120, 180],
+      spread: 6,
+      alpha: 0.72,
+      colorNear: [0x1e1d1c, 0x292827],
+      colorFar: [0x3d3e3f, 0x4b4d4f],
+      prewarm: 160,
+    },
   },
 
   // ---------------------------------------------------------------- 지형·맵
@@ -148,6 +241,152 @@ export const CONFIG = {
     puddle: { deepColor: 0x262422, reflect: 0.9, opacity: 0.93, edgeSoft: 0.12 },
   },
 
+  // ---------------------------------------------------------------- 관개수로 (플레이어 진지) 외형 — 단면·배치 좌표는 MAP.canal
+  canal: {
+    // 프리캐스트 판 (약 1x2m): 폭(수로 방향)·길이(비탈 방향, 바닥 밑에 묻히는 toe 포함)·두께(대부분 흙 속)
+    // proud = 판 윗면이 비탈(충돌 높이장)보다 올라온 양, joint = 판 사이 이음매 틈
+    // (보이는 길이 = length - toe ≈ 1.86m: 비탈 아래 끝에서 둥근 위 모서리 직전까지)
+    slab: { width: 1.0, length: 1.93, toe: 0.07, thick: 0.22, proud: 0.006, joint: 0.014 },
+    // 판 아래 지형 렌더 메시를 내리는 양: 바닥 모서리 근처(격자 보간 때문에 흙이 판 윗면을 뚫고 나오는 곳) / 판 가운데(겹침 깜빡임 방지)
+    // / 빠진 판 자리 (흙이 드러난 얕은 홈). 판 위쪽 끝은 내리지 않아 흙과 맞닿는다
+    renderDrop: 0.06,
+    renderDropMid: 0.016,
+    holeDrop: 0.07,
+    // 판 상태 확률: 빠짐 / 모서리 깨짐(철근 노출) / 금 가서 어긋남 / 기울어짐·미끄러짐
+    slabChance: { missing: 0.06, corner: 0.05, cracked: 0.12, tilted: 0.1 },
+    rebar: { perEdge: [2, 4], length: [0.08, 0.3], size: 0.011, color: 0x6e4c38 },
+    slabTint: [0.84, 0.98], // 판마다 밝기 배수
+    slabBottomShade: 0.78, // 판 아래쪽 끝(수로 바닥 쪽) 정점색 배수 (위쪽 끝 = 1)
+    slabTexture: { width: 1024, height: 512, variants: 4 }, // 판 텍스처 아틀라스 (판 하나 = 256x512px)
+    // 모래주머니 사격 위치: 양옆 더미 사이 틈 폭, 마루를 낮춘 사격 홈 폭(가운데), 더미 길이·단 수,
+    // 더미 바깥 끝을 사수 쪽(남쪽)으로 굽힌 각(rad, 말굽 모양) — 앉은 사수의 사계가 정면 ±40° 정도 트인다
+    sandbag: { gap: 2.0, slot: 0.9, stackLen: 1.1, layers: 3, wrap: 0.25 },
+    // 수로 바닥 잡동사니 개수 (타이어·양동이·탄약 상자), 놓을 x 범위, 시작 위치 둘레 비움 (m)
+    junk: { tyres: 9, buckets: 6, crates: 8, xRange: [-150, 150], spawnClear: 4 },
+  },
+
+  // ---------------------------------------------------------------- 식생 (말라 죽은 해바라기·마른 풀·갈대·부러진 나무) — Vegetation.js
+  // 해바라기·풀·갈대는 InstancedMesh. LOD: 카메라 둘레 칸만 동적 인스턴스 버퍼에 모아 그리고(종류마다 드로우콜 1개),
+  // 정점 셰이더가 거리로 디더 전환·축소한다. 모두 은폐만(탄 통과, 시야만 가림: CollisionWorld.addConcealer).
+  // 그래픽 품질 프리셋: density·lodScale 을 바꾼 뒤 world.vegetation.applyConfig() (또는 setDensity(배수) / setLodScale(배수)).
+  // 그림자는 받지도 드리우지도 않는다 (흐린 날 해가 약해 차이가 거의 없고, 겹침이 많아 비싸다). 안개는 표준 청크로 받는다.
+  vegetation: {
+    density: 1.0, // 밀도 배수 0..1 (해바라기·풀: 생성한 양에서 이 비율만 그린다 — 낮음 프리셋은 0.5 정도)
+    lodScale: 1.0, // 모든 LOD 거리 배수 (해바라기 3D·빌보드 전환, 풀 보이는 거리)
+    // 말라 죽은 해바라기 (줄 간격·방향 = MAP.fields.sunflower 의 spacing·furrowDeg: 지형 고랑과 같은 줄, 이랑 마루에 심는다)
+    sunflower: {
+      plantSpacing: [0.3, 0.4], // 포기 간격 (줄을 따라, m)
+      height: [1.4, 2.0], // 줄기 높이 (m) — 모형 기준 높이는 Vegetation.SUNFLOWER_SHAPE.height
+      widthScale: [0.85, 1.2], // 가로 배수 (모형: 줄기 굵기 2.7cm, 꽃판 지름 24cm → 2.3~3.2cm, 20~29cm)
+      headBearingDeg: [90, 60], // 꽃판이 숙인 방위 (중심, ±폭) — 익은 해바라기는 대개 동쪽을 본다
+      tilt: 0.07, // 선 줄기의 무작위 기울기 (rad)
+      leanChance: 0.12, // 비스듬히 기운 줄기
+      leanAngle: [0.18, 0.6],
+      fallenChance: 0.025, // 그냥 쓰러진 줄기
+      headlessChance: 0.06, // 꽃판이 떨어져 나간 줄기
+      missingChance: 0.05,
+      thirdLeafChance: 0.55, // 처진 잎 3장 (나머지는 2장)
+      // 밭 가장자리: 안쪽으로 edgeWidth 에 걸쳐 듬성듬성해지고 키도 조금 작아진다 (경계는 노이즈로 들쭉날쭉 — 일직선으로 끊기지 않게)
+      edgeWidth: 12,
+      edgeNoise: { size: 22, amp: 7, detailSize: 6, detailAmp: 2 },
+      edgeHeight: 0.8, // 가장자리 줄기 키 배수 (안쪽 1)
+      straggle: { dist: 5, chance: 0.05 }, // 밭 밖 머리땅으로 이 거리까지 드문드문 남은 줄기 (확률)
+      heightPatch: { size: 25, amp: 0.08 }, // 구역마다 키가 조금씩 다름 (윗선이 평평한 띠가 되지 않게)
+      // 비어 있는 구간 (말라 죽거나 포격으로 빈 곳): 노이즈 크기·세부 크기(m), 문턱(낮을수록 적다), 경계 부드러움
+      gapNoise: { size: 16, detail: 5, threshold: -0.36, soft: 0.14 },
+      // 차량이 밀고 지나간 띠 (MAP.vehicleTracks 중 밭을 지나는 것 + 밭 데이터의 swaths): 반폭 안 = 납작하게 쓰러짐, 그 밖 edge 폭 = 바깥으로 기울어짐
+      swathHalf: 2.2,
+      swathEdge: 1.5,
+      swathMissing: 0.3,
+      // 포탄 구덩이 둘레: 반지름 배수 clear 안은 비고, fall 까지는 바깥쪽으로 꺾이고 쓰러진 줄기
+      craterClear: 1.12,
+      craterFall: 2.4,
+      tint: [0.8, 1.12], // 포기마다 밝기 배수
+      // 정점색 (sRGB): 진한 회갈색 ~ 거의 검정 (주변 흑토보다 밝게 튀지 않게)
+      colors: { stem: 0x423930, stemTop: 0x342c25, face: 0x271f1a, back: 0x463a30, leaf: 0x4f4437 },
+      cardShade: 1.05, // 빌보드 밝기 배수 (근거리 3D 와 맞춤)
+      wind: 0.03, // 바람 흔들림 (꽃판 높이에서 m, 아주 약하게)
+      // LOD (m): near 안 = 저폴리 3D (줄기·꽃판·잎), 그 밖 = 교차 빌보드 (덮는 비율을 지키는 밉맵이라 멀어져도 높이감 있는 어두운 띠로 남음),
+      //  far 밖 = 빌보드를 farKeep 비율만 남기고 넓혀 그린다 (원거리 밭 실루엣, 겹침 줄임). band = 디더 전환 폭.
+      //  cell: 동적 선택 칸 크기, refreshMove/TurnDeg: 다시 고르는 이동·회전, wedgeMarginDeg: 시야 쐐기 여유, nearCapacity: 3D 최대 포기 수
+      lod: { near: 40, nearBand: 5, far: 170, farBand: 30, farKeep: 0.5, cell: 8, refreshMove: 2.5, refreshTurnDeg: 10, wedgeMarginDeg: 20, nearCapacity: 12000 },
+      conceal: { cell: 10, minFill: 0.4, maxStrip: 30, height: 1.8 }, // 은폐 볼륨: 칸 크기(m), 선 줄기 비율 문턱, 띠 최대 길이, 높이
+    },
+    // 마른 풀 (20~60cm, 바랜 짚색 + 일부 회녹색): 노이즈 군락으로 모인다 (일직선 띠 없음).
+    // 길·콘크리트·건물·차량·수로(바닥·판·발판·둔덕)·참호·구덩이 안·하층토 위에는 생기지 않는다 (지면 종류 + 차량 바닥 마스크)
+    grass: {
+      density: 2.0, // 군락 한가운데 포기 수 (/m²)
+      // 군락 노이즈: 크기(m)·세기 3겹, 덮는 문턱 lo~hi (smoothstep)
+      clump: { sizes: [26, 7, 2.4], amps: [0.5, 0.6, 0.35], lo: -0.05, hi: 0.45 },
+      height: [0.2, 0.6],
+      heightNoise: 15, // 키 큰 군락 / 낮은 군락 노이즈 크기 (m)
+      widthMul: [1.3, 1.9], // 포기 폭 / 높이
+      weedHeight: [0.12, 0.3], // 갈아엎은 밭·해바라기밭 사이 잡초
+      weedDensity: 0.14, // 밭 안 잡초 밀도 배수
+      stubbleDensity: 0.3, // 그루터기 밭 밀도 배수
+      straw: 0x8a7f6c, // 바랜 짚색 (인스턴스 색, 텍스처와 곱해진다)
+      greyGreen: 0x737765, // 회녹색
+      greyGreenShare: 0.3,
+      brightness: [0.74, 1.0],
+      // 수로 북쪽 (수로 중심에서 북쪽 거리 m): canalClear[0] 안은 낮고 드문 풀만 (둔덕·사격 홈에서의 시야), canalClear[1] 까지 보통으로
+      canalClear: [18, 34],
+      canalMaxH: 0.16,
+      canalDensity: 0.35,
+      lowNearLines: { trench: 7, crater: 7, maxH: 0.26 }, // 참호선·전방 구덩이(F1·F2) 둘레는 낮은 풀 (흉벽 위 머리·총구 화염이 가끔은 보이게)
+      padMargin: 0.4, // 차량 둘레 비움 (m)
+      wind: 0.09,
+      // LOD: far 거리에서 땅속으로 줄어 사라진다 (band 폭), cell = 동적 선택 칸, refreshMove = 다시 고르는 이동 거리
+      lod: { far: 110, band: 25, cell: 25, refreshMove: 6 },
+      // 은폐 볼륨: 칸(m) 안에 minHeight 이상 포기가 minCount 개 이상이면 (플레이어가 갈 수 있는 곳 근처만), 띠 최대 길이.
+      // 수로 북쪽 canalClear(m) 안에는 두지 않는다 (수로·둔덕에 있는 플레이어를 적이 보는 판정은 이전과 같게)
+      conceal: { cell: 4, minHeight: 0.34, minCount: 7, maxStrip: 24, canalClear: 45 },
+    },
+    // 수로 바닥 물가 마른 갈대 군락 (MAP.canal.reeds): 높이 1.5~2m, 은폐만. band = 수로 중심에서 떨어진 거리 범위 (물가~비탈 아래)
+    reeds: { spacing: 0.3, height: [1.5, 2.0], width: [0.7, 1.05], color: 0x837d6c, brightness: [0.78, 1.05], wind: 0.06, band: [0.45, 1.25] },
+    // 포격에 부러진 고립 나무 (Structures.tree): 굵은 몸통(밑동이 퍼짐)·찢어진 윗부분(쪼개진 가닥)·짧은 가지 몇 개·옆에 쓰러진 윗동
+    //  첫 가지는 굵은 큰 가지(limb 배: 굵기·길이), 나머지는 짧은 가지
+    trees: { trunkRadius: [0.3, 0.42], flare: 1.55, branches: [3, 6], branchLen: [0.6, 1.8], limb: [1.5, 2.0], splinters: [6, 9], splinterLen: [0.25, 1.1], fallenLen: [2.4, 4.4] },
+  },
+
+  // ---------------------------------------------------------------- 중간 지대 (차량 잔해·송전선·전신주·작은 잔해) — 배치 좌표는 MAP
+  midfield: {
+    textureSize: 512, // 불탄 차체 절차 텍스처 (px, 한 장 = 2m)
+    // 파괴된 장갑차: 진흙에 박힌 깊이, 벗겨진 궤도 조각 길이(링크 2개), 주변에 흩어진 궤도 링크 수,
+    // 날아간 포탑 자세(rad: 포신 축 둘레 roll, 포신 들림 pitch, 차체 기준 yaw)·땅에 박힌 깊이, 그을린 땅 데칼
+    apc: {
+      sink: 0.06,
+      trackLink: 0.3,
+      looseLinks: 9,
+      turret: { roll: 2.0, pitch: 0.3, yaw: 0.335, sink: 0.12 },
+      scorch: { hx: 4.4, hz: 2.6, soft: 3.2, strength: 0.3 },
+    },
+    // 트랙터: 앞 타이어가 타 림만 남아 앞이 내려앉은 양, 한쪽(-z) 뒷바퀴 림이 진흙에 박힌 양 (m), 남은 빨간 도장 정점색
+    tractor: { noseDrop: 0.22, rimSink: 0.2, paintTint: 0xa47c70, scorch: { hx: 2.6, hz: 1.6, soft: 2.4, strength: 0.26 } },
+    // 민간 차량: 그을린 땅 데칼(차체보다 grow m 넓게), 트럭 차체가 림 위로 내려앉은 양(충돌 상자 높이), 짐칸 판자 색
+    car: { scorch: { grow: 0.6, soft: 2.2, strength: 0.26 }, truckDrop: 0.15, plankTint: 0x8a7a66 },
+    // 송전선: 선 조각 길이(m), 서 있는 탑 사이 처짐(m), 쓰러진 탑에 걸린 경간 처짐(땅까지), 땅에 닿은 선이 구불거리는 폭,
+    // 땅 위로 띄우는 높이, 구불거림이 시작되는 높이 폭, 끊어진 선 길이(경간 배수), 늘어진 선이 땅에 닿는 수평 거리(높이 배수),
+    // 격자 탑 주 부재 충돌 막대 반폭
+    wires: { segment: 2.5, sag: 3.2, brokenSag: 9, groundWander: 0.35, lift: 0.03, wanderBlend: 0.4, snappedLength: 0.38, hangReach: 0.4, memberHalf: 0.12 },
+    // 콘크리트 전신주 (MAP.poles): 땅 위 높이·묻힌 깊이, 단면(밑동·꼭대기 폭 x 두께), 기본 기울기(도), 전선 처짐, 색, 충돌 막대 반폭
+    poles: { height: 9.5, buried: 1.6, base: [0.26, 0.18], top: [0.15, 0.15], leanDeg: 9, sag: 0.8, color: 0xa29e94, colliderHalf: 0.1 },
+    // 작은 잔해 (인스턴싱, 종류마다 드로우콜 1): 개수, 놓지 않을 남쪽 한계(z, 수로 쪽)·동서 한계, 상자를 두지 않을 적 사격 위치 둘레 (m)
+    // types: 크기 배수 범위, 땅 위 높이(배수 1 기준), 색 후보, 충돌 상자 반크기(상자만, 나무)
+    debris: {
+      counts: { shard: 320, crate: 34, camo: 20, helmet: 26, pack: 16 },
+      maxZ: 92,
+      maxX: 250,
+      clearFp: 6,
+      types: {
+        shard: { scale: [0.12, 0.38], lift: 0.03, colors: [0x2c2622, 0x241f1c, 0x332a24, 0x1f1c1a, 0x3a2e26] },
+        crate: { scale: [0.95, 1.05], lift: 0, collider: [0.28, 0.095, 0.17], colors: [0x7d7c5a, 0x6c6c4c, 0x8a8262, 0x5e5c46] },
+        camo: { scale: [0.9, 2.3], lift: 0, colors: [0xffffff, 0xe0dcd0, 0xc8c4b8] },
+        helmet: { scale: [0.96, 1.04], lift: 0.02, colors: [0x56593f, 0x4a4d38, 0x5e5a44, 0x3e4234] },
+        pack: { scale: [0.9, 1.1], lift: 0, colors: [0x5e5a42, 0x6a6248, 0x4c4a38, 0x5a5546] },
+      },
+    },
+  },
+
   // ---------------------------------------------------------------- 탄도
   ballistics: {
     gravity: 9.81,
@@ -224,6 +463,8 @@ export const CONFIG = {
     sheetMetal: { impact: 'metal', penetrable: true, speedLoss: 0.14, deflectDeg: 3, cover: false, ricochet: { maxAngleDeg: 12, chance: 0.5 } },
     slate: { impact: 'concrete', penetrable: true, speedLoss: 0.16, deflectDeg: 4, cover: false, ricochet: { maxAngleDeg: 8, chance: 0.3 } },
     carBody: { impact: 'metal', penetrable: true, speedLoss: 0.38, deflectDeg: 7, cover: false, ricochet: { maxAngleDeg: 10, chance: 0.4 } },
+    // 버려진 타이어 (고무 + 공기): 관통되지만 속도가 꽤 줄고, 검은 고무 부스러기
+    rubber: { impact: 'rubber', penetrable: true, speedLoss: 0.28, deflectDeg: 5, cover: false, ricochet: { maxAngleDeg: 3, chance: 0.05 } },
     thinWall: { impact: 'concrete', penetrable: true, speedLoss: 0.5, deflectDeg: 6, cover: false, ricochet: { maxAngleDeg: 8, chance: 0.3 } },
     flesh: { impact: 'flesh', penetrable: false, cover: false, ricochet: { maxAngleDeg: 0, chance: 0 } },
   },

@@ -50,7 +50,10 @@ export class Game {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, R.pixelRatioMax));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = R.shadows;
+    // PCF + 흐림 반경(render.shadowRadius) = 부드러운 그림자. 그림자 맵은 Atmosphere 가 필요할 때만 다시 그린다
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    // ACESFilmic + 채도·색조 보정 (CustomToneMapping 청크는 Atmosphere.js 에서 교체)
+    this.renderer.toneMapping = THREE.CustomToneMapping;
     this.renderer.toneMappingExposure = R.exposure;
     this.renderer.autoClear = false;
     this.renderer.info.autoReset = false;
@@ -60,7 +63,7 @@ export class Game {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(R.fovDeg, window.innerWidth / window.innerHeight, R.near, R.far);
     this.camera.rotation.order = 'YXZ';
-    this.atmosphere = new Atmosphere(this.scene);
+    this.atmosphere = new Atmosphere(this.scene, this.renderer);
 
     await step('지형 생성 중… (수로·참호·포탄 구덩이)', 0.1);
     this.world = new World(this.scene);
@@ -71,6 +74,7 @@ export class Game {
     this.nav = new Navigation(this.world);
     await step('지형 메시·식생 생성 중…', 0.6);
     this.world.finalize();
+    this.atmosphere.applyToWorld(this.world);
     await step('시스템 준비 중…', 0.8);
 
     this.input = new Input(this.renderer.domElement);
@@ -255,6 +259,7 @@ export class Game {
     this.atmosphere.update(dt, this.camera.position, _fwd);
     this.world.update(dt);
     if (this.state === 'playing' || this.state === 'result') this.effects.update(dt);
+    else if (this.state === 'briefing') this.effects.smoke.update(dt); // 브리핑 배경에서도 연기 기둥은 흐른다
     this.viewModel.update(dt);
     this.audio.update(dt);
     if (this.state === 'playing') {

@@ -64,6 +64,7 @@ export const CONFIG = {
   // ---------------------------------------------------------------- 탄도
   ballistics: {
     gravity: 9.81,
+    integrationHz: 240, // 탄도 적분 주기 (프레임을 이 간격으로 쪼갠다, 영점 표도 같은 간격)
     maxLifetime: 3.0,
     minSpeed: 140, // 이 속도 미만이면 소멸
     terrainStep: 0.45, // 지형 충돌 검사 간격
@@ -71,6 +72,7 @@ export const CONFIG = {
     ricochetSpeedKeep: [0.35, 0.65],
     ricochetScatterDeg: 9,
     penetrationMinSpeed: 180, // 관통 후 이 속도 미만이면 박힘
+    friendlyFire: false, // 같은 편 탄에 맞는지
   },
 
   // ---------------------------------------------------------------- 탄약 정의
@@ -189,7 +191,8 @@ export const CONFIG = {
       adsMul: 0.85,
       transitionMul: 2.0,
     },
-    rest: { probeDist: [0.35, 0.75], bandBelowBore: [0.02, 0.3], sideProbe: 0.3 },
+    // 총 거치: 눈앞 probeDist 범위에서 총열 아래 bandBelowBore 높이에 엄폐물 윗면이 있으면
+    rest: { probeDist: [0.35, 1.15], bandBelowBore: [0.0, 0.38], sideProbe: 0.3 },
     wounded: { speedMul: 0.6, noSprint: true },
     knockdownTime: [2.6, 4.0],
   },

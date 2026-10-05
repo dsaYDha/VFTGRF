@@ -11,8 +11,7 @@ import { EV } from '../core/events.js';
 import { AI_MAP } from '../world/mapData.js';
 import { Soldier } from '../units/Soldier.js';
 import { EnemyAI } from './EnemyAI.js';
-import { Navigation } from './Navigation.js';
-import { rand, randRange, pickWeighted } from '../core/Random.js';
+import { randRange, pickWeighted } from '../core/Random.js';
 
 export class AIDirector {
   constructor(game, nav) {
@@ -248,7 +247,6 @@ export class AIDirector {
   // ------------------------------------------------------------------ 갱신
   update(dt) {
     const now = this.game.time;
-    const M = CONFIG.mission;
     // 정보 공유
     for (let i = this.pendingShares.length - 1; i >= 0; i--) {
       const sh = this.pendingShares[i];

@@ -10,7 +10,6 @@ import { clamp } from '../core/mathUtils.js';
 const _v = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
-const _e = new THREE.Euler();
 
 // 물체 좌표계 (yaw 회전)
 function frame(x, z, rot, y = 0) {

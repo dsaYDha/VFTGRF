@@ -74,7 +74,7 @@ export class Input {
     try {
       const p = this.canvas.requestPointerLock();
       if (p && p.catch) p.catch(() => this.onLockChange && this.onLockChange(false, true));
-    } catch (err) {
+    } catch {
       if (this.onLockChange) this.onLockChange(false, true);
     }
   }

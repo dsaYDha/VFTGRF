@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
 import { buildSoundBank } from './SoundBank.js';
-import { SR, buf, rng, noise, lowpass, env, toBuffer } from './dsp.js';
+import { SR, buf, rng, noise, lowpass, toBuffer } from './dsp.js';
 import { rand, randRange } from '../core/Random.js';
 
 const _f = new THREE.Vector3();

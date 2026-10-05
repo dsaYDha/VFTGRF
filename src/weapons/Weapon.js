@@ -8,7 +8,6 @@ import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
 import { gauss } from '../core/Random.js';
 
-const _d = new THREE.Vector3();
 const _t1 = new THREE.Vector3();
 const _t2 = new THREE.Vector3();
 

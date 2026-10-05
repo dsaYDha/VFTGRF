@@ -17,8 +17,6 @@ const _v = new THREE.Vector3();
 const _o = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _up = new THREE.Vector3();
-const _q = new THREE.Quaternion();
-const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _hit = {};
 
 const POSTURE_NAMES = { stand: '서기', crouch: '앉기', prone: '엎드리기' };

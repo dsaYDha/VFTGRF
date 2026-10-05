@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { LEVEL, LEVEL_NAMES } from '../suppression/Suppressible.js';
 import { Perception } from './Perception.js';
-import { rand, randRange, randInt, chance, gauss } from '../core/Random.js';
+import { rand, randRange, randInt } from '../core/Random.js';
 import { applyDispersion } from '../weapons/Weapon.js';
 import { elevationInterp } from '../weapons/zeroing.js';
 import { dampAngle, wrapAngle } from '../core/mathUtils.js';
@@ -554,7 +554,6 @@ export class EnemyAI {
   }
 
   makeTempFpFromCurrent() {
-    const t = this.game.world.terrain;
     const c = this.nearestCrater(this.pos.x, this.pos.z, 0.5);
     return this.makeTempFp(this.pos.x, this.pos.z, this.fp ? this.fp.yaw : this.yaw, !!c && Math.hypot(c.x - this.pos.x, c.z - this.pos.z) < c.r);
   }

@@ -2,7 +2,7 @@
 // SoundBank — Web Audio 합성음 (외부 사운드 파일 없음). 시작할 때 버퍼로 미리 만든다.
 // 종류마다 변형 여러 개를 만들어 반복감을 줄인다.
 // =============================================================================
-import { SR, buf, rng, noise, brown, lowpass, highpass, bandpass, env, sine, add, scale, softClip, normalize, fadeOut, toBuffer } from './dsp.js';
+import { SR, buf, rng, noise, brown, lowpass, highpass, bandpass, env, sine, add, softClip, normalize, fadeOut, toBuffer } from './dsp.js';
 
 function variants(n, fn) {
   const out = [];

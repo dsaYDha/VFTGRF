@@ -11,7 +11,7 @@ function simulateY(ammo, angle, range, sightHeight) {
   let y = -sightHeight;
   let vx = ammo.muzzleVelocity * Math.cos(angle);
   let vy = ammo.muzzleVelocity * Math.sin(angle);
-  const dt = 1 / 480;
+  const dt = 1 / CONFIG.ballistics.integrationHz;
   let t = 0;
   while (x < range && t < 4) {
     const sp = Math.hypot(vx, vy);

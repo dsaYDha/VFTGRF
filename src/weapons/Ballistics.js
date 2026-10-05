@@ -89,13 +89,18 @@ export class Ballistics {
   step(b, dt) {
     const B = CONFIG.ballistics;
     const v = b.vel;
-    const sp = v.length();
     const k = b.ammo.dragK;
-    v.x += -k * sp * v.x * dt;
-    v.y += (-B.gravity - k * sp * v.y) * dt;
-    v.z += -k * sp * v.z * dt;
     b.prev.copy(b.pos);
-    b.pos.addScaledVector(v, dt);
+    // 프레임 길이와 무관하게 같은 궤적이 되도록 고정 간격으로 쪼개 적분 (영점 표와 동일)
+    const n = Math.max(1, Math.ceil(dt * B.integrationHz - 1e-6));
+    const h = dt / n;
+    for (let i = 0; i < n; i++) {
+      const sp = v.length();
+      v.x += -k * sp * v.x * h;
+      v.y += (-B.gravity - k * sp * v.y) * h;
+      v.z += -k * sp * v.z * h;
+      b.pos.addScaledVector(v, h);
+    }
     b.age += dt;
     b.speed = v.length();
 
@@ -115,9 +120,12 @@ export class Ballistics {
     let unit = null;
     const uh = this.uh;
     const units = this.game.units;
+    const ff = CONFIG.ballistics.friendlyFire;
     for (let i = 0; i < units.length; i++) {
       const u = units[i];
       if (u === b.shooter || !u.alive) continue;
+      // 같은 편 오사는 끔 (앞쪽 아군 머리 위로 쏘는 사격 규율을 단순화)
+      if (!ff && u.team === b.team) continue;
       if (u.testBulletHit(ax, ay, az, bx, by, bz, uh) && uh.t < unitT && uh.t < worldT) {
         unitT = uh.t;
         unit = u;

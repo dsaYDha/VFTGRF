@@ -108,13 +108,15 @@ npm run dev
 | 연속 입력 감소 | `suppression.repeatWindow`, `repeatMuls` | 0.5초, 1 / 0.7 / 0.4 |
 | 예광탄 배수 / 내성 범위 | `suppression.tracerMul`, `resilienceRange` | 1.2 / 0.7~1.3 |
 | 탄속 / 공기저항 | `ammo['545x39'].muzzleVelocity`, `dragK` | 880 / 0.00108 |
+| 탄도 적분 주기 / 아군 오사 | `ballistics.integrationHz`, `friendlyFire` | 240Hz (영점 표와 같은 간격) / 끔 |
+| 총 거치 판정 | `player.rest` | 눈앞 0.35~1.15m, 총열 아래 0~0.38m |
 | 연사속도·탄창·재장전 | `weapons.ak545.rpm`, `magCapacity`, `reloadTime`, `reloadEmptyTime` | 650, 30, 2.4초, 3.3초 |
 | 반동 | `weapons.ak545.recoil` | 발당 0.95°, 영구 45% |
 | 조준 흔들림 | `player.sway` | 기본 3.4 mrad, 거치 ×0.22 |
-| 적 조준 분산 | `soldierTypes.rifleman.aimDispersionMrad` | 2.9 mrad |
+| 적 조준 분산 | `soldierTypes.rifleman.aimDispersionMrad` | 3.4 mrad |
 | 적 엄폐·관측 시간 | `ai.coverWait`, `ai.observeTime` | 2.5~6초, 1~3초 |
-| 적 발견률 | `ai.detectBaseRate` 등 | 0.4/초 (100m 기준) |
-| 이동 시도 간격 / 출발 조건 | `mission.advanceInterval`, `departMaxSuppression`, `departQuietTime` | 20~40초, 25, 3초 |
+| 적 발견률 | `ai.detectBaseRate` 등 | 0.22/초 (100m, 완전 노출 기준) |
+| 이동 시도 간격 / 출발 조건 | `mission.advanceInterval`, `quietBetweenAttempts`, `departMaxSuppression`, `departQuietTime` | 20~40초, 시도 사이 10~18초, 25, 3초 |
 | 임무 시간 / 진출 한도 | `mission.duration`, `maxAdvances` | 300초 / 3회 |
 | 탄착 효과 거리 보정 | `effects.distanceScaleRef`, `distanceScaleExp`, `distanceScaleMax` | 55m, 0.72, ×4.2 |
 | 시정 | `atmosphere.fogDensity` | 0.0029 (약 600m) |

@@ -1,0 +1,132 @@
+// 로딩·브리핑·일시정지·결과 화면
+import { CONFIG } from '../config.js';
+
+const KEYS = [
+  ['W A S D', '이동'],
+  ['Shift', '달리기 (스태미나)'],
+  ['C', '앉기 / 서기'],
+  ['Z', '엎드리기 / 서기'],
+  ['Q / E', '몸 기울이기 (누르는 동안)'],
+  ['좌클릭', '사격'],
+  ['우클릭', '가늠자 조준 (누르는 동안)'],
+  ['R', '재장전'],
+  ['B', '단발 / 연발 전환'],
+  ['마우스 휠', '가늠자 거리 100~600m'],
+  ['T', '잔탄 확인'],
+  ['F3', '디버그 표시'],
+  ['Esc', '일시정지'],
+];
+
+function keysHtml() {
+  return `<div class="keys">${KEYS.map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('')}</div>`;
+}
+
+export class Screens {
+  constructor(game) {
+    this.game = game;
+    const $ = (id) => document.getElementById(id);
+    this.loading = $('screen-loading');
+    this.loadingText = $('loading-text');
+    this.loadingFill = $('loading-fill');
+    this.briefing = $('screen-briefing');
+    this.pause = $('screen-pause');
+    this.result = $('screen-result');
+    this.buildBriefing();
+    this.buildPause();
+  }
+
+  setLoading(text, frac) {
+    this.loadingText.textContent = text;
+    this.loadingFill.style.width = `${Math.round(frac * 100)}%`;
+  }
+
+  hideAll() {
+    for (const s of [this.loading, this.briefing, this.pause, this.result]) s.classList.add('hidden');
+  }
+
+  buildBriefing() {
+    const M = CONFIG.mission;
+    const W = CONFIG.weapons.ak545;
+    this.briefing.innerHTML = `
+      <div class="panel">
+        <h1>이동 저지</h1>
+        <div class="sub">1단계 테스트 임무 · 늦가을, 동부 스텝의 폐허가 된 집단농장 · 시정 약 600m</div>
+        <div class="brief">적은 집단농장 축사와 그 앞 참호에 있다. 놈들이 개활지를 건너오지 못하게 ${Math.round(M.duration / 60)}분간 묶어둬라.</div>
+        <h2>상황</h2>
+        <ul>
+          <li>아군은 남쪽 관개수로(깊이 약 1.2m)에 있다. 수로를 따라 옆으로 이동하며 사격 위치를 바꿀 수 있다.</li>
+          <li>북쪽 약 200m: 지그재그 참호선과 엄체호, 그 뒤로 지붕이 무너진 벽돌 축사와 곡물 저장탑.</li>
+          <li><b>진출선</b>은 개활지 한가운데 <b>파괴된 장갑차와 트랙터 잔해</b>를 잇는 선(약 100m 전방)이다.
+            적이 그 엄폐물에 ${M.maxAdvances}번 도달하면 임무 실패다.</li>
+          <li>식별: 아군은 팔·다리에 <span style="color:#3fd0c0">청록색 테이프</span>, 적은 <span style="color:#f0904a">주황색 테이프</span>.</li>
+        </ul>
+        <h2>요령</h2>
+        <ul>
+          <li>적은 거의 보이지 않는다. <b>총구 화염, 총성(방향·시간차), 탄 파열음, 흙먼지</b>로 위치를 추정하라.</li>
+          <li>맞히지 못해도 된다. 적이 있는 곳 근처에 탄이 지나가거나 떨어지면 고개를 들지 못한다.
+            <b>2~3초마다 한두 발씩</b> 구역에 꾸준히 넣어 제압을 유지하라. 적이 없는 곳에 쏜 탄은 낭비다.</li>
+          <li>적 사격이 갑자기 늘면 누군가 움직이려는 것이다. 그 순간을 노려라.</li>
+          <li>탄약은 30발 탄창 ${W.spareMags + 1}개뿐이다. 탄창 마지막 ${W.tracerLastRounds}발은 예광탄이다.</li>
+          <li>사살은 평가하지 않는다. 쓰러뜨려도 증원이 온다.</li>
+        </ul>
+        <h2>조작</h2>
+        ${keysHtml()}
+        <div style="text-align:center"><div class="btn" id="btn-start">작전 개시</div></div>
+        <div class="sub" style="text-align:center;margin-top:8px">클릭하면 마우스가 화면에 고정됩니다 (Esc 로 해제). 소리를 켜 두세요.</div>
+      </div>`;
+  }
+
+  buildPause() {
+    this.pause.innerHTML = `
+      <div class="panel" style="width:min(560px,92vw);text-align:center">
+        <h1>일시정지</h1>
+        <div class="sub">클릭하면 계속합니다</div>
+        <div style="text-align:left;margin-top:14px">${keysHtml()}</div>
+        <div class="btn" id="btn-resume">계속</div>
+        <div class="btn" id="btn-restart-pause" style="margin-left:10px;background:#4a4840">처음부터</div>
+      </div>`;
+  }
+
+  showBriefing(onStart) {
+    this.hideAll();
+    this.briefing.classList.remove('hidden');
+    document.getElementById('btn-start').onclick = onStart;
+  }
+
+  showPause(onResume, onRestart) {
+    this.pause.classList.remove('hidden');
+    document.getElementById('btn-restart-pause').onclick = (e) => {
+      e.stopPropagation();
+      onRestart();
+    };
+    // 화면 아무 곳이나 클릭하면 계속
+    this.pause.onclick = () => onResume();
+  }
+
+  hidePause() {
+    this.pause.classList.add('hidden');
+  }
+
+  showResult(r, onRestart) {
+    const pct = (v) => `${Math.round(v * 100)}%`;
+    const t = Math.round(r.time);
+    this.result.innerHTML = `
+      <div class="panel" style="width:min(620px,92vw)">
+        <div class="result-banner ${r.success ? 'ok' : 'fail'}">${r.success ? '임무 성공' : '임무 실패'}</div>
+        <div class="sub">${r.reason} · 경과 ${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</div>
+        <table class="result-table">
+          <tr><td>평균 제압 유지율 <span class="sub">(살아 있는 적이 '압박' 이상이었던 시간 비율)</span></td><td>${pct(r.uptime)}</td></tr>
+          <tr><td>적 이동 시도 / 저지</td><td>${r.attempts}회 / ${r.blocked}회</td></tr>
+          <tr><td class="sub">&nbsp;&nbsp;저지 내역: 출발 포기 ${r.deterred} · 이동 중 고착 ${r.stopped}</td><td></td></tr>
+          <tr><td>적 진출</td><td>${r.advances} / ${CONFIG.mission.maxAdvances}</td></tr>
+          <tr><td>사용 탄약</td><td>${r.shotsFired}발 (탄창 ${r.magsUsed.toFixed(1)}개 분량)</td></tr>
+          <tr><td>근접탄 비율 <span class="sub">(적 3m 이내를 지나거나 떨어진 탄)</span></td><td>${pct(r.nearRatio)}</td></tr>
+          <tr><td>피격 횟수</td><td>${r.hitsTaken}</td></tr>
+        </table>
+        <div class="result-kills">참고: 사살 ${r.kills}</div>
+        <div style="text-align:center"><div class="btn" id="btn-restart">다시 하기</div></div>
+      </div>`;
+    this.result.classList.remove('hidden');
+    document.getElementById('btn-restart').onclick = onRestart;
+  }
+}

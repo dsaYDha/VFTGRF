@@ -1,84 +1,223 @@
-// 임시: 월드 렌더 확인용 최소 루프 (이후 전체 게임 루프로 교체)
+// =============================================================================
+// Game — 초기화(로딩 단계), 상태(브리핑 → 플레이 ⇄ 일시정지 → 결과), 메인 루프.
+// 시스템 생성 순서와 갱신 순서를 한 곳에서 관리한다.
+// =============================================================================
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { EventBus } from './EventBus.js';
+import { EV } from './events.js';
+import { Input } from './Input.js';
 import { World } from '../world/World.js';
 import { Atmosphere } from '../world/Atmosphere.js';
 import { setMaxAnisotropy } from '../world/textures.js';
+import { Navigation } from '../ai/Navigation.js';
+import { AIDirector } from '../ai/AIDirector.js';
+import { Ballistics } from '../weapons/Ballistics.js';
+import { ViewModel } from '../weapons/ViewModel.js';
+import { SuppressionSystem } from '../suppression/SuppressionSystem.js';
+import { Player } from '../player/Player.js';
+import { Effects } from '../effects/Effects.js';
+import { AudioSystem } from '../audio/AudioSystem.js';
+import { Mission } from '../mission/Mission.js';
+import { HUD } from '../ui/HUD.js';
+import { Screens } from '../ui/Screens.js';
+import { ScreenFX } from '../ui/ScreenFX.js';
+import { DebugOverlay } from '../ui/DebugOverlay.js';
 
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+const _fwd = new THREE.Vector3();
 
 export class Game {
   constructor(container) {
     this.container = container;
     this.events = new EventBus();
+    this.state = 'loading';
+    this.time = 0;
+    this.units = []; // 탄도·제압 판정 대상 (플레이어 몸 + 적)
+    this.ready = false;
   }
 
   async init() {
+    this.screens = new Screens(this);
+    const step = async (text, frac) => {
+      this.screens.setLoading(text, frac);
+      await nextFrame();
+    };
+    await step('렌더러 준비 중…', 0.02);
     const R = CONFIG.render;
     this.renderer = new THREE.WebGLRenderer({ antialias: R.antialias, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, R.pixelRatioMax));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = R.shadows;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.toneMappingExposure = R.exposure;
+    this.renderer.autoClear = false;
+    this.renderer.info.autoReset = false;
     this.container.appendChild(this.renderer.domElement);
     setMaxAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(R.fovDeg, window.innerWidth / window.innerHeight, R.near, R.far);
     this.camera.rotation.order = 'YXZ';
-    this.camera.position.set(-18, 2, 112);
     this.atmosphere = new Atmosphere(this.scene);
 
-    const t0 = performance.now();
+    await step('지형 생성 중… (수로·참호·포탄 구덩이)', 0.1);
     this.world = new World(this.scene);
     this.world.generateTerrain();
-    const t1 = performance.now();
-    await nextFrame();
+    await step('구조물 배치 중… (축사·저장탑·잔해)', 0.35);
     this.world.buildStructures();
-    const t2 = performance.now();
+    await step('적 진지 준비 중…', 0.5);
+    this.nav = new Navigation(this.world);
+    await step('지형 메시·식생 생성 중…', 0.6);
     this.world.finalize();
-    const t3 = performance.now();
-    this.timings = { terrain: t1 - t0, structures: t2 - t1, finalize: t3 - t2 };
-    console.log('world timings', this.timings, 'terrain tris', this.world.terrain.triangleCount);
-    document.getElementById('screen-loading').classList.add('hidden');
+    await step('시스템 준비 중…', 0.8);
+
+    this.input = new Input(this.renderer.domElement);
+    this.ballistics = new Ballistics(this);
+    this.suppression = new SuppressionSystem(this);
+    this.player = new Player(this);
+    this.units.push(this.player.body);
+    this.viewModel = new ViewModel(this);
+    this.effects = new Effects(this);
+    this.audio = new AudioSystem(this);
+    this.director = new AIDirector(this, this.nav);
+    this.mission = new Mission(this);
+    this.hud = new HUD(this);
+    this.screenFx = new ScreenFX(this);
+    this.debug = new DebugOverlay(this);
+
+    this.events.on(EV.MISSION_END, (r) => this.onMissionEnd(r));
+    this.input.onLockChange = (locked, failed) => this.onLockChange(locked, failed);
+    window.addEventListener('resize', () => this.onResize());
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && this.state === 'playing') this.pause();
+    });
+
+    this.director.reset();
+    this.player.reset();
+    await step('준비 완료', 1);
+    // 셰이더 미리 컴파일 (첫 프레임 끊김 방지)
+    this.renderer.compile(this.scene, this.camera);
+    this.state = 'briefing';
+    this.screens.showBriefing(() => this.startMission());
     this.ready = true;
-    this.clock = new THREE.Clock();
-    this.renderer.setAnimationLoop(() => this.frame());
+    this.clock = new THREE.Timer();
+    this.renderer.setAnimationLoop((t) => this.frame(t));
   }
 
-  debugCam(x, y, z, yawDeg, pitchDeg) {
-    this.camera.position.set(x, y, z);
-    this.camera.rotation.set((pitchDeg * Math.PI) / 180, (yawDeg * Math.PI) / 180, 0);
+  // ------------------------------------------------------------------ 상태 전환
+  async startMission() {
+    this.screens.hideAll();
+    this.restartWorldState();
+    this.mission.start();
+    this.state = 'playing';
+    this.hud.show(true);
+    this.input.requestLock();
+    try {
+      await this.audio.init();
+    } catch (e) {
+      console.warn('audio init failed', e);
+    }
   }
 
-  frame() {
-    const dt = Math.min(0.05, this.clock.getDelta());
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-    this.atmosphere.update(dt, this.camera.position, fwd);
+  restartWorldState() {
+    this.time = 0;
+    this.ballistics.reset();
+    this.effects.reset();
+    this.director.reset();
+    this.player.reset();
+    this.screenFx.reset();
+    this.debug.reset();
+  }
+
+  pause() {
+    if (this.state !== 'playing') return;
+    this.state = 'paused';
+    this.audio.suspend();
+    this.screens.showPause(
+      () => this.resume(),
+      () => {
+        this.screens.hidePause();
+        this.startMission();
+      },
+    );
+  }
+
+  resume() {
+    if (this.state !== 'paused') return;
+    this.screens.hidePause();
+    this.state = 'playing';
+    this.audio.resume();
+    this.input.requestLock();
+  }
+
+  onLockChange(locked, failed) {
+    if (!locked && this.state === 'playing' && !failed) this.pause();
+  }
+
+  onMissionEnd(r) {
+    this.state = 'result';
+    this.hud.show(false);
+    this.input.releaseLock();
+    setTimeout(() => {
+      this.screens.showResult(r, () => {
+        this.screens.hideAll();
+        this.startMission();
+      });
+    }, 400);
+  }
+
+  onResize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    this.renderer.setSize(w, h);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.viewModel.setAspect(w / h);
+  }
+
+  // ------------------------------------------------------------------ 루프
+  // 게임 논리 한 단계 (렌더 없이도 돌 수 있다 — 자동 테스트에서 사용)
+  stepSim(dt) {
+    this.time += dt;
+    this.player.update(dt, this.input);
+    this.director.update(dt);
+    this.ballistics.update(dt);
+    this.suppression.update(dt);
+    this.mission.update(dt);
+  }
+
+  frame(t) {
+    this.clock.update(t);
+    const rawDt = this.clock.getDelta();
+    const dt = Math.min(0.05, rawDt);
+    const input = this.input;
+    if (input.wasPressed('F3')) this.debug.toggle();
+
+    if (this.state === 'playing') {
+      this.stepSim(dt);
+    } else if (this.state === 'briefing') {
+      // 브리핑 뒤 배경: 천천히 둘러보는 시점
+      this.player.yaw = Math.sin(performance.now() * 0.00005) * 0.4;
+      this.player.updateCamera(dt);
+    }
+    _fwd.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    this.atmosphere.update(dt, this.camera.position, _fwd);
     this.world.update(dt);
-    this.renderer.render(this.scene, this.camera);
+    if (this.state === 'playing' || this.state === 'result') this.effects.update(dt);
+    this.viewModel.update(dt);
+    this.audio.update(dt);
+    if (this.state === 'playing') {
+      this.hud.update(dt);
+      this.screenFx.update(dt);
+    }
+    this.debug.update(rawDt);
+    input.endFrame();
+
+    const r = this.renderer;
+    r.info.reset();
+    r.clear();
+    r.render(this.scene, this.camera);
+    if (this.state !== 'result') this.viewModel.render(r);
   }
 }
-
-// ---- 임시 자세 확인용
-import { SoldierModel } from '../units/SoldierModel.js';
-import { POSES } from '../units/poses.js';
-Game.prototype.poseGallery = function () {
-  const names = Object.keys(POSES);
-  const t = this.world.terrain;
-  const cx = 0;
-  const cz = 60;
-  this.galleryModels = [];
-  names.forEach((n, i) => {
-    const m = new SoldierModel({ tapeColor: CONFIG.factions.enemy.tapeColor, colors: CONFIG.soldierTypes.rifleman.colors });
-    const x = cx + (i % 6) * 2.2 - 5.5;
-    const z = cz + Math.floor(i / 6) * 3;
-    m.root.position.set(x, t.heightAt(x, z), z);
-    m.snapPose(n);
-    m.update(0);
-    this.scene.add(m.root);
-    this.galleryModels.push(m);
-  });
-  return names;
-};

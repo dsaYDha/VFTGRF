@@ -129,7 +129,7 @@ export class ParticleSystem {
     this.a0[i] = o.alpha ?? 1;
     this.drag[i] = o.drag ?? 0;
     this.grav[i] = o.gravity ?? 0;
-    this.fadeIn[i] = o.fadeIn ?? 0.08;
+    this.fadeIn[i] = o.fadeIn ?? 0.03;
   }
 
   update(dt, wind) {
@@ -183,7 +183,7 @@ export class ParticleSystem {
       SR[i * 2] = this.s0[i] + (this.s1[i] - this.s0[i]) * g;
       SR[i * 2 + 1] = this.rot[i];
       const fi = this.fadeIn[i] > 0 ? Math.min(1, t / this.fadeIn[i]) : 1;
-      const a = this.a0[i] * fi * (1 - t) * (1 - t * 0.3);
+      const a = this.a0[i] * fi * Math.pow(1 - t, 0.75);
       C[i * 4] = this.col[i3];
       C[i * 4 + 1] = this.col[i3 + 1];
       C[i * 4 + 2] = this.col[i3 + 2];

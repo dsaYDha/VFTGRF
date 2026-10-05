@@ -338,6 +338,8 @@ body {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: #f2ecd9;
+  white-space: nowrap;
+  padding-left: 14px;
 }
 .result-kills {
   margin-top: 14px;

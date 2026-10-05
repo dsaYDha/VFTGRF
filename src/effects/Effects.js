@@ -130,9 +130,9 @@ export class Effects {
           vz: (fz / fl) * rand(1.5, 3.5) + rand(-0.8, 0.8),
           life: rand(1.4, 2.4),
           size0: 0.35 * s,
-          size1: rand(1.3, 2.0) * s,
-          color: 0x6e5e4c,
-          alpha: 0.5,
+          size1: rand(1.4, 2.2) * s,
+          color: 0x7c6b57,
+          alpha: 0.7,
           drag: 1.8,
         });
       }
@@ -206,25 +206,25 @@ export class Effects {
   }
 
   dirt(imp, s, wet) {
-    // 흙먼지 기둥 + 흙덩이
-    const brown = wet ? 0x3e342b : 0x5e4f3f;
-    this.spray(imp, wet ? 3 : 5, [2.5, 6.5], 2.2, {
+    // 흙먼지 기둥 (멀리서도 보이도록 밝은 흙빛 + 어두운 흙 줄기) + 흙덩이
+    const brown = wet ? 0x5a4c3e : 0x7c6b57;
+    this.spray(imp, wet ? 4 : 6, [2.5, 6.5], 2.2, {
       sys: this.dust,
-      life: [1.4, 2.6],
-      size: [0.22 * s, 1.15 * s],
+      life: [1.6, 3.0],
+      size: [0.3 * s, 1.45 * s],
       color: brown,
-      alpha: wet ? 0.65 : 0.85,
+      alpha: wet ? 0.8 : 0.95,
       drag: 2.6,
       gravity: 0.8,
       up: 1.5,
     });
-    this.spray(imp, 2, [7, 12], 1.2, {
+    this.spray(imp, 3, [7, 13], 1.2, {
       sys: this.dust,
-      life: [0.8, 1.3],
-      size: [0.1 * s, 0.5 * s],
-      color: wet ? 0x2e2620 : 0x4a3e32,
-      alpha: 0.9,
-      drag: 3.5,
+      life: [0.9, 1.5],
+      size: [0.14 * s, 0.6 * s],
+      color: wet ? 0x2e2620 : 0x43382d,
+      alpha: 1,
+      drag: 3.2,
       gravity: 4,
       up: 3,
     });
@@ -246,12 +246,12 @@ export class Effects {
   }
 
   mineral(imp, s, dustColor, chipColor) {
-    this.spray(imp, 5, [2, 5], 2.5, {
+    this.spray(imp, 6, [2, 5], 2.5, {
       sys: this.dust,
-      life: [1.2, 2.2],
-      size: [0.18 * s, 0.95 * s],
+      life: [1.4, 2.6],
+      size: [0.24 * s, 1.25 * s],
       color: dustColor,
-      alpha: 0.8,
+      alpha: 0.95,
       drag: 2.8,
       gravity: 0.4,
     });
@@ -300,7 +300,7 @@ export class Effects {
   }
 
   sand(imp, s) {
-    this.spray(imp, 4, [1.5, 4.5], 2, { sys: this.dust, life: [1.2, 2.0], size: [0.18 * s, 0.9 * s], color: 0x8e8068, alpha: 0.75, drag: 2.8, gravity: 0.6, up: 0.8 });
+    this.spray(imp, 5, [1.5, 4.5], 2, { sys: this.dust, life: [1.4, 2.4], size: [0.22 * s, 1.15 * s], color: 0x9a8b70, alpha: 0.9, drag: 2.8, gravity: 0.6, up: 0.8 });
     this.chips(imp, 3, s, 0x7a6e58, 0.03);
   }
 
@@ -357,7 +357,7 @@ export class Effects {
           size0: 30 * c.size,
           size1: rand(170, 240) * c.size,
           color: 0x2e2c2a,
-          alpha: 0.42,
+          alpha: 0.3,
           drag: 0.02,
           fadeIn: 0.05,
           rotVel: rand(-0.02, 0.02),

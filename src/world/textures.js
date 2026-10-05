@@ -499,10 +499,12 @@ export function smokeParticleTexture() {
         const dy = v - 0.5;
         const r = Math.sqrt(dx * dx + dy * dy) * 2;
         const n = f(u, v, 0.55);
-        let a = Math.max(0, 1 - r);
-        a = a * a * (0.55 + n * 0.9);
+        let a = Math.max(0, 1 - r * r);
+        a = Math.pow(a, 1.6) * (0.45 + n * 1.0);
+        // 가장자리 울퉁불퉁
+        if (r > 0.6) a *= Math.max(0, 1 - (r - 0.6) * (1.6 - n));
         col[0] = col[1] = col[2] = 255;
-        col[3] = clamp255(a * 255);
+        col[3] = clamp255(Math.min(1, a) * 255);
       },
       { repeat: false },
     );

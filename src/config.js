@@ -240,7 +240,7 @@ export const CONFIG = {
   // ---------------------------------------------------------------- 적 AI
   ai: {
     maxEnemies: 6,
-    coverWait: [3.0, 7.5],
+    coverWait: [2.5, 6.0],
     coverWaitPressuredMul: 1.6,
     coverWaitCoveringFire: [0.6, 1.6],
     observeTime: [1.0, 3.0],
@@ -266,7 +266,7 @@ export const CONFIG = {
     turnRate: 3.5,
     // 탐지 (적 → 플레이어)
     perceptionInterval: 0.2,
-    detectBaseRate: 0.65, // 100m, 완전 노출·정지 상태일 때 초당 발견률
+    detectBaseRate: 0.4, // 100m, 완전 노출·정지 상태일 때 초당 발견률
     detectRangeExp: 1.5,
     detectPostureMul: { stand: 1.0, crouch: 0.6, prone: 0.35 },
     detectMotionMul: { still: 1.0, walk: 2.0, sprint: 3.5 },
@@ -279,10 +279,10 @@ export const CONFIG = {
     estimateGrowthPerSec: 0.35, // 시간이 지나면 추정 오차가 커짐
     estimateForgetTime: 45,
     priorError: 22, // 처음엔 수로 어딘가에 있다고만 안다
-    fireAtPriorChance: 0.35,
+    fireAtPriorChance: 0.55,
     fireAtSoundChance: 0.8,
-    shareDelay: [1.5, 3.0],
-    shareErrorMul: 1.8,
+    shareDelay: [2.0, 4.0],
+    shareErrorMul: 2.5,
     aimPointSpreadMul: 0.55, // 점사마다 추정 위치 주변 어디를 노릴지
     trackingError: 0.3,
     burstClimbMul: 0.55, // 점사 n발째 분산 증가

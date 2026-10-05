@@ -10,7 +10,7 @@ import { camoAtlas, flashTexture } from '../world/textures.js';
 import { damp } from '../core/mathUtils.js';
 
 const POSE = {
-  hip: { p: [0.13, -0.1, -0.02], r: [0.025, 0.05, 0.06] },
+  hip: { p: [0.145, -0.122, -0.02], r: [0.025, 0.05, 0.06] },
   ads: { p: [0, 0, 0], r: [0, 0, 0] },
   sprint: { p: [0.16, -0.17, 0.02], r: [-0.42, 0.7, 0.32] },
   reload: { p: [0.07, -0.12, 0.02], r: [0.22, 0.32, 0.55] },
@@ -24,7 +24,7 @@ export class ViewModel {
     const R = CONFIG.render;
     this.camera = new THREE.PerspectiveCamera(R.fovDeg, window.innerWidth / window.innerHeight, 0.01, 10);
     const A = CONFIG.atmosphere;
-    this.scene.add(new THREE.HemisphereLight(A.hemiSky, A.hemiGround, A.hemiIntensity * 0.9));
+    this.scene.add(new THREE.HemisphereLight(A.hemiSky, A.hemiGround, A.hemiIntensity * 1.15));
     const dl = new THREE.DirectionalLight(A.sunColor, A.sunIntensity * 0.9);
     dl.position.set(0.4, 1, 0.3);
     this.scene.add(dl);
@@ -86,8 +86,8 @@ export class ViewModel {
 
   buildRifle() {
     const g = this.rifle;
-    const metal = this.mat(0x2a2a29, { shininess: 45, specular: 0x3a3a3a });
-    const darkMetal = this.mat(0x1b1b1b, { shininess: 30 });
+    const metal = this.mat(0x3d3d3b, { shininess: 50, specular: 0x4a4a4a });
+    const darkMetal = this.mat(0x232323, { shininess: 30 });
     const polymer = this.mat(0x3a2622, { shininess: 12 });
     const B = (w, h, d) => new THREE.BoxGeometry(w, h, d);
     const Cy = (r, l, s = 10) => new THREE.CylinderGeometry(r, r, l, s).rotateX(Math.PI / 2);
@@ -95,28 +95,28 @@ export class ViewModel {
     // 개머리판 (대부분 화면 밖)
     this.part(g, B(0.045, 0.07, 0.32), polymer, 0, -0.1, 0.2, 0.12, 0, 0);
     // 기관부 + 덮개
-    this.part(g, B(0.048, 0.07, 0.31), metal, 0, -0.078, -0.115);
-    this.part(g, new THREE.CylinderGeometry(0.024, 0.024, 0.29, 10, 1, false, -Math.PI / 2, Math.PI).rotateX(Math.PI / 2), metal, 0, -0.045, -0.11);
+    this.part(g, B(0.048, 0.07, 0.31), metal, 0, -0.095, -0.115);
+    this.part(g, new THREE.CylinderGeometry(0.024, 0.024, 0.29, 10, 1, false, -Math.PI / 2, Math.PI).rotateX(Math.PI / 2), metal, 0, -0.062, -0.11);
     // 손잡이·방아쇠울
-    this.part(g, B(0.032, 0.1, 0.04), polymer, 0, -0.15, 0.02, -0.32, 0, 0);
-    this.part(g, B(0.006, 0.006, 0.07), darkMetal, 0, -0.125, -0.04);
+    this.part(g, B(0.032, 0.1, 0.04), polymer, 0, -0.165, 0.02, -0.32, 0, 0);
+    this.part(g, B(0.006, 0.006, 0.07), darkMetal, 0, -0.14, -0.04);
     // 조정간 (오른쪽)
-    this.selector = this.part(g, B(0.004, 0.012, 0.07), metal, 0.026, -0.065, -0.07);
+    this.selector = this.part(g, B(0.004, 0.012, 0.07), metal, 0.026, -0.08, -0.07);
     // 장전손잡이 (노리쇠)
     this.bolt = new THREE.Group();
     g.add(this.bolt);
-    this.part(this.bolt, Cy(0.006, 0.03), metal, 0.036, -0.06, -0.2, 0, 0, Math.PI / 2);
-    this.part(this.bolt, B(0.012, 0.01, 0.06), metal, 0.028, -0.06, -0.19);
-    // 가늠자 (뒤): 받침 + 판 + U홈 (홈 윗면이 y=0)
-    this.part(g, B(0.034, 0.018, 0.06), metal, 0, -0.03, -0.28);
-    this.part(g, B(0.026, 0.006, 0.05), metal, 0, -0.017, -0.29);
+    this.part(this.bolt, Cy(0.006, 0.03), metal, 0.036, -0.075, -0.2, 0, 0, Math.PI / 2);
+    this.part(this.bolt, B(0.012, 0.01, 0.06), metal, 0.028, -0.075, -0.19);
+    // 가늠자 (뒤): 받침 블록 + 판 + U홈. 홈 윗면이 조준선(y=0)
+    this.part(g, B(0.03, 0.034, 0.05), metal, 0, -0.03, -0.285);
+    this.part(g, B(0.024, 0.003, 0.05), metal, 0, -0.0085, -0.29);
     const notchW = 0.0036;
-    for (const s of [-1, 1]) this.part(g, B(0.009, 0.014, 0.004), darkMetal, s * (notchW / 2 + 0.0045), -0.007, -0.302);
-    this.part(g, B(0.0036, 0.004, 0.004), darkMetal, 0, -0.012, -0.302);
-    this.sightSlider = this.part(g, B(0.03, 0.005, 0.012), metal, 0, -0.012, -0.27);
+    for (const sgn of [-1, 1]) this.part(g, B(0.0092, 0.007, 0.002), darkMetal, sgn * (notchW / 2 + 0.0046), -0.0035, -0.305);
+    this.part(g, B(notchW, 0.0035, 0.002), darkMetal, 0, -0.00525, -0.305);
+    this.sightSlider = this.part(g, B(0.028, 0.004, 0.01), metal, 0, -0.0125, -0.27);
     // 총몸 덮개 (위·아래)
-    this.part(g, B(0.04, 0.026, 0.19), polymer, 0, -0.035, -0.4);
-    this.part(g, B(0.056, 0.062, 0.2), polymer, 0, -0.088, -0.4);
+    this.part(g, B(0.04, 0.026, 0.19), polymer, 0, -0.045, -0.4);
+    this.part(g, B(0.056, 0.062, 0.2), polymer, 0, -0.095, -0.4);
     // 총열·가스블록·가늠쇠 블록
     this.part(g, Cy(0.0095, 0.2), metal, 0, boreY, -0.6);
     this.part(g, B(0.03, 0.035, 0.03), metal, 0, -0.045, -0.515);
@@ -129,7 +129,7 @@ export class ViewModel {
     // 탄창 (곡선: 3단)
     this.mag = new THREE.Group();
     g.add(this.mag);
-    this.magHome = new THREE.Vector3(0, -0.11, -0.2);
+    this.magHome = new THREE.Vector3(0, -0.125, -0.2);
     this.mag.position.copy(this.magHome);
     const magMat = this.mat(0x4a2e26, { shininess: 10 });
     this.part(this.mag, B(0.026, 0.07, 0.07), magMat, 0, -0.03, 0, 0.15, 0, 0);
@@ -160,16 +160,16 @@ export class ViewModel {
     const tape = new THREE.MeshLambertMaterial({ color: CONFIG.factions.friendly.tapeColor });
     const B = (w, h, d) => new THREE.BoxGeometry(w, h, d);
     // 오른손: 손잡이
-    this.part(this.rifle, B(0.045, 0.08, 0.06), glove, 0.014, -0.165, 0.035, -0.32, 0, 0);
-    const rArm = this.part(this.rifle, B(0.075, 0.075, 0.32), camo, 0.07, -0.25, 0.17, -0.55, 0.32, 0);
+    this.part(this.rifle, B(0.045, 0.08, 0.06), glove, 0.014, -0.18, 0.035, -0.32, 0, 0);
+    const rArm = this.part(this.rifle, B(0.075, 0.075, 0.32), camo, 0.07, -0.265, 0.17, -0.55, 0.32, 0);
     rArm.renderOrder = 1;
     // 왼손: 덮개 아래
     this.leftHand = new THREE.Group();
     this.rifle.add(this.leftHand);
     this.leftHomeP = new THREE.Vector3(0, 0, 0);
-    this.part(this.leftHand, B(0.062, 0.045, 0.08), glove, -0.005, -0.122, -0.42);
-    this.part(this.leftHand, B(0.075, 0.075, 0.34), camo, -0.085, -0.2, -0.29, -0.45, -0.45, 0.1);
-    this.part(this.leftHand, B(0.082, 0.04, 0.082), tape, -0.13, -0.26, -0.18, -0.45, -0.45, 0.1);
+    this.part(this.leftHand, B(0.062, 0.045, 0.08), glove, -0.005, -0.13, -0.42);
+    this.part(this.leftHand, B(0.075, 0.075, 0.34), camo, -0.085, -0.21, -0.29, -0.45, -0.45, 0.1);
+    this.part(this.leftHand, B(0.082, 0.04, 0.082), tape, -0.13, -0.27, -0.18, -0.45, -0.45, 0.1);
   }
 
   setAspect(a) {

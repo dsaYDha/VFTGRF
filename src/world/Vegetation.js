@@ -218,21 +218,24 @@ export class Vegetation {
       const z = rng.range(-290, 290);
       const s = this.terrain.surfaceAt(x, z);
       if (s !== 1) continue;
-      // 수로 바로 앞(북쪽 15m)은 낮은 풀만: 수로에서 고개를 내밀면 시야가 트여야 한다
+      // 수로 바로 앞(북쪽 18m)은 아주 낮은 풀만: 수로에서 고개를 내밀면 시야가 트여야 한다
       const dz = this.terrain.canalZ(x) - z;
-      if (dz > 0 && dz < 15) {
-        if (rng.next() < 0.5) continue;
-        put(x, z, rng.range(0.12, 0.26));
+      if (dz > -1 && dz < 18) {
+        if (dz < 6 || rng.next() < 0.7) continue;
+        put(x, z, rng.range(0.07, 0.13));
         continue;
       }
-      put(x, z, rng.range(0.35, 0.8));
+      // 참호 흉벽 주변은 낮은 풀 (흉벽 위 머리·총구 화염이 가끔은 보이게)
+      let nearTrench = false;
+      for (const line of MAP.trench.lines) if (polylineDistance(line, x, z) < 7) nearTrench = true;
+      put(x, z, nearTrench ? rng.range(0.12, 0.25) : rng.range(0.3, 0.7));
     }
     // 수로 둑: 남쪽은 촘촘하고 키 큰 풀, 북쪽 둔덕은 드문드문 낮은 풀
     for (let x = -280; x < 280; x += 0.55) {
-      for (const off of [-4.5, -3.2, 2.6, 3.6, 4.8]) {
-        if (rng.next() < (off < 0 ? 0.8 : 0.2)) continue;
+      for (const off of [2.6, 3.6, 4.8]) {
+        if (rng.next() < 0.2) continue;
         const z = this.terrain.canalZ(x) + off + rng.range(-0.6, 0.6);
-        put(x + rng.range(-0.3, 0.3), z, off < 0 ? rng.range(0.12, 0.24) : rng.range(0.45, 0.95));
+        put(x + rng.range(-0.3, 0.3), z, rng.range(0.45, 0.95));
       }
     }
     // 도로변
@@ -254,10 +257,11 @@ export class Vegetation {
         }
       }
     }
-    // 밭 가장자리 띠
+    // 밭 북쪽 가장자리 띠 (남쪽 가장자리는 수로에서의 시야를 가리므로 두지 않는다)
     for (const f of MAP.fields.plowed) {
       for (let x = f.x0; x < f.x1; x += 0.8) {
-        for (const z of [f.z0 - 1.5, f.z1 + 1.5]) put(x + rng.range(-0.3, 0.3), z + rng.range(-1, 1), rng.range(0.4, 0.8));
+        if (rng.next() < 0.4) continue;
+        put(x + rng.range(-0.3, 0.3), f.z0 - 1.5 + rng.range(-1, 1), rng.range(0.3, 0.6));
       }
     }
     for (const list of cells.values()) {

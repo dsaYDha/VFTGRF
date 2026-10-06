@@ -179,10 +179,12 @@ export const MAP = {
     commDepth: 1.3,
     // 흉벽 모래주머니 구간 (참호선 lines[line] 의 x 범위, 흉벽 마루 위에 2줄 3단, loopholes = 사격 구멍 수).
     // 참호 사격 위치(AI_MAP T1·T2 fps x)에서 5m 이상, 뒤쪽 건물·잔해 사격 위치(B1·B2·R1)의 엎드려쏴 사선이 참호선을 지나는 곳은 피한다.
+    // 색: 기본은 흙물 든 짙은 자루 (CONFIG.enemyPosition.sandbags.runColors — 뒤가 하늘·먼 들판이라 어두운 토막으로 읽힘),
+    // fresh = 새 자루 (밝은 황회색 colors — 수로에서 보면 뒤가 정비 창고 벽 아래 짙은 띠라 밝아야 보임)
     sandbagRuns: [
       { line: 0, x0: -120, x1: -114, loopholes: 1 },
       { line: 0, x0: -93, x1: -80, loopholes: 2 },
-      { line: 1, x0: 69, x1: 81, loopholes: 1 },
+      { line: 1, x0: 69, x1: 81, loopholes: 1, fresh: true },
       { line: 1, x0: 91.5, x1: 101.5, loopholes: 1 }, // 높은 위장망(camoNets[0]) 아래
     ],
   },

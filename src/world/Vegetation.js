@@ -28,26 +28,34 @@ const vegUniforms = {
 };
 
 // 말라 죽은 해바라기 모형 (단위 m, +x = 꽃판이 숙인 쪽). 인스턴스 세로 배수 = 실제 높이 / height.
-//  stem: [x, y, 반지름] (세모 관), neckStart 번째 점부터 목 (꽃판이 떨어진 줄기는 목·꽃판을 그 앞 점으로 접는다)
-//  head: 꽃판 중심·반지름·얼굴이 수평 아래로 숙인 각·두께, leaves: 붙은 높이·방위(도)·길이
+//  stem: [x, y, 반지름, z] (세모 관), neckStart 번째 점부터 목 (꽃판이 떨어진 줄기는 목·꽃판을 그 앞 점으로 접는다).
+//        목은 지팡이 손잡이처럼 위로 올라 꺾인 뒤 아래로 내려와 꽃판 뒤통수(등 한가운데)에 붙는다. 목은 옆(z)으로도 조금 비틀려
+//        꽃판이 줄기 축에서 비켜 매달린다 (앞에서 봐도 줄기 끝에 우산처럼 얹힌 꼴이 아니라 고리에 매달린 꼴)
+//  head: 꽃판 중심·반지름·얼굴이 수평 아래로 숙인 각(68° = 얼굴이 땅을 향하고 앞에서 보면 아랫단에 어두운 얼굴이 보임)·
+//        등 껍질 두께(둥근 컵 깊이)·가장자리가 얼굴 쪽으로 말린 양(curl)·등 어깨 고리의 반지름 배수(bulge)·깊이 배수(shoulder)
+//  leaves: 붙은 높이·방위(도)·길이 (잎자루에서 바깥으로 휘어 나왔다가 끝이 줄기 쪽으로 오그라들며 늘어진다), leafWidth: 잎 폭
 export const SUNFLOWER_SHAPE = {
   height: 1.7,
   stem: [
     [0, 0, 0.0135],
-    [0.03, 1.55, 0.0092],
-    [0.06, 1.675, 0.008],
-    [0.105, 1.705, 0.0072],
-    [0.142, 1.665, 0.0068],
+    [0.028, 1.46, 0.0095],
+    [0.06, 1.645, 0.0086, 0.004],
+    [0.115, 1.72, 0.0078, 0.03],
+    [0.163, 1.695, 0.0072, 0.058],
+    [0.174, 1.572, 0.0068, 0.068],
   ],
   neckStart: 2,
-  // 꽃판: 목 끝에 뒤통수가 붙어 얼굴이 거의 땅을 향해 숙인다 (thick = 뒤쪽 둥근 등의 깊이)
-  head: { x: 0.19, y: 1.615, radius: 0.115, tiltDeg: 45, thick: 0.07 },
+  // 꽃판: 꺾인 목 아래·바깥에 매달려 얼굴이 거의 땅을 향한다 (옆에서 보면 뒤집혀 매달린 두꺼운 컵)
+  head: { x: 0.2, y: 1.5, z: 0.068, radius: 0.115, tiltDeg: 68, thick: 0.075, curl: 0.025, bulge: 0.78, shoulder: 0.5 },
   leaves: [
-    { y: 0.62, az: 35, len: 0.26 },
-    { y: 0.9, az: 165, len: 0.24 },
-    { y: 1.16, az: 280, len: 0.22 },
+    { y: 0.58, az: 35, len: 0.41 },
+    { y: 0.9, az: 165, len: 0.37 },
+    { y: 1.18, az: 280, len: 0.33 },
   ],
-  leafWidth: 0.05,
+  leafWidth: 0.08,
+  // 잎 가운데 줄 = 2차 곡선 (잎자루 끝 base → 바깥으로 휜 배 bow → 줄기 쪽으로 오그라든 끝 tip): [줄기에서 바깥 거리 m, 붙은 높이 기준 y].
+  // bow·tip 의 y 는 잎 길이 배수. 근거리 3D 와 빌보드 그림(textures.sunflowerCardCanvas)이 같은 점을 쓴다
+  leafCurve: { base: [0.035, 0.012], bow: [0.17, -0.13], tip: [0.045, -1] },
 };
 const CARD = { w: 0.925, h: 1.85, bottom: 0.05, variants: 4 };
 
@@ -237,6 +245,20 @@ function patchCards(mat, { amp, lod, key }) {
   mat.customProgramCacheKey = () => key;
 }
 
+// 갈대 카드: 아틀라스 칸 = 인스턴스 속성 aTile (무더기 / 가장자리 / 이삭 줄기), 바람
+const REED_TILES = 3;
+function patchReeds(mat, amp) {
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, { uTime: windUniforms.uTime, uWind: vegUniforms.uWind });
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>\n${GLSL_VERT}\nattribute float aTile;`)
+      .replace('#include <uv_vertex>', `#include <uv_vertex>\n  vMapUv.x = (uv.x + aTile) * ${glf(1 / REED_TILES)};`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n  transformed += vegWind(instanceMatrix[3].xyz, transformed.y * transformed.y, ${glf(amp)});`);
+    sh.fragmentShader = sh.fragmentShader.replace(NORMAL_FIX[0], NORMAL_FIX[1]);
+  };
+  mat.customProgramCacheKey = () => 'vegReed';
+}
+
 // ---------------------------------------------------------------------------- 기하
 // 정점 모음 + 삼각형 (감김 방향은 정점 법선 합과 맞춘다: 양면 재질에서 앞뒤 판정·조명이 맞게)
 class GeoBuilder {
@@ -291,8 +313,9 @@ class GeoBuilder {
   }
 }
 
-// 근거리 해바라기 한 그루: 줄기 = 세모 관(목이 꺾여 내려옴), 꽃판 = 들쭉날쭉한 원판(얼굴) + 낮은 원뿔(뒤),
-// 말라 오그라든 잎 3장 (가운데가 접힌 띠, 아래로 늘어짐). 48 삼각형, 정점색 + aPart
+// 근거리 해바라기 한 그루: 줄기 = 세모 관(목이 지팡이 손잡이처럼 꺾여 내려옴), 꽃판 = 얼굴을 땅으로 숙이고 매달린 두꺼운 컵
+// (오목한 얼굴 + 둥근 등 껍질, 말린 가장자리), 말라 오그라든 잎 3장 (가운데가 접혀 바깥으로 휘었다 늘어짐).
+// 86 삼각형 (줄기 30 + 꽃판 32 + 잎 24), 정점색 + aPart
 function sunflowerGeometry() {
   const SH = SUNFLOWER_SHAPE;
   const C = CONFIG.vegetation.sunflower.colors;
@@ -309,15 +332,16 @@ function sunflowerGeometry() {
   for (let i = 0; i < st.length; i++) {
     const a = st[Math.max(0, i - 1)];
     const b = st[Math.min(st.length - 1, i + 1)];
-    const T = V(b[0] - a[0], b[1] - a[1], 0).normalize();
-    const N1 = V(0, 0, 1);
+    const T = V(b[0] - a[0], b[1] - a[1], (b[3] ?? 0) - (a[3] ?? 0)).normalize();
+    // 관 단면 축: z 축을 접선에 수직으로 (목이 옆으로 비틀려도 굵기가 같게)
+    const N1 = V(0, 0, 1).addScaledVector(T, -T.z).normalize();
     const N2 = V(0, 0, 0).crossVectors(T, N1).normalize();
     const c = cStem.clone().lerp(cTop, clamp(st[i][1] / SH.height, 0, 1));
     const ring = [];
     for (let j = 0; j < 3; j++) {
       const ang = (j / 3) * Math.PI * 2 + 0.4;
       const n = N1.clone().multiplyScalar(Math.cos(ang)).addScaledVector(N2, Math.sin(ang));
-      ring.push(gb.v(V(st[i][0], st[i][1], 0).addScaledVector(n, st[i][2]), n, c, i >= SH.neckStart ? 3 : 0));
+      ring.push(gb.v(V(st[i][0], st[i][1], st[i][3] ?? 0).addScaledVector(n, st[i][2]), n, c, i >= SH.neckStart ? 3 : 0));
     }
     rings.push(ring);
   }
@@ -328,61 +352,103 @@ function sunflowerGeometry() {
       gb.tri(rings[i][j1], rings[i + 1][j1], rings[i + 1][j]);
     }
   }
-  // 꽃판: 얼굴 법선 n (수평 아래로 tilt), 원판 평면 = (p, z)
+  // 꽃판: 꺾인 목 끝에 등 한가운데가 매달린 두꺼운 컵. 얼굴 법선 n (수평 아래로 tilt — 거의 땅), 원판 평면 = (p, z).
+  //  얼굴 = 가장자리(얼굴 쪽으로 curl 만큼 말림)보다 조금 오목한 원판, 등 = 가장자리 → 둥근 어깨 고리 → 뒤통수 (반구에 가까운 껍질).
+  //  가장자리는 반지름·말림이 조금씩 들쭉날쭉하다 (마른 꽃받침). 32 삼각형
   const H = SH.head;
   const t = (H.tiltDeg * Math.PI) / 180;
   const n = V(Math.cos(t), -Math.sin(t), 0);
   const p = V(Math.sin(t), Math.cos(t), 0);
   const zA = V(0, 0, 1);
-  const ctr = V(H.x, H.y, 0);
+  const ctr = V(H.x, H.y, H.z ?? 0);
   const rim = 8;
-  const face = gb.v(ctr.clone().addScaledVector(n, H.thick * 0.18), n, cFace, 1);
+  const curl = H.curl ?? 0.02;
+  const bulge = H.bulge ?? 0.8;
+  const shoulder = H.shoulder ?? 0.5;
+  // 가장자리 반지름·말림: 주기가 없는 작은 들쭉날쭉 (하나 건너 짧게 하면 8각이 네모로 읽힌다)
+  const rimR = [1.0, 0.95, 0.99, 0.93, 0.98, 1.0, 0.94, 0.97];
+  const rimC = [1.0, 0.8, 1.1, 0.75, 0.95, 1.05, 0.7, 0.9];
+  const face = gb.v(ctr.clone().addScaledVector(n, curl * 0.25), n, cFace, 1);
   const back = gb.v(ctr.clone().addScaledVector(n, -H.thick), n.clone().negate(), cBack, 1);
+  const cRim = cBack.clone().lerp(cFace, 0.5);
   const fr = [];
   const br = [];
+  const mr = [];
   for (let k = 0; k < rim; k++) {
-    const a = (k / rim) * Math.PI * 2;
-    const r = H.radius * (k % 2 ? 0.91 : 1.0);
+    const a = (k / rim) * Math.PI * 2 + 0.2;
+    const r = H.radius * rimR[k];
     const dir = p.clone().multiplyScalar(Math.cos(a)).addScaledVector(zA, Math.sin(a));
-    const q = ctr.clone().addScaledVector(n, H.thick * 0.05).addScaledVector(dir, r);
+    const q = ctr.clone().addScaledVector(dir, r).addScaledVector(n, curl * rimC[k]);
     fr.push(gb.v(q, n, cFace, 1));
-    br.push(gb.v(q, dir.clone().addScaledVector(n, -0.6), cBack, 1));
+    br.push(gb.v(q, dir.clone().addScaledVector(n, 0.35), cRim, 1));
+    // 둥근 어깨: 가장자리 안쪽 bulge 배 반지름, 깊이 shoulder × thick
+    const s = ctr.clone().addScaledVector(dir, r * bulge).addScaledVector(n, -H.thick * shoulder);
+    mr.push(gb.v(s, dir.clone().addScaledVector(n, -1.1), cBack.clone().lerp(cRim, 0.3), 1));
   }
   for (let k = 0; k < rim; k++) {
     const k1 = (k + 1) % rim;
     gb.tri(face, fr[k], fr[k1]);
-    gb.tri(back, br[k1], br[k]);
+    gb.tri(br[k], br[k1], mr[k]);
+    gb.tri(br[k1], mr[k1], mr[k]);
+    gb.tri(back, mr[k1], mr[k]);
   }
-  // 잎: 줄기에서 잎자루로 조금 나와 아래로 늘어진 오그라든 잎 (밑동 1점 → 가운데 줄 3점(접힘) → 끝 1점)
+  // 잎: 잎자루로 조금 나와 바깥으로 휘었다가 끝이 줄기 쪽으로 오그라들며 늘어진 마른 잎 (2차 곡선 가운데 줄 SH.leafCurve).
+  //  가운데 줄을 따라 접히고(V자) 끝쪽은 더 좁게 말린다: 밑동 1점 → 가운데 줄 3점 × 2줄 → 끝 1점, 8 삼각형
   const stemXAt = (y) => {
     for (let i = 0; i < st.length - 1; i++) {
       if (y <= st[i + 1][1]) return st[i][0] + ((st[i + 1][0] - st[i][0]) * (y - st[i][1])) / Math.max(1e-6, st[i + 1][1] - st[i][1]);
     }
     return st[st.length - 1][0];
   };
+  const LC = SH.leafCurve;
   SH.leaves.forEach((lf, li) => {
     const az = (lf.az * Math.PI) / 180;
     const d = V(Math.cos(az), 0, Math.sin(az));
-    const q = V(-Math.sin(az), 0, Math.cos(az));
     const S = V(stemXAt(lf.y), lf.y, 0);
     const part = li === 2 ? 2 : 0;
     const c = cLeaf.clone().multiplyScalar(0.9 + 0.1 * li);
-    // 잎자루 끝에서 거의 수직으로 늘어지고 끝은 줄기 쪽으로 오그라든다
-    const b0 = S.clone().addScaledVector(d, 0.03).add(V(0, 0.012, 0));
-    const m = S.clone().addScaledVector(d, 0.085).add(V(0, -lf.len * 0.35, 0));
-    const tip = S.clone().addScaledVector(d, 0.06).add(V(0, -lf.len, 0));
-    const along = tip.clone().sub(b0).normalize();
-    const bn = V(0, 0, 0).crossVectors(q, along).normalize();
-    const w = SH.leafWidth * 0.5;
-    const iB = gb.v(b0, bn, c, part);
-    const iL = gb.v(m.clone().addScaledVector(q, -w).addScaledVector(bn, w * 0.7), bn, c, part);
-    const iM = gb.v(m, bn, c, part);
-    const iR = gb.v(m.clone().addScaledVector(q, w).addScaledVector(bn, w * 0.7), bn, c, part);
-    const iT = gb.v(tip, bn, c, part);
-    gb.tri(iB, iL, iM);
-    gb.tri(iB, iM, iR);
-    gb.tri(iL, iT, iM);
-    gb.tri(iM, iT, iR);
+    const cTip = c.clone().multiplyScalar(0.72);
+    // 곡선 위 점 (s 0..1): 바깥 거리 × d + 높이
+    const P0 = [LC.base[0], LC.base[1]];
+    const P1 = [LC.bow[0], LC.bow[1] * lf.len];
+    const P2 = [LC.tip[0], LC.tip[1] * lf.len];
+    const at = (s) => {
+      const u = 1 - s;
+      const o = u * u * P0[0] + 2 * u * s * P1[0] + s * s * P2[0];
+      const y = u * u * P0[1] + 2 * u * s * P1[1] + s * s * P2[1];
+      return S.clone().addScaledVector(d, o).add(V(0, y, 0));
+    };
+    // 잎마다 조금 비틀린 폭 방향 (같은 모양이 줄지어 반복되지 않게)
+    const tw = az + Math.PI / 2 + (li - 1) * 0.35;
+    const q = V(Math.cos(tw), 0, Math.sin(tw));
+    const b0 = at(0);
+    const m1 = at(0.33);
+    const m2 = at(0.7);
+    const tip = at(1);
+    const bn1 = V(0, 0, 0).crossVectors(q, at(0.4).sub(at(0.26))).normalize();
+    const bn2 = V(0, 0, 0).crossVectors(q, at(0.78).sub(at(0.62))).normalize();
+    // 끝쪽 반은 가운데 줄을 축으로 비틀려 말린다 (평평한 주걱처럼 보이지 않게)
+    const tw2 = (li % 2 ? -1 : 1) * 0.85;
+    const q2 = q.clone().multiplyScalar(Math.cos(tw2)).addScaledVector(bn2, Math.sin(tw2));
+    const bt2 = bn2.clone().multiplyScalar(Math.cos(tw2)).addScaledVector(q, -Math.sin(tw2));
+    const w1 = SH.leafWidth * 0.5;
+    const w2 = SH.leafWidth * 0.3;
+    const iB = gb.v(b0, bn1, c, part);
+    const iL1 = gb.v(m1.clone().addScaledVector(q, -w1).addScaledVector(bn1, w1 * 0.6), bn1, c, part);
+    const iM1 = gb.v(m1, bn1, c, part);
+    const iR1 = gb.v(m1.clone().addScaledVector(q, w1 * 0.85).addScaledVector(bn1, w1 * 0.5), bn1, c, part);
+    const iL2 = gb.v(m2.clone().addScaledVector(q2, -w2 * 0.8).addScaledVector(bt2, w2 * 0.9), bt2, cTip, part);
+    const iM2 = gb.v(m2, bt2, cTip, part);
+    const iR2 = gb.v(m2.clone().addScaledVector(q2, w2).addScaledVector(bt2, w2 * 0.7), bt2, cTip, part);
+    const iT = gb.v(tip, bt2, cTip, part);
+    gb.tri(iB, iL1, iM1);
+    gb.tri(iB, iM1, iR1);
+    gb.tri(iL1, iL2, iM2);
+    gb.tri(iL1, iM2, iM1);
+    gb.tri(iM1, iM2, iR2);
+    gb.tri(iM1, iR2, iR1);
+    gb.tri(iL2, iT, iM2);
+    gb.tri(iM2, iT, iR2);
   });
   return gb.build({ color: true, part: true });
 }
@@ -1277,6 +1343,9 @@ export class Vegetation {
   }
 
   // ------------------------------------------------------------------ 갈대 (수로 바닥 물가)
+  // 군락마다 물가를 따라 긴 타원 안에 좁은 교차 카드 여럿 (지터 격자). 타원 거리(둘레는 노이즈로 들쭉날쭉)로 밀도·키가 줄어
+  // 끝과 바깥이 성기고 낮으며, 바깥 줄기는 군락 가운데에서 멀어지는 쪽으로 벌어진다. 키는 물가에서 가장 크고 비탈 위로 낮아지며
+  // 포기마다 ± 노이즈 (윗선이 들쭉날쭉). 몇 장은 무더기 위로 솟은 이삭 줄기. 은폐만: 군락을 덮는 상자 하나 (탄 통과, 시야만 가림)
   buildReeds() {
     const R = CONFIG.vegetation.reeds;
     const C = MAP.canal;
@@ -1284,47 +1353,82 @@ export class Vegetation {
     const rng = new Random(CONFIG.world.seed + 347);
     const list = [];
     const base = new THREE.Color(R.color);
+    const step = 1 / Math.sqrt(R.density);
+    const dc = (R.band[0] + R.band[1]) * 0.5;
+    const B = (R.band[1] - R.band[0]) * 0.5 * R.spread;
+    const P = R.plume;
     for (const clump of C.reeds || []) {
-      const a = clump.x - clump.len / 2;
-      const b = clump.x + clump.len / 2;
-      let ys = 0;
-      let yn = 0;
-      for (let x = a - 0.6; x <= b + 0.6; x += R.spacing * rng.range(0.7, 1.3)) {
-        // 군락 끝은 듬성듬성 (일직선으로 끊기지 않게)
-        const e = Math.min(x - a, b - x) / Math.max(0.5, clump.len * 0.5);
-        if (rng.next() > smoothstep(-0.25, 0.4, e)) continue;
-        const rows = rng.next() < 0.6 ? 2 : 1;
-        for (let r = 0; r < rows; r++) {
-          const d = rng.range(R.band[0], R.band[1]);
+      const A = clump.len * 0.5;
+      // 둘레 노이즈 위상·군락을 따라 오르내리는 키 물결 위상 (군락마다 다름)
+      const ph = [rng.next() * 6.283, rng.next() * 6.283, rng.next() * 6.283, rng.next() * 6.283];
+      for (let lx = -A * 1.3; lx <= A * 1.3; lx += step) {
+        for (let ld = -B * 1.3; ld <= B * 1.3; ld += step) {
+          const ax = lx + rng.range(-0.5, 0.5) * step;
+          const ad = ld + rng.range(-0.5, 0.5) * step;
+          const ex = ax / A;
+          const ey = ad / B;
+          const an = Math.atan2(ey, ex);
+          const rim = 1 + (R.edgeNoise * (0.6 * Math.sin(3 * an + ph[0]) + 0.4 * Math.sin(5 * an + ph[1]) + 0.25 * Math.sin(9 * an + ph[2]))) / 1.25;
+          const r = Math.hypot(ex, ey) / rim;
+          if (rng.next() > smoothstep(1.05, 0.45, r)) continue;
+          const x = clump.x + ax;
+          const d = Math.max(0.05, dc + ad);
           const z = t.canalZ(x) + clump.side * d;
-          const px = x + rng.range(-0.12, 0.12);
-          const h = rng.range(R.height[0], R.height[1]) * (0.8 + 0.2 * smoothstep(-0.2, 0.5, e));
-          const w = rng.range(R.width[0], R.width[1]);
-          const y = t.heightAt(px, z) - 0.06;
-          ys += y;
-          yn++;
-          const m = plantMatrix(px, y, z, rng.next() * Math.PI, rng.next() * 0.12, rng.next() - 0.5, -clump.side * 0.3, w, h, w);
-          const k = rng.range(R.brightness[0], R.brightness[1]);
-          list.push({ m: m.slice(), r: base.r * k, g: base.g * k, b: base.b * k });
+          // 키: 타원 가운데일수록, 물가일수록 크다 (비탈 위·물 한가운데 쪽은 낮다) × 군락을 따라 오르내리는 물결 × 포기마다 노이즈
+          const hR = lerp(0.6, 1, smoothstep(1.0, 0.3, r));
+          const hS = (1 - R.slopeDrop * smoothstep(R.waterline, R.band[1] + 0.2, d)) * (1 - 0.15 * smoothstep(R.waterline, 0.15, d));
+          const hW = 1 + 0.1 * Math.sin(ax * 1.3 + ph[3]);
+          const hN = 1 + R.heightNoise * (rng.next() * 2 - 1);
+          let h = rng.range(R.height[0], R.height[1]) * hR * hS * hW * hN;
+          let w = rng.range(R.width[0], R.width[1]) * (0.8 + 0.2 * hR);
+          // 바깥 줄기는 가운데에서 멀어지는 쪽으로 벌어진다 (가운데는 거의 곧게)
+          const el = Math.hypot(ex, ey) || 1;
+          let fx = ex / el + rng.range(-0.25, 0.25);
+          let fz = (clump.side * ey) / el + rng.range(-0.25, 0.25);
+          let tilt = rng.range(0.02, 0.07) + smoothstep(0.15, 1.0, r) * rng.range(R.lean[0], R.lean[1]);
+          let tile;
+          if (r < 0.75 && rng.next() < P.share) {
+            // 무더기 위로 솟은 이삭 줄기
+            tile = 2;
+            h = Math.max(h, R.height[0] * 0.9) * rng.range(P.height[0], P.height[1]);
+            w = rng.range(P.width[0], P.width[1]);
+            tilt = Math.min(tilt, 0.12);
+          } else tile = r > R.edgeTile + rng.range(-0.15, 0.15) ? 1 : 0;
+          h = clamp(h, 0.45, R.height[1] * (tile === 2 ? P.height[1] : 1.15));
+          if (tilt < 1e-3) fx = fz = 0;
+          const y = t.heightAt(x, z) - 0.06;
+          const m = plantMatrix(x, y, z, rng.next() * Math.PI, tilt, fx, fz, w, h, w);
+          const k = rng.range(R.brightness[0], R.brightness[1]) * (tile === 1 ? 0.95 : 1);
+          list.push({ m: m.slice(), r: base.r * k, g: base.g * k, b: base.b * k, tile });
         }
       }
-      // 은폐만: 군락을 덮는 상자 (탄 통과, 시야만 가림)
-      if (yn) {
-        const zc = t.canalZ(clump.x) + clump.side * (R.band[0] + R.band[1]) * 0.5;
-        const hh = R.height[1] * 0.5;
-        this.col.addConcealer(clump.x, ys / yn + hh, zc, clump.len / 2 + 0.3, hh, (R.band[1] - R.band[0]) * 0.5 + 0.15, 0, 'grass');
+      // 은폐만: 군락을 덮는 상자 (band 폭, 바닥 높이 = band 위 지면 평균)
+      let ys = 0;
+      let yn = 0;
+      for (let x = clump.x - A - 0.6; x <= clump.x + A + 0.6; x += 0.5) {
+        for (const dd of [R.band[0], dc, R.band[1]]) {
+          ys += t.heightAt(x, t.canalZ(x) + clump.side * dd) - 0.06;
+          yn++;
+        }
       }
+      const zc = t.canalZ(clump.x) + clump.side * dc;
+      const hh = R.height[1] * 0.5;
+      this.col.addConcealer(clump.x, ys / yn + hh, zc, clump.len / 2 + 0.3, hh, (R.band[1] - R.band[0]) * 0.5 + 0.15, 0, 'grass');
     }
     this.stats.reeds = list.length;
     if (!list.length) return;
     const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, map: reedTexture(), alphaTest: 0.5, alphaToCoverage: true, side: THREE.DoubleSide });
-    patchCards(mat, { amp: R.wind, lod: false, key: 'vegReed' });
-    const mesh = new THREE.InstancedMesh(crossCardGeometry(2, false), mat, list.length);
+    patchReeds(mat, R.wind);
+    const geo = crossCardGeometry(2, false);
+    const tiles = new Float32Array(list.length);
+    const mesh = new THREE.InstancedMesh(geo, mat, list.length);
     const col = new THREE.Color();
     list.forEach((it, i) => {
       mesh.instanceMatrix.array.set(it.m, i * 16);
       mesh.setColorAt(i, col.setRGB(it.r, it.g, it.b));
+      tiles[i] = it.tile;
     });
+    geo.setAttribute('aTile', new THREE.InstancedBufferAttribute(tiles, 1));
     mesh.instanceMatrix.needsUpdate = true;
     mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();

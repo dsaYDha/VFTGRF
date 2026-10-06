@@ -1438,7 +1438,34 @@ export function sunflowerBandTexture(shape, card = {}, { tile = 256, w = 3.9, h 
   });
 }
 
-// 해바라기 빌보드 그림 (캔버스, 위 두 아틀라스가 같이 쓴다)
+// 굵기가 바뀌는 띠 (잎): 점 pts = [[x, y]...] (px), 점마다 폭 ws (px). half = 0 이면 전체, 1 / -1 이면 가운데 줄에서 한쪽 반만
+function ribbon(ctx, pts, ws, half = 0) {
+  const L = [];
+  const R = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i - 1)];
+    const b = pts[Math.min(pts.length - 1, i + 1)];
+    let tx = b[0] - a[0];
+    let ty = b[1] - a[1];
+    const tl = Math.hypot(tx, ty) || 1;
+    tx /= tl;
+    ty /= tl;
+    const hw = ws[i] * 0.5;
+    const [px, py] = pts[i];
+    L.push(half > 0 ? [px, py] : [px - ty * hw, py + tx * hw]);
+    R.push(half < 0 ? [px, py] : [px + ty * hw, py - tx * hw]);
+  }
+  ctx.beginPath();
+  ctx.moveTo(L[0][0], L[0][1]);
+  for (const p of L) ctx.lineTo(p[0], p[1]);
+  for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// 해바라기 빌보드 그림 (캔버스, 위 두 아틀라스가 같이 쓴다). 근거리 3D 모형(Vegetation.sunflowerGeometry)과 같은 점으로 그린다:
+//  지팡이 손잡이처럼 꺾인 목, 그 아래·바깥에 얼굴을 땅으로 숙이고 매달린 두꺼운 컵 꽃판 (둥근 등 + 말린 가장자리),
+//  바깥으로 휘었다가 끝이 줄기 쪽으로 오그라든 큰 마른 잎 (가운데 줄로 접혀 한쪽 반이 어둡다)
 function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, bottom = 0.05, variants = 4 } = {}) {
   return cached('sunflowerCardCanvas', () => {
     const th = Math.round((tile * cardH) / cardW);
@@ -1450,43 +1477,56 @@ function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, b
     const COL = {
       stem: [58, 50, 42],
       stemTop: [46, 39, 33],
-      face: [30, 25, 21],
-      back: [56, 47, 39],
-      leaf: [74, 63, 50],
-      leafDark: [54, 46, 37],
+      face: [26, 21, 18],
+      back: [48, 40, 33],
+      rim: [37, 31, 26],
+      leaf: [66, 56, 46],
+      leafDark: [48, 41, 33],
     };
+    const H = shape.head;
+    const curl = H.curl ?? 0.02;
+    const LC = shape.leafCurve ?? { base: [0.035, 0.012], bow: [0.17, -0.13], tip: [0.045, -1] };
+    const nStem = shape.stem.length;
     for (let v = 0; v < variants; v++) {
       const headless = v === 3;
+      // 변형 1: 목이 더 꺾여 꽃판이 낮게 (내려오는 목 두 점과 꽃판을 drop 만큼 내림), 2: 줄기가 조금 휘고 꽃판이 작고 덜 숙임
       const drop = v === 1 ? 0.09 : 0;
-      const tilt = ((shape.head.tiltDeg + (v === 1 ? 14 : v === 2 ? -6 : 0)) * Math.PI) / 180;
-      const hr = shape.head.radius * (v === 2 ? 0.86 : 1);
+      const tilt = ((H.tiltDeg + (v === 1 ? 12 : v === 2 ? -8 : 0)) * Math.PI) / 180;
+      const hr = H.radius * (v === 2 ? 0.86 : 1);
+      const ht = H.thick * (v === 2 ? 0.9 : 1);
       const bend = v === 2 ? 0.05 : 0;
       // 줄기 점 (모형 좌표): 변형별로 조금씩
-      const stem = shape.stem.map(([x, y, r], i) => {
-        const t = y / shape.stem[shape.stem.length - 1][1];
-        return [x + bend * t * t, y - (i >= shape.stem.length - 2 ? drop : 0), r];
+      // 점 = [x, y, 반지름, z]
+      const stem = shape.stem.map(([x, y, r, z = 0], i) => {
+        const t = y / shape.stem[1][1];
+        return [x + bend * Math.min(1, t) ** 2, y - (i >= nStem - 2 ? drop : 0), r, z];
       });
       const top = headless ? stem.filter((p) => p[1] < 1.52) : stem;
-      if (headless) top.push([top[top.length - 1][0] + 0.01, 1.5, top[top.length - 1][2] * 0.9]);
+      if (headless) top.push([top[top.length - 1][0] + 0.01, 1.5, top[top.length - 1][2] * 0.9, 0]);
       for (let view = 0; view < 2; view++) {
         const ox = (v * 2 + view) * tile;
         const X = (m) => ox + (m + cardW / 2) * k;
         const Y = (m) => (cardH - bottom - m) * k;
-        // 줄기 (옆모습: x 오프셋, 앞모습: z = 0)
-        ctx.beginPath();
+        // 줄기 (옆모습: x, 앞모습: z — 목이 옆으로 비틀리지 않았으면 꺾여 내려오는 부분이 올라간 줄기와 겹치므로 꼭대기까지만)
+        let pts = top;
+        if (view === 1 && !top.some((p) => p[3] > 0.01)) {
+          let e = 1;
+          while (e < top.length && top[e][1] > top[e - 1][1]) e++;
+          pts = top.slice(0, e);
+        }
         const L = [];
         const R = [];
-        for (let i = 0; i < top.length; i++) {
-          const [sx, sy, sr] = top[i];
-          const a = top[Math.max(0, i - 1)];
-          const b = top[Math.min(top.length - 1, i + 1)];
-          let dx = view === 0 ? b[0] - a[0] : 0;
+        for (let i = 0; i < pts.length; i++) {
+          const [sx, sy, sr] = pts[i];
+          const a = pts[Math.max(0, i - 1)];
+          const b = pts[Math.min(pts.length - 1, i + 1)];
+          let dx = view === 0 ? b[0] - a[0] : b[3] - a[3];
           let dy = b[1] - a[1];
           const dl = Math.hypot(dx, dy) || 1;
           dx /= dl;
           dy /= dl;
           const hw = Math.max(0.6 / k, sr);
-          const px = view === 0 ? sx : 0;
+          const px = view === 0 ? sx : pts[i][3];
           L.push([X(px - dy * hw), Y(sy + dx * hw)]);
           R.push([X(px + dy * hw), Y(sy - dx * hw)]);
         }
@@ -1494,6 +1534,7 @@ function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, b
         g.addColorStop(0, css(COL.stem));
         g.addColorStop(1, css(COL.stemTop));
         ctx.fillStyle = g;
+        ctx.beginPath();
         ctx.moveTo(L[0][0], L[0][1]);
         for (const p of L) ctx.lineTo(p[0], p[1]);
         for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
@@ -1511,7 +1552,7 @@ function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, b
             ctx.stroke();
           }
         }
-        // 잎: 줄기에서 나와 아래로 늘어진 오그라든 잎
+        // 잎: 잎자루로 나와 바깥으로 휘었다가 끝이 줄기 쪽으로 오그라들며 늘어진다 (근거리 3D 모형과 같은 2차 곡선)
         const nLeaves = headless ? 2 : shape.leaves.length;
         for (let li = 0; li < nLeaves; li++) {
           const lf = shape.leaves[li];
@@ -1524,73 +1565,118 @@ function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, b
           for (const p of stem) if (p[1] <= lf.y) sx = p[0];
           const bx = view === 0 ? sx : 0;
           const len = lf.len * (0.9 + 0.2 * rng.next());
-          const wv = Math.max(0.3, Math.abs(perpV)) * shape.leafWidth;
-          ctx.fillStyle = css(rng.next() < 0.5 ? COL.leaf : COL.leafDark);
+          const wv = Math.max(0.35, Math.abs(perpV)) * shape.leafWidth;
+          const P0 = LC.base;
+          const P1 = [LC.bow[0], LC.bow[1] * len];
+          const P2 = [LC.tip[0], LC.tip[1] * len];
+          const lp = [];
+          const lw = [];
+          for (let i = 0; i <= 8; i++) {
+            const s = i / 8;
+            const u = 1 - s;
+            const o = u * u * P0[0] + 2 * u * s * P1[0] + s * s * P2[0];
+            const y = u * u * P0[1] + 2 * u * s * P1[1] + s * s * P2[1];
+            lp.push([X(bx + dirV * o), Y(lf.y + y)]);
+            // 잎자루 쪽은 좁고, 1/3 쯤에서 가장 넓고, 끝은 오그라들어 뾰족
+            lw.push(Math.max(1, wv * k * Math.sin(Math.PI * (0.12 + 0.88 * s)) ** 0.8 * (1 - 0.35 * s)));
+          }
           // 잎자루
           ctx.strokeStyle = css(COL.leafDark);
           ctx.lineWidth = 1.3;
           ctx.beginPath();
           ctx.moveTo(X(bx), Y(lf.y));
-          ctx.quadraticCurveTo(X(bx + dirV * 0.015), Y(lf.y + 0.012), X(bx + dirV * 0.03), Y(lf.y + 0.012));
+          ctx.lineTo(lp[0][0], lp[0][1]);
           ctx.stroke();
-          // 거의 수직으로 늘어지고 끝은 줄기 쪽으로 오그라든 잎 (근거리 3D 모형과 같은 점)
-          taperedBlade(
-            ctx,
-            X(bx + dirV * 0.03),
-            Y(lf.y + 0.012),
-            X(bx + dirV * 0.1),
-            Y(lf.y - len * 0.35),
-            X(bx + dirV * (0.05 + 0.02 * rng.next())),
-            Y(lf.y - len),
-            wv * k * 1.4,
-            wv * k * 0.3,
-          );
+          ctx.fillStyle = css(rng.next() < 0.5 ? COL.leaf : COL.leafDark);
+          ribbon(ctx, lp, lw);
+          // 가운데 줄로 접힌 한쪽 반은 그늘
+          ctx.fillStyle = css(COL.leafDark, 0.85);
+          ribbon(ctx, lp, lw, rng.next() < 0.5 ? 1 : -1);
         }
         if (headless) continue;
-        // 꽃판: 옆모습은 기울어진 납작한 원판(두께), 앞모습은 숙인 얼굴(타원)
-        const hx = shape.head.x + bend;
-        const hy = shape.head.y - drop;
-        const ht = shape.head.thick;
+        // 꽃판: 꽃판 좌표 (u = 원판 평면 p 방향, w = 등 쪽 거리) → 모형 좌표 = 중심 + p·u − n·w
+        const hx = H.x + bend;
+        const hy = H.y - drop;
+        const hz = H.z ?? 0;
+        const sT = Math.sin(tilt);
+        const cT = Math.cos(tilt);
         if (view === 0) {
-          const pdx = Math.sin(tilt);
-          const pdy = Math.cos(tilt);
-          ctx.save();
-          ctx.translate(X(hx), Y(hy));
-          ctx.rotate(Math.atan2(-pdy, pdx));
-          // 둥근 등 (뒤쪽 = 회전 좌표 -y) + 얼굴 (+y, 거의 땅을 향함)
+          // 옆모습: 뒤집혀 매달린 두꺼운 컵 (둥근 등 껍질 + 얼굴 쪽으로 말린 가장자리 + 오목한 얼굴의 어두운 아랫단)
+          const P = (u, w) => [X(hx + u * sT - w * cT), Y(hy + u * cT + w * sT)];
+          const dome = [];
+          for (let i = 0; i <= 12; i++) {
+            const f = (i / 12) * Math.PI;
+            dome.push(P(hr * Math.cos(f), -curl + (ht + curl) * Math.sin(f) ** 0.9));
+          }
+          const faceW = (u) => -curl * (u / hr) ** 2 - curl * 0.25 * (1 - (u / hr) ** 2);
+          const faceL = [];
+          for (let i = 0; i <= 6; i++) {
+            const u = -hr + (2 * hr * i) / 6;
+            faceL.push([u, faceW(u)]);
+          }
           ctx.fillStyle = css(COL.back);
           ctx.beginPath();
-          ctx.ellipse(0, -ht * 0.35 * k, hr * 0.92 * k, ht * 0.75 * k, 0, 0, Math.PI * 2);
+          ctx.moveTo(dome[0][0], dome[0][1]);
+          for (const q of dome) ctx.lineTo(q[0], q[1]);
+          for (const [u, w] of faceL) ctx.lineTo(...P(u, w));
+          ctx.closePath();
           ctx.fill();
+          // 얼굴 아랫단 (어두운 씨앗 면이 가장자리 안쪽으로 조금 보임)
           ctx.fillStyle = css(COL.face);
           ctx.beginPath();
-          ctx.ellipse(0, ht * 0.1 * k, hr * k, ht * 0.3 * k, 0, 0, Math.PI * 2);
+          for (const [u, w] of faceL) ctx.lineTo(...P(u, w));
+          for (let i = faceL.length - 1; i >= 0; i--) {
+            const [u, w] = faceL[i];
+            ctx.lineTo(...P(u * 0.94, w + 0.022 * (1 - 0.5 * (u / hr) ** 2)));
+          }
+          ctx.closePath();
           ctx.fill();
-          ctx.restore();
+          // 말라붙은 꽃받침 조각: 등 껍질 둘레에 짧고 들쭉날쭉한 가닥
+          ctx.strokeStyle = css(COL.rim);
+          ctx.lineWidth = 1.1;
+          for (let s = 0; s < 8; s++) {
+            const f = ((s + 0.5) / 8) * Math.PI;
+            const u = hr * Math.cos(f);
+            const w = -curl + (ht + curl) * Math.sin(f) ** 0.9;
+            const [ax, ay] = P(u, w);
+            const [bx2, by2] = P(u * 1.12 + (rng.next() - 0.5) * 0.02, w - 0.02 - rng.next() * 0.02);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx2, by2);
+            ctx.stroke();
+          }
         } else {
-          const ry = hr * Math.cos(tilt) + ht * 0.5 * Math.sin(tilt);
+          // 앞모습: 숙인 얼굴 (어두운 타원, 반지름 × cos 숙인 각) 뒤로 둥근 등 껍질이 위로 조금 솟는다. 목은 그 위로 올라가 꺾인다
+          const cy0 = hy - curl * sT;
+          const ry = Math.max(1.2 / k, hr * Math.abs(cT));
+          const domeTop = hy + Math.max(ht * sT, (H.bulge ?? 0.8) * hr * Math.abs(cT) + (H.shoulder ?? 0.5) * ht * sT);
           ctx.fillStyle = css(COL.back);
           ctx.beginPath();
-          ctx.ellipse(X(0), Y(hy + ht * 0.2), hr * k, ry * k, 0, 0, Math.PI * 2);
+          for (let i = 0; i <= 12; i++) {
+            const f = (i / 12) * Math.PI;
+            ctx.lineTo(X(hz + hr * 0.97 * Math.cos(f)), Y(cy0 + (domeTop - cy0) * Math.sin(f) ** 0.8));
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = css(COL.rim);
+          ctx.beginPath();
+          ctx.ellipse(X(hz), Y(cy0), hr * k, ry * k + 0.8, 0, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = css(COL.face);
           ctx.beginPath();
-          ctx.ellipse(X(0), Y(hy - ht * 0.15), hr * 0.92 * k, ry * 0.85 * k, 0, 0, Math.PI * 2);
+          ctx.ellipse(X(hz), Y(cy0 - curl * 0.3), hr * 0.86 * k, ry * 0.82 * k, 0, 0, Math.PI * 2);
           ctx.fill();
-        }
-        // 말라붙은 꽃받침 조각 (가장자리 들쭉날쭉)
-        ctx.strokeStyle = css(COL.back);
-        ctx.lineWidth = 1.1;
-        const cxp = view === 0 ? X(hx) : X(0);
-        const cyp = Y(hy);
-        for (let s = 0; s < 9; s++) {
-          const a = (s / 9) * Math.PI * 2 + rng.next() * 0.4;
-          const rx = hr * k * (view === 0 ? 0.55 : 1.0);
-          const ry2 = hr * k * (view === 0 ? 0.55 : Math.cos(tilt));
-          ctx.beginPath();
-          ctx.moveTo(cxp + Math.cos(a) * rx * 0.9, cyp + Math.sin(a) * ry2 * 0.9);
-          ctx.lineTo(cxp + Math.cos(a) * rx * 1.18, cyp + Math.sin(a) * ry2 * 1.18 + 2);
-          ctx.stroke();
+          ctx.strokeStyle = css(COL.rim);
+          ctx.lineWidth = 1.1;
+          for (let s = 0; s < 9; s++) {
+            const f = ((s + 0.5) / 9) * Math.PI * 2;
+            const zx = hr * Math.cos(f);
+            const yy = cy0 + ry * Math.sin(f);
+            ctx.beginPath();
+            ctx.moveTo(X(hz + zx), Y(yy));
+            ctx.lineTo(X(hz + zx * 1.12 + (rng.next() - 0.5) * 0.012), Y(yy - 0.012 - rng.next() * 0.015));
+            ctx.stroke();
+          }
         }
       }
     }
@@ -1638,64 +1724,118 @@ export function grassBladeTexture() {
   return grassTuftTexture();
 }
 
-// 마른 갈대 군락 카드 아틀라스 (가로 2칸, 한 칸 128x256): 가는 줄기, 늘어진 긴 잎, 줄기 끝 회갈색 이삭
+// 마른 갈대 카드 아틀라스 (가로 3칸, 한 칸 128x384 = 폭 1 × 높이 1 카드). 곧은 줄기(굵기 1~1.5cm 상당)가 가운데 좁은 폭에서
+// 올라가 위로 조금씩 벌어지고 (카드 옆 가장자리가 세로로 잘린 벽처럼 보이지 않게), 줄기마다 키가 달라 윗선이 들쭉날쭉하다.
+// 잎은 마디에서 비스듬히 위로 나와 휘어 끝이 처지거나(마른 잎) 아래로 늘어진다. 줄기 끝에는 한쪽으로 숙인 밝은 회갈색 깃털 이삭.
+//  칸 0: 빽빽한 무더기, 칸 1: 군락 가장자리 — 성기고 낮고 꺾여 고개 숙인 줄기·늘어진 잎, 칸 2: 무더기 위로 솟은 이삭 줄기 2개.
+//  색은 바랜 짚색 (인스턴스 색이 곱해진다)
 export function reedTexture() {
   return cached('reed', () => {
     const tw = 128;
-    const th = 256;
-    const c = canvas(tw * 2, th);
+    const th = 384;
+    const tiles = 3;
+    const c = canvas(tw * tiles, th);
     const ctx = c.getContext('2d');
     const rng = new Random(181);
     ctx.clearRect(0, 0, c.width, c.height);
-    for (let v = 0; v < 2; v++) {
-      const ox = v * tw;
-      const n = v === 0 ? 24 : 17;
-      for (let i = 0; i < n; i++) {
-        const x0 = ox + tw * (0.5 + (rng.next() - 0.5) * 0.55);
-        const hgt = th * (0.68 + rng.next() * 0.3);
-        const lean = (x0 - ox - tw / 2) * 0.35 + (rng.next() - 0.5) * 16;
-        const s = 0.85 + rng.next() * 0.25;
-        const x1 = Math.max(ox + 6, Math.min(ox + tw - 6, x0 + lean));
-        const y1 = th - hgt;
-        ctx.fillStyle = `rgb(${clamp255(196 * s)},${clamp255(180 * s)},${clamp255(138 * s)})`;
-        taperedBlade(ctx, x0, th, x0 + lean * 0.2, th - hgt * 0.5, x1, y1, 2.2, 1.0);
-        // 긴 잎: 줄기 중간에서 비스듬히 나와 늘어진다
-        for (let l = 0; l < 2; l++) {
-          if (rng.next() < 0.35) continue;
-          const t = 0.25 + rng.next() * 0.4;
-          const lx = x0 + (x1 - x0) * t;
-          const ly = th - hgt * t;
-          const dir = rng.next() < 0.5 ? -1 : 1;
-          const ll = 30 + rng.next() * 40;
-          ctx.fillStyle = `rgb(${clamp255(184 * s)},${clamp255(168 * s)},${clamp255(126 * s)})`;
-          taperedBlade(ctx, lx, ly, lx + dir * ll * 0.5, ly - ll * 0.45, Math.max(ox + 1, Math.min(ox + tw - 1, lx + dir * ll * 0.8)), ly + ll * 0.15, 3.2, 0.4);
-        }
-        // 이삭: 줄기 끝 윗부분에서 한쪽으로 기운 깃털 모양 원뿔꽃차례 (밝은 회갈색, 가는 가닥 여럿)
-        const side = lean >= 0 ? 1 : -1;
-        const plen = hgt * (0.13 + rng.next() * 0.07);
-        const np = 14 + Math.floor(rng.next() * 8);
-        ctx.lineWidth = 1.2;
-        for (let p = 0; p < np; p++) {
-          const t = rng.next();
-          const px = x1 - (x1 - x0) * t * 0.12;
-          const py = y1 + plen * t;
-          const ang = side * (0.35 + rng.next() * 0.6) + (rng.next() - 0.5) * 0.5;
-          const pl = (5 + rng.next() * 10) * (1 - 0.5 * t);
-          const k = 0.9 + rng.next() * 0.25;
-          ctx.strokeStyle = `rgba(${clamp255(176 * k)},${clamp255(162 * k)},${clamp255(140 * k)},0.95)`;
-          ctx.beginPath();
-          ctx.moveTo(px, py);
-          ctx.quadraticCurveTo(px + Math.sin(ang) * pl * 0.5, py - pl * 0.5, px + Math.sin(ang) * pl, py - pl * 0.35);
-          ctx.stroke();
-        }
-        // 꼭대기가 무게로 살짝 숙인 끝
-        ctx.strokeStyle = `rgba(${clamp255(168 * s)},${clamp255(154 * s)},${clamp255(132 * s)},0.95)`;
-        ctx.lineWidth = 1.6;
+    const rgb = (r, g, b, s, a = 1) => `rgba(${clamp255(r * s)},${clamp255(g * s)},${clamp255(b * s)},${a})`;
+    // 이삭: 줄기 끝 (x, y) 에서 side 쪽으로 숙인 원뿔꽃차례 — 가운데 촘촘한 몸통(물방울 꼴) + 둘레의 가는 가닥
+    const plume = (x, y, side, len, n, s) => {
+      const ax = x + side * len * 0.42;
+      const ay = y + len * 0.62;
+      const cx = x + side * len * 0.12;
+      const cy = y - len * 0.12;
+      const at = (t) => {
+        const u = 1 - t;
+        return [u * u * x + 2 * u * t * cx + t * t * ax, u * u * y + 2 * u * t * cy + t * t * ay];
+      };
+      // 몸통: 축을 따라 폭이 가운데서 가장 넓은 띠
+      ctx.fillStyle = rgb(192, 180, 160, s);
+      const pts = [];
+      const ws = [];
+      for (let i = 0; i <= 8; i++) {
+        const t = i / 8;
+        pts.push(at(t));
+        ws.push(Math.max(1.2, len * 0.17 * Math.sin(Math.PI * (0.15 + 0.85 * t)) ** 0.7));
+      }
+      ribbon(ctx, pts, ws);
+      // 가닥: 축에서 바깥·아래로 처진 가는 선 (밝기가 조금씩 다름)
+      ctx.lineCap = 'round';
+      for (let p = 0; p < n; p++) {
+        const t = 0.1 + rng.next() * 0.9;
+        const [px, py] = at(t);
+        const pl = len * (0.12 + rng.next() * 0.22) * (0.6 + 0.6 * t);
+        const sgn = rng.next() < 0.65 ? side : -side;
+        const k = 0.85 + rng.next() * 0.3;
+        ctx.strokeStyle = rgb(208, 196, 178, k, 0.95);
+        ctx.lineWidth = 1 + rng.next() * 0.9;
         ctx.beginPath();
-        ctx.moveTo(x1, y1 + 2);
-        ctx.quadraticCurveTo(x1 + side * 4, y1 - 6, x1 + side * 9, y1 - 2);
+        ctx.moveTo(px, py);
+        ctx.quadraticCurveTo(px + sgn * pl * 0.5, py - pl * 0.1, px + sgn * pl * 0.7, py + pl * 0.55);
         ctx.stroke();
       }
+    };
+    // 잎: 마디 (lx, ly) 에서 dir 쪽으로 비스듬히 위로 나와 휘어 끝이 처진다. hang = 마른 잎이 아래로 늘어짐
+    const leaf = (ox, lx, ly, dir, ll, s, hang) => {
+      const lim = (v) => Math.max(ox + 2, Math.min(ox + tw - 2, v));
+      ctx.fillStyle = rgb(186, 170, 128, s);
+      if (hang) taperedBlade(ctx, lx, ly, lim(lx + dir * ll * 0.32), ly - ll * 0.12, lim(lx + dir * ll * 0.42), ly + ll * 0.62, 3.0, 0.5);
+      else taperedBlade(ctx, lx, ly, lim(lx + dir * ll * 0.3), ly - ll * 0.78, lim(lx + dir * ll * 0.72), ly - ll * 0.42, 3.2, 0.5);
+    };
+    for (let v = 0; v < tiles; v++) {
+      const ox = v * tw;
+      const mid = ox + tw / 2;
+      const n = v === 0 ? 11 : v === 1 ? 7 : 2;
+      // 칸 밖으로 번지지 않게 (이삭 가닥·잎 끝)
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ox + 1, 0, tw - 2, th);
+      ctx.clip();
+      for (let i = 0; i < n; i++) {
+        // 밑동: 가운데 좁은 폭 (칸 폭의 ±13%), 키: 칸마다 범위가 다르고 줄기마다 달라 윗선이 들쭉날쭉
+        const off = ((i + rng.next()) / n - 0.5) * (v === 2 ? 0.18 : 0.26) * tw;
+        const x0 = mid + off;
+        const hk = v === 2 ? 0.84 + rng.next() * 0.08 : v === 0 ? 0.6 + rng.next() * 0.34 : 0.42 + rng.next() * 0.4;
+        const hgt = th * hk;
+        // 바깥쪽 줄기일수록 조금 바깥으로 기운다 (위로 벌어진 다발)
+        const lean = off * (v === 2 ? 0.8 : 1.3) + (rng.next() - 0.5) * 10;
+        const x1 = Math.max(ox + 8, Math.min(ox + tw - 8, x0 + lean));
+        const y1 = th - hgt;
+        const s = 0.84 + rng.next() * 0.28;
+        const side = lean >= 0 ? 1 : -1;
+        const sw = v === 2 ? 5.4 : 3.6;
+        ctx.fillStyle = rgb(198, 182, 140, s);
+        const broken = v === 1 && rng.next() < 0.45;
+        let tipX = x1;
+        let tipY = y1;
+        if (broken) {
+          // 꺾여 고개 숙인 줄기: 아래쪽 60% 는 서고, 위는 꺾여 옆으로 늘어진다
+          const kx = x0 + lean * 0.6;
+          const ky = th - hgt * 0.62;
+          taperedBlade(ctx, x0, th, x0 + lean * 0.2, th - hgt * 0.3, kx, ky, sw, sw * 0.7);
+          tipX = Math.max(ox + 6, Math.min(ox + tw - 6, kx + side * hgt * 0.2));
+          tipY = ky + hgt * 0.14;
+          taperedBlade(ctx, kx, ky, kx + side * hgt * 0.12, ky - hgt * 0.05, tipX, tipY, sw * 0.7, sw * 0.45);
+        } else taperedBlade(ctx, x0, th, x0 + lean * 0.2, th - hgt * 0.5, x1, y1, sw, sw * 0.45);
+        // 잎 2~3장: 마디에서 번갈아 양쪽으로 (일부는 마른 채 늘어짐)
+        const nl = v === 2 ? 1 : 2 + Math.floor(rng.next() * 2);
+        let dir = rng.next() < 0.5 ? -1 : 1;
+        for (let l = 0; l < nl; l++) {
+          const t = 0.2 + (l / nl) * 0.45 + rng.next() * 0.1;
+          const lx = x0 + (x1 - x0) * t * t;
+          const ly = th - hgt * t * (broken ? 0.62 : 1);
+          const ll = (v === 1 ? 40 : 52) + rng.next() * 44;
+          leaf(ox, lx, ly, dir, ll, s * (0.9 + rng.next() * 0.1), rng.next() < (v === 1 ? 0.6 : 0.3));
+          dir = -dir;
+        }
+        // 이삭: 칸 2 는 모든 줄기 (크게), 칸 0 은 대부분, 칸 1 은 일부 (꺾인 줄기 끝에도)
+        const pc = v === 2 ? 1 : v === 0 ? 0.75 : 0.4;
+        if (rng.next() < pc) {
+          const plen = (v === 2 ? 0.19 : 0.13) * th * (0.8 + rng.next() * 0.35);
+          plume(tipX, tipY, broken ? side : side * (rng.next() < 0.75 ? 1 : -1), plen, v === 2 ? 26 : 14, s);
+        }
+      }
+      ctx.restore();
     }
     return coverageTexture(c);
   });

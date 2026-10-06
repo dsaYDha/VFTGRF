@@ -8,6 +8,7 @@
 //  조준 시 총몸(가늠자 받침·기관부·총열 덮개·손·소매)은 정점 셰이더에서 눈을 축으로 아래로 돌려
 //  화면 아래 약 20% 안에만 남긴다. 가늠자 판·U홈·가늠쇠는 제자리(실제 치수·영점 그대로)이고,
 //  판 아래는 가늠자 받침 → 기관부 덮개를 원근으로 줄인 쐐기(아래로 갈수록 넓어짐)가 내려간 총몸으로 이어진다.
+//  조준 전환 중에는 총이 먼저 조준선에 정렬되고(adsAlign), 그 뒤에야 총몸 내리기·쐐기가 서서히 나타난다(adsTuck, rearWedge.fade).
 //  가늠자 판은 어두운 강철, 쐐기는 윗면이 하늘빛을 받아 한 단계 밝다 (판 아래 끝이 쐐기와 구분된다).
 //  총몸 재질은 불투명이다 (반투명 겹침·깊이 사전 패스 없음). 판·쐐기의 흐린 가장자리만 반투명.
 //  부품은 재질별로 병합해 드로우콜을 줄이고, 깊이 버퍼를 비운 뒤 따로 그려 벽·비탈에 파묻히지 않게 한다.
@@ -780,7 +781,8 @@ export class ViewModel {
     this.wedge.visible = false;
     this.scene.add(this.wedge); // 카메라 공간 (updateWedge 가 매 프레임 꼭짓점을 놓는다)
     this.wedgeB2 = b2;
-    this.wedgeKey = new Float64Array(8).fill(NaN);
+    this.wedgeKey = new Float64Array(9).fill(NaN);
+    this.wedgeCur = new Float64Array(9);
   }
 
   // 총 좌표의 점 → 카메라 공간 → 조준 시 총몸 내리기 (withAdsTuck 정점 셰이더와 같은 식)
@@ -803,12 +805,15 @@ export class ViewModel {
   updateWedge(t) {
     const V = this.V;
     const W = V.rearWedge;
-    const E = V.eyeToRearSight;
     const CV = this.cover;
     let vis = t > W.hipLimit;
+    // 불투명도: 총몸 내리기와 함께 서서히 (총이 정렬된 뒤에만 t > 0 이다)
+    this.wedge.material.opacity = smoothstep(0, W.fade, t);
     // 판 아래 끝·위 끝 (화면 위 방향), 덮개 윗마루·단면 가운데 (쐐기 거리)
     const lb = _a.copy(this.leafBottomL).applyMatrix4(this.leaf.matrixWorld);
     const lt = _b.copy(this.leafTopL).applyMatrix4(this.leaf.matrixWorld);
+    // 판 평면 치수(m) → tan 단위: 실제 판 거리로 나눈다 (평소 = eyeToRearSight, 사격 반동으로 총이 눈 쪽으로 밀려도 판에 맞는다)
+    const E = -lb.z > 0.05 ? -lb.z : V.eyeToRearSight;
     const zc = -W.dist;
     const yc = CV.y0 - (zc - CV.z0) * CV.k;
     const cm = this.tuckPoint(_c.set(0, yc, zc));
@@ -833,10 +838,20 @@ export class ViewModel {
     if ((mx - nkx) * -ux + (my - nky) * -uy < 0.004) vis = false;
     this.wedge.visible = vis;
     if (!vis) return;
+    // 지난 프레임과 같으면 꼭짓점을 다시 쓰지 않는다 (매 프레임 배열을 만들지 않게 미리 만든 버퍼에 비교·저장)
     const key = this.wedgeKey;
-    const cur = [lbx, lby, mx, my, ex, ey, d, ux];
+    const cur = this.wedgeCur;
+    cur[0] = lbx;
+    cur[1] = lby;
+    cur[2] = mx;
+    cur[3] = my;
+    cur[4] = ex;
+    cur[5] = ey;
+    cur[6] = d;
+    cur[7] = ux;
+    cur[8] = E;
     let same = true;
-    for (let i = 0; i < 8; i++) if (Math.abs(key[i] - cur[i]) > 1e-7 || Number.isNaN(key[i])) same = false;
+    for (let i = 0; i < cur.length; i++) if (Math.abs(key[i] - cur[i]) > 1e-7 || Number.isNaN(key[i])) same = false;
     if (same) return;
     key.set(cur);
     const b2 = this.wedgeB2 / E;
@@ -1134,18 +1149,22 @@ export class ViewModel {
       o[i + 3] = P.hip.r[i];
       o[i + 6] = P.hip.ls ? P.hip.ls[i] : 0;
     }
-    const blendIn = (pose, t) => {
+    // t: 위치·왼쪽 어깨 비율, tr: 회전 비율 (없으면 t)
+    const blendIn = (pose, t, tr = t) => {
       for (let i = 0; i < 3; i++) {
         o[i] += ((pose ? pose.p[i] : 0) - o[i]) * t;
-        o[i + 3] += ((pose ? pose.r[i] : 0) - o[i + 3]) * t;
+        o[i + 3] += ((pose ? pose.r[i] : 0) - o[i + 3]) * tr;
         o[i + 6] += ((pose && pose.ls ? pose.ls[i] : 0) - o[i + 6]) * t;
       }
     };
-    blendIn(null, b.ads * (1 - b.reload));
     blendIn(P.sprint, b.sprint);
     blendIn(P.reload, b.reload);
     b.bolt = w.reloading ? this.boltPose : damp(b.bolt, 0, BR.reload, dt || 1);
     blendIn(P.bolt, b.bolt * b.reload);
+    // 조준: 달리기·재장전 자세 뒤에 섞어, 조준 정도가 adsAlign 에 이르면 (남은 자세와 상관없이) 정확히 원점에 정렬된다.
+    // 회전이 위치보다 먼저 맞는다 → 총몸 내리기·쐐기(adsTuck.blendFrom 이후)는 항상 정렬된 총 위에서만 나타난다
+    const AL = V.adsAlign;
+    blendIn(null, smoothstep(0, AL.pos, b.ads), smoothstep(0, AL.rot, b.ads));
     blendIn(P.down, b.down);
     // 반동 (스프링)
     this.kickVel += (-this.kick * 180 - this.kickVel * 22) * dt;
@@ -1157,9 +1176,10 @@ export class ViewModel {
     const bp = pl.bobPhase;
     const bx = Math.cos(bp) * V.bob.x * bob;
     const by = Math.abs(Math.sin(bp)) * V.bob.y * bob;
-    // 조준 시 총몸 내리기 (전환 끝무렵부터 서서히) + 가늠자 판 아래 쐐기 늘이기
+    // 조준 시 총몸 내리기 (총이 정렬된 뒤 전환 끝무렵부터 서서히) + 가늠자 판 아래 쐐기 늘이기.
+    // 재장전·쓰러짐 자세가 섞이는 동안은 하지 않는다
     const T = V.adsTuck;
-    const tuck = smoothstep(T.blendFrom, 1, b.ads * (1 - b.reload));
+    const tuck = smoothstep(T.blendFrom, T.blendTo, b.ads) * (1 - b.reload) * (1 - b.down);
     this.adsTuck.value.x = T.angle * tuck;
     this.root.position.set(o[0] + bx, o[1] - by, o[2] + this.kick);
     this.root.rotation.set(o[3] + this.kickRot + pl.swayPitch * hipW, o[4] + pl.swayYaw * hipW, o[5]);

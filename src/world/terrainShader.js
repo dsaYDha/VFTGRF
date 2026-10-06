@@ -77,6 +77,8 @@ ${variant === 'ridge' ? '#define T_RIDGE' : ''}
 #define T_TRACK_SPEC ${f(T.tracks.sunSpecular)}
 #define T_NTRACK ${MAX_TRACK_SEGS}
 #define T_FIELD_ANTI_ROT ${f((G.fieldAntiTileRotDeg * Math.PI) / 180)}
+#define T_FAA0 ${f(G.furrowAA[0])}
+#define T_FAA1 ${f(G.furrowAA[1])}
 `;
 
   // ---------------------------------------------------------------- 정점
@@ -304,7 +306,7 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis,
   // 밭 재질 반복 엇갈림 띠: 고랑 진 밭(흑토·해바라기) = 고랑 한 줄 (경계 = 고랑 바닥), 그루터기 밭 = 그루터기 3줄 (경계 = 줄 사이,
   // 그루터기 텍스처는 한 장에 12줄), 그루터기 밭의 흑토 얼룩과 구획 밖은 엇갈리지 않는다
   tFB = parcel > 0 ? (PP.w > 0.0 ? vec3(spacing, spacing, float(parcel) * 17.31) : vec3(0.0, T_TILE[1] * 0.25, float(parcel) * 17.31)) : vec3(0.0);
-  float aa = 1.0 - smoothstep(0.22, 0.6, fwidth(s0));
+  float aa = 1.0 - smoothstep(T_FAA0, T_FAA1, fwidth(s0));
 #ifdef T_RIDGE
   // 실제 고랑 형상이 있는 곳은 형상이 음영을 맡는다
   aa *= 1.0 - vTRFade;

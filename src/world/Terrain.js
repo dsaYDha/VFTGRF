@@ -1017,8 +1017,9 @@ export class Terrain {
   // 흉벽 앞면·마루 정점색 몫 (0..1, vertexColor 가 CONFIG.enemyPosition.crestTint 로 곱한다): 참호 가장자리 ~ 앞면 끝
   trenchCrestWeight(x, z) {
     const T = MAP.trench;
+    const F = CONFIG.enemyPosition.crestFan;
     if (!this.crestLines) {
-      const ext = T.topHalf + T.parapet.width;
+      const ext = T.topHalf + T.parapet.width + (F ? F.fan * (1 + F.fanVar) : 0);
       this.crestLines = T.lines.map((line) => {
         const b = bbox(line);
         return { line, x0: b.x0 - ext, x1: b.x1 + ext, z0: b.z0 - ext, z1: b.z1 + ext };
@@ -1027,12 +1028,17 @@ export class Terrain {
     }
     const toe = T.topHalf * 0.85 + T.parapet.width;
     let w = 0;
+    let fan = -1;
     for (const b of this.crestLines) {
       if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
+      // 앞면 끝 너머 흩뿌린 흙 (CONFIG.enemyPosition.crestFan): 노이즈로 들쭉날쭉하게 옅어짐
+      if (fan < 0) fan = F ? F.fan * (1 + F.fanVar * this.noise.noise(x / 2.3 + 31.7, z / 2.3 - 8.1)) : 0;
       const d = polylineDistance(b.line, x, z, this._cTmp);
-      if (d > toe || d < T.topHalf - 0.15 || this._cTmp.side * this._cTmp.nz <= 0) continue;
-      w = Math.max(w, smoothstep(T.topHalf - 0.15, T.topHalf + 0.1, d) * (1 - smoothstep(toe - 1.0, toe, d)));
+      if (d > toe + fan || d < T.topHalf - 0.15 || this._cTmp.side * this._cTmp.nz <= 0) continue;
+      w = Math.max(w, smoothstep(T.topHalf - 0.15, T.topHalf + 0.1, d) * (1 - smoothstep(toe - 1.0, toe + fan, d)));
     }
+    // 흉벽을 따라 밝기 얼룩 (1 ± amp): 고른 띠가 아니라 흙더미로 읽히게
+    if (w > 0 && F) w *= 1 + F.amp * this.noise.noise(x / F.patch - 13.3, z / F.patch + 4.4);
     return w;
   }
 
@@ -1286,6 +1292,7 @@ export class Terrain {
           for (const sd of sides) {
             const line = [];
             let minB = Infinity;
+            let minBrim = Infinity;
             let bad = false;
             for (let q = 0; q <= L; q += 0.5) {
               const px = ax + ux * Math.min(len, s + q) - uz * sd * R.rutOffset;
@@ -1293,6 +1300,9 @@ export class Terrain {
               if (this.nearCanal(px, pz, 7) || Math.abs(px) > this.half - 2 || Math.abs(pz) > this.half - 2) bad = true;
               // 밭 흙길: 옅어지는 끝과 농로(배수로 포함)를 건너는 곳에는 물을 두지 않는다
               if (rd.field) {
+                // 자국 양쪽 가장자리 (물이 넘치지 않게 수위를 이보다 낮춘다 — 비탈진 곳에서 물이 자국 밖으로 곧은 띠로 번지지 않게)
+                const e = R.rutFlat + R.rutWall;
+                minBrim = Math.min(minBrim, this.heightAt(px - uz * e, pz + ux * e), this.heightAt(px + uz * e, pz - ux * e));
                 if (lineEndFade(pts, px, pz, FT.endFade) < 0.8) bad = true;
                 // 자국이 지나는 포탄 구덩이 안(자국보다 훨씬 깊은 곳)에는 자국 모양 물을 두지 않는다 (구덩이 물은 따로)
                 if (this.heightAt(px, pz) < this.baseHeight(px, pz) - FT.rutDepth - 0.12) bad = true;
@@ -1304,7 +1314,8 @@ export class Terrain {
             if (bad || line.length < 3) continue;
             // 밭 흙길 자국은 가장자리 가까이까지 찬다 (낮은 시선에서도 보이게, fieldTrack.puddleLevel). 난수 소비는 같게 (농로 물웅덩이 배치 유지)
             const lv = rd.field ? FT.puddleLevel : [0.05, 0.1];
-            this.puddles.push({ type: 'strip', pts: line, hw: R.rutFlat + R.rutWall * 0.75, level: minB + rng.range(lv[0], lv[1]) });
+            const level = Math.min(minB + rng.range(lv[0], lv[1]), minBrim - 0.012);
+            this.puddles.push({ type: 'strip', pts: line, hw: R.rutFlat + R.rutWall * 0.75, level });
           }
         }
       }

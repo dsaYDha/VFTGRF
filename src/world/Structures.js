@@ -184,16 +184,29 @@ export class StructureBuilder {
     const cz = w.oz + w.uz * mid;
     const c = new THREE.Color(w.color || 0xffffff).multiplyScalar(w.shade ? 1 : dark);
     if (w.shade) {
-      // 정점색 띠(벽 아래 습기)를 그리려고 보이는 상자만 띠 경계 높이에서 나눈다 (충돌 상자는 그대로 하나)
+      // 정점색 띠(벽 아래 습기)를 그리려고 보이는 상자만 띠 경계 높이에서 나눈다 (충돌 상자는 그대로 하나).
+      // 참호 사격 위치 머리 뒤 구간(shade.gaps)이 있으면 그 경계에서 가로로도 나눈다 (띠가 걷히는 곳이 정점 사이로 번지지 않게)
       const rows = extraRows ? [...w.shade.rows, ...extraRows] : w.shade.rows;
       const ys = [ya, ...rows.filter((y) => y > ya + 0.05 && y < yb - 0.05).sort((a, b) => a - b), yb];
+      const ss = [sa];
+      if (w.shade.gaps && w.shade.gaps.length) {
+        const G = w.shade.headGap;
+        const cut = [];
+        for (const [a, b] of w.shade.gaps) cut.push(a - G.halfWidth - G.fade, a - G.halfWidth, b + G.halfWidth, b + G.halfWidth + G.fade);
+        ss.push(...cut.filter((s) => s > sa + 0.05 && s < sb - 0.05).sort((a, b) => a - b));
+      }
+      ss.push(sb);
       for (let q = 0; q < ys.length - 1; q++) {
         if (ys[q + 1] - ys[q] < 1e-3) continue;
-        const g = boxGeo(sb - sa, ys[q + 1] - ys[q], w.thick, uvs);
-        offsetUV(g, sa / uvs, ys[q] / uvs);
-        place(g, cx, w.y0 + (ys[q] + ys[q + 1]) * 0.5, cz, yaw);
-        this.shadeWall(g, w, c);
-        this.batch.add(w.matKey, g);
+        for (let r = 0; r < ss.length - 1; r++) {
+          if (ss[r + 1] - ss[r] < 1e-3) continue;
+          const sm = (ss[r] + ss[r + 1]) * 0.5;
+          const g = boxGeo(ss[r + 1] - ss[r], ys[q + 1] - ys[q], w.thick, uvs);
+          offsetUV(g, ss[r] / uvs, ys[q] / uvs);
+          place(g, w.ox + w.ux * sm, w.y0 + (ys[q] + ys[q + 1]) * 0.5, w.oz + w.uz * sm, yaw);
+          this.shadeWall(g, w, c);
+          this.batch.add(w.matKey, g);
+        }
       }
     } else {
       const g = boxGeo(sb - sa, yb - ya, w.thick, uvs);
@@ -415,6 +428,13 @@ export class StructureBuilder {
         const sk = sp.dark * (0.8 + 0.4 * nz.noise(s / 0.9 - S.seed, 5.1));
         k *= 1 - clamp(sk, 0, 0.9) * (1 - THREE.MathUtils.smoothstep(y, sp.band[0] * (1 + sp.var * sv), sp.band[1] * (1 + sp.var * 0.6 * sv)));
       }
+      // 참호 사격 위치 머리 뒤 (S.gaps, wallHeadGaps): 아래 띠를 걷어 밝은 벽으로 (머리가 어두운 점으로 보이게)
+      if (S.gaps && S.gaps.length && n >= -0.01) {
+        const G = S.headGap;
+        let gw = 0;
+        for (const [a, b] of S.gaps) gw = Math.max(gw, 1 - THREE.MathUtils.smoothstep(Math.max(a - s, s - b, 0), G.halfWidth, G.halfWidth + G.fade));
+        if (gw > 0) k = 1 - (1 - k) * (1 - gw * (1 - G.keep));
+      }
       k *= 1 + S.macroAmp * nz.noise(s / S.macroSize + S.seed * 2.3, y / (S.macroSize * 0.6) - 5.7);
       // 포탄 구멍·무너진 벽 둘레: 그을리고 부서진 벽면 (구멍 가장자리에서 멀어지며 옅어짐)
       let dh = Infinity;
@@ -438,6 +458,49 @@ export class StructureBuilder {
     }
     g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
     return g;
+  }
+
+  // 참호 사격 위치 머리 뒤 벽 구간 (CONFIG.farm.barn.wallShade.headGap): 수로 사격 발판의 앉은 눈(시작 위치 x + canalX, 5m 간격)에서
+  // 참호 사격 위치(AI_MAP 참호 노드 fps 의 참호선 위 점)를 지나 이 벽면(시작 a, 방향 u, 바깥 법선 n)에 닿는 s 범위 [s0, s1] 목록.
+  // 벽 앞(바깥 면이 수로 쪽)이고 사격 위치 너머에 있는 벽만. 벽 정점색(shadeWall)이 이 구간의 아래 띠를 걷고, wallBox 가 경계에서 상자를 나눈다
+  wallHeadGaps(ax, az, ux, uz, len, nx, nz) {
+    const G = CONFIG.farm.barn.wallShade && CONFIG.farm.barn.wallShade.headGap;
+    if (!G) return [];
+    const t = this.terrain;
+    const sp = MAP.playerSpawn;
+    const offZ = t.canalZ(sp.x) - sp.z;
+    const out = [];
+    for (const node of Object.values(AI_MAP.nodes)) {
+      if (node.kind !== 'trench') continue;
+      const line = MAP.trench.lines[node.trenchLine];
+      for (const f of node.fps) {
+        // 참호선 위 그 x 의 점
+        let hz = null;
+        for (let i = 0; i < line.length - 1 && hz === null; i++) {
+          const [x0, z0] = line[i];
+          const [x1, z1] = line[i + 1];
+          if ((f.x - x0) * (f.x - x1) <= 0 && x1 !== x0) hz = z0 + ((f.x - x0) / (x1 - x0)) * (z1 - z0);
+        }
+        if (hz === null) continue;
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (let xc = sp.x + G.canalX[0]; xc <= sp.x + G.canalX[1] + 1e-6; xc += 5) {
+          const zc = t.canalZ(xc) - offZ;
+          const dx = f.x - xc;
+          const dz = hz - zc;
+          // 벽면에 닿는 비율 k (> 1 = 사격 위치 너머), 수로 쪽에서 바깥 면으로 다가가야 함
+          const den = dx * nx + dz * nz;
+          if (den >= -1e-6) continue;
+          const k = ((ax - xc) * nx + (az - zc) * nz) / den;
+          if (k <= 1) continue;
+          const s = (xc + dx * k - ax) * ux + (zc + dz * k - az) * uz;
+          lo = Math.min(lo, s);
+          hi = Math.max(hi, s);
+        }
+        if (hi >= lo && hi > -G.halfWidth - G.fade && lo < len + G.halfWidth + G.fade) out.push([lo, hi]);
+      }
+    }
+    return out;
   }
 
   // ------------------------------------------------------------------ 축사
@@ -548,6 +611,7 @@ export class StructureBuilder {
         rows: WS.splash ? [...WS.splash.band, ...WS.band] : WS.band,
         dark: WS.dark[b.brick] ?? WS.dark.red,
         splash: WS.splash && { ...WS.splash, dark: WS.splash.dark[b.brick] ?? WS.splash.dark.red },
+        gaps: this.wallHeadGaps(ax, az, ux, uz, len, nx, nz),
         nx,
         nz,
         seed: (b.x * 0.37 + b.z * 0.11 + Object.keys(sides).indexOf(side) * 13.7) % 97,
@@ -1082,6 +1146,7 @@ export class StructureBuilder {
         rows: WS.splash ? [...WS.splash.band, ...WS.band] : WS.band,
         dark: WS.dark.concrete ?? WS.dark.silicate,
         splash: WS.splash && { ...WS.splash, dark: WS.splash.dark.concrete ?? WS.splash.dark.silicate },
+        gaps: this.wallHeadGaps(ax, az, (bx - ax) / len, (bz - az) / len, len, nx, nz),
         holeDark: 0.3,
         inner: 0.6,
         nx,
@@ -1371,6 +1436,9 @@ export class StructureBuilder {
         const yaw = Math.atan2(-sg.uz, sg.ux);
         const at = (s, d) => [sg.ax + sg.ux * s + sg.nx * d, sg.az + sg.uz * s + sg.nz * d];
         const rows = [S.crestDist - 0.17, S.crestDist + 0.17];
+        const cols = run.fresh ? S.colors : S.runColors || S.colors;
+        // 사격 구멍 위 맨 윗단은 비워 마루 윤곽에 홈을 낸다 (S.notch)
+        const notchHalf = S.loopholeWidth / 2 + (S.notch ?? 0);
         for (let lv = 0; lv < S.layers; lv++) {
           const top = lv === S.layers - 1;
           const ds = top ? [S.crestDist] : rows;
@@ -1378,8 +1446,9 @@ export class StructureBuilder {
             for (let s = sa + (lv % 2) * S.bagStep * 0.5; s <= sb; s += S.bagStep) {
               const [px, pz] = at(s, d);
               if (lv === 1 && holes.some((hx) => Math.abs(px - hx) < S.loopholeWidth / 2 + 0.2)) continue;
+              if (top && S.notch !== undefined && holes.some((hx) => Math.abs(px - hx) < notchHalf + 0.2)) continue;
               const py = this.terrain.heightAt(px, pz) + 0.07 + lv * 0.14;
-              this.inst.add('sandbag', px, py, pz, rng.range(-0.05, 0.05), yaw + rng.range(-0.08, 0.08), rng.range(-0.05, 0.05), 1, 1, 1, S.colors[Math.floor(rng.next() * S.colors.length)]);
+              this.inst.add('sandbag', px, py, pz, rng.range(-0.05, 0.05), yaw + rng.range(-0.08, 0.08), rng.range(-0.05, 0.05), 1, 1, 1, cols[Math.floor(rng.next() * cols.length)]);
             }
           }
         }
@@ -1392,12 +1461,30 @@ export class StructureBuilder {
           this.batch.add('wood', place(boxGeo(S.loopholeWidth + 0.35, 0.04, 0.62, 1), px, gy + 0.29, pz, yaw), 0x8a7a64);
           this.batch.add('interior', place(boxGeo(S.loopholeWidth, 0.11, 0.5), px, gy + 0.205, pz, yaw));
         }
-        // 충돌 상자 (마루 높이 기준)
+        // 충돌 상자 (마루 높이 기준): 아래 단들은 구간 전체 상자 하나, 맨 윗단은 사격 구멍 홈(notch)을 뺀 토막마다
         const sm = (sa + sb) / 2;
         const [cx, cz] = at(sm, S.crestDist);
         const gy = this.terrain.heightAt(cx, cz);
-        const hy = (S.layers * 0.14 + 0.1) / 2;
+        const notched = S.notch !== undefined && holes.some((hx) => {
+          const s = (hx - sg.ax) / sg.ux;
+          return s >= sa && s <= sb;
+        });
+        const lowL = notched ? S.layers - 1 : S.layers;
+        const hy = (lowL * 0.14 + 0.1) / 2;
         this.col.addBox(cx, gy + hy - 0.04, cz, (sb - sa) / 2 + 0.25, hy, 0.36, yaw, 'sandbag', 'TRENCH_SANDBAG');
+        if (notched) {
+          let pieces = [[sa - 0.25, sb + 0.25]];
+          for (const hx of holes) {
+            const s = (hx - sg.ax) / sg.ux;
+            pieces = subtractInterval(pieces, s - notchHalf, s + notchHalf);
+          }
+          for (const [a, b] of pieces) {
+            if (b - a < 0.2) continue;
+            const [qx, qz] = at((a + b) / 2, S.crestDist);
+            const qy = this.terrain.heightAt(qx, qz) + 0.06 + (S.layers - 1) * 0.14 + 0.07;
+            this.col.addBox(qx, qy, qz, (b - a) / 2, 0.08, 0.22, yaw, 'sandbag', 'TRENCH_SANDBAG');
+          }
+        }
       }
     }
   }
@@ -1663,10 +1750,19 @@ export class StructureBuilder {
       return runs;
     };
     const stake = (x, y, z, tx, ty, tz, w) => this.batch.add('rust', stickGeo(x, y, z, tx, ty, tz, w, w, 0.5), W.picketColor);
+    // 시작 위치 눈 → 참호 사격 위치 시선에 걸린 말뚝은 철조망을 따라 비킨다 (W.headLineClear)
+    const clearR = W.headLineClear || 0;
+    const onHeadLine = (x, z) => clearR > 0 && this.headLineDist(x, z) < clearR;
     // 말뚝 철조망
     for (const line of M.fences) {
       for (const run of runsAlong(line, W.picketSpacing)) {
         for (const p of run) {
+          if (onHeadLine(p.x, p.z)) {
+            const off = [0.55, -0.55, 0.9, -0.9].find((o) => !onHeadLine(p.x + p.ux * o, p.z + p.uz * o)) ?? 0;
+            p.x += p.ux * off;
+            p.z += p.uz * off;
+            p.y = t.heightAt(p.x, p.z);
+          }
           const h = W.picketHeight * rng.range(0.88, 1.05);
           p.lean = [rng.range(-0.05, 0.05), rng.range(-0.07, 0.07)];
           p.at = (hh) => [p.x + p.lean[0] * hh, p.y + hh, p.z + p.lean[1] * hh];
@@ -1743,12 +1839,42 @@ export class StructureBuilder {
             if (prev) seg(prev, q);
             prev = q;
           }
-          // 고정 말뚝 (약 6m 마다)
-          if (k % 25 === 12) stake(p.x + nx * R * 0.2, p.y - 0.1, p.z + nz * R * 0.2, p.x + nx * R * 0.25, p.y + R * 2.1, p.z + nz * R * 0.25, 0.04);
+          // 고정 말뚝 (약 6m 마다 — 참호 사격 위치 시선 위는 건너뜀)
+          if (k % 25 === 12 && !onHeadLine(p.x, p.z)) stake(p.x + nx * R * 0.2, p.y - 0.1, p.z + nz * R * 0.2, p.x + nx * R * 0.25, p.y + R * 2.1, p.z + nz * R * 0.25, 0.04);
         });
         this.wireVolumes(run, W.coilRadius + 0.05, W.coilRadius + 0.1, W.coilRadius * 2.05);
       }
     }
+  }
+
+  // 시작 위치(MAP.playerSpawn) 앉은 눈에서 참호 사격 위치(AI_MAP 참호 노드 fps 의 참호선 위 점)로 가는 시선들까지의 평면 거리 (m)
+  headLineDist(x, z) {
+    if (!this._headLines) {
+      const sp = MAP.playerSpawn;
+      this._headLines = [];
+      for (const node of Object.values(AI_MAP.nodes)) {
+        if (node.kind !== 'trench') continue;
+        const line = MAP.trench.lines[node.trenchLine];
+        for (const f of node.fps) {
+          for (let i = 0; i < line.length - 1; i++) {
+            const [x0, z0] = line[i];
+            const [x1, z1] = line[i + 1];
+            if ((f.x - x0) * (f.x - x1) <= 0 && x1 !== x0) {
+              this._headLines.push([sp.x, sp.z, f.x, z0 + ((f.x - x0) / (x1 - x0)) * (z1 - z0)]);
+              break;
+            }
+          }
+        }
+      }
+    }
+    let best = Infinity;
+    for (const [ax, az, bx, bz] of this._headLines) {
+      const dx = bx - ax;
+      const dz = bz - az;
+      const f = clamp(((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz), 0, 1);
+      best = Math.min(best, Math.hypot(x - ax - dx * f, z - az - dz * f));
+    }
+    return best;
   }
 
   // 철조망 구간을 12m 안팎 조각으로 나눠 은폐 볼륨('wire', 아주 옅음 — 가닥이 몰린 폭 concealHalfW, 철조망 높이까지만)과

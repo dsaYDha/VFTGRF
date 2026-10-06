@@ -57,16 +57,16 @@ export class Screens {
     const slider = document.getElementById('vol-slider');
     for (const type of ['click', 'pointerdown', 'mousedown']) box.addEventListener(type, (e) => e.stopPropagation());
     slider.addEventListener('input', () => {
-      this.game.audio.setVolume(slider.value / 100);
+      if (this.game.audio) this.game.audio.setVolume(slider.value / 100);
       this.refreshVolume();
     });
-    this.refreshVolume();
+    // 화면(Screens)이 오디오보다 먼저 만들어지므로 처음 값은 일시정지 화면을 열 때 채운다 (showPause)
   }
 
   refreshVolume() {
     const a = this.game.audio;
     const slider = document.getElementById('vol-slider');
-    if (!slider) return;
+    if (!slider || !a) return;
     const pct = Math.round(a.volume * 100);
     if (+slider.value !== pct) slider.value = String(pct);
     document.getElementById('vol-value').textContent = `${pct}%`;

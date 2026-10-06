@@ -2008,6 +2008,8 @@ export class Terrain {
     const farMat = material.userData.farMaterial || material;
     const half = this.half;
     const { res, nc, cs } = this.chunkResolutions();
+    // 고랑 골판이 근거리 렌더 메시 표면을 따라가도록 (meshHeightAt)
+    this._meshRes = { res, nc, cs };
     const gc = Math.max(1, Math.round(M.group / cs));
     const ng = Math.ceil(nc / gc);
     const root = new THREE.Group();
@@ -2047,6 +2049,52 @@ export class Terrain {
     this.triangleCount = tris + ringTris;
     this.farLodTriangleCount = farTris;
     return root;
+  }
+
+  // 근거리 렌더 메시(lvl 0)의 실제 표면 높이 (buildChunk 와 같은 청크 해상도·대각선으로 보간, renderDrop 포함).
+  // 고랑 골판은 이 표면 위 lift 에 얹는다: 높이장(0.5m)을 직접 쓰면 2.5m 렌더 격자의 현과 1~2cm 어긋나 지형이 골판 사이로
+  // 군데군데 뚫고 나와 고랑 줄이 토막 나 보인다. 꼭짓점 높이는 this._meshH 에 모아 둔다 (buildRidges 가 끝나면 비움)
+  meshHeightAt(x, z) {
+    const M = this._meshRes || (this._meshRes = this.chunkResolutions());
+    const { res, nc, cs } = M;
+    const half = this.half;
+    const ci = clamp(Math.floor((x + half) / cs), 0, nc - 1);
+    const cj = clamp(Math.floor((z + half) / cs), 0, nc - 1);
+    const ck = cj * nc + ci;
+    const rx = res[ck * 4];
+    const rz = res[ck * 4 + 1];
+    const x0 = -half + ci * cs;
+    const z0 = -half + cj * cs;
+    const nx = Math.round(cs / rx);
+    const nzn = Math.round(cs / rz);
+    const fx = clamp((x - x0) / rx, 0, nx);
+    const fz = clamp((z - z0) / rz, 0, nzn);
+    const i = Math.min(nx - 1, Math.floor(fx));
+    const j = Math.min(nzn - 1, Math.floor(fz));
+    const tx = fx - i;
+    const tz = fz - j;
+    const cache = this._meshH || (this._meshH = new Map());
+    const H = (ii, jj) => {
+      const key = (ck * 64 + jj) * 64 + ii;
+      let h = cache.get(key);
+      if (h === undefined) {
+        const vx = x0 + ii * rx;
+        const vz = z0 + jj * rz;
+        h = this.gridHeight(vx, vz) - this.renderDrop(vx, vz);
+        cache.set(key, h);
+      }
+      return h;
+    };
+    const a = H(i, j);
+    const b = H(i + 1, j);
+    const c = H(i, j + 1);
+    const d = H(i + 1, j + 1);
+    if ((i + j) % 2 === 0) {
+      // 대각선 b–c (buildChunk: a,c,b / b,c,d)
+      return tx + tz <= 1 ? a + (b - a) * tx + (c - a) * tz : d + (c - d) * (1 - tx) + (b - d) * (1 - tz);
+    }
+    // 대각선 a–d (a,c,d / a,d,b)
+    return tx >= tz ? a + (b - a) * tx + (d - b) * tz : a + (c - a) * tz + (d - c) * tx;
   }
 
   // 그래픽 품질 프리셋용: 근거리 → 원거리 LOD 전환 거리 (m)
@@ -2124,6 +2172,7 @@ export class Terrain {
       root.add(lod);
     }
     this.ridgeTriangleCount = tris;
+    this._meshH = null;
     return root;
   }
 
@@ -2198,15 +2247,14 @@ export class Terrain {
     }
     if (!any) return;
     const isValid = (k, j) => k >= k0 && k < k1 && j >= j0 && j < j1 && valid[(k - k0) * nJ + (j - j0)] === 1;
-    const half = RG.geomDepth * 0.5;
     const gx = px / sp;
     const gz = pz / sp;
-    // 정점 하나: 위치 = 내린 지면(평균면 - half * 고랑 세기) + lift, 법선 = 지형 법선.
+    // 정점 하나: 위치 = 근거리 렌더 메시 표면(평균면 - geomDepth/2 * 고랑 세기) + lift, 법선 = 지형 법선.
     // 비탈 기울기(마루 높이 / 반 간격, sgn = 오르막 +1 / 내리막 -1)는 aRidge.zw 로 셰이더에서 더한다 (비탈마다 평평한 음영)
     const vert = (u, v, rise, slopeRise, shade, w, sgn) => {
       const [x, z] = at(u, v);
       const hm = this.heightAt(x, z);
-      g.pos.push(x, hm - half * w + RG.lift, z);
+      g.pos.push(x, this.meshHeightAt(x, z) + RG.lift, z);
       const n = this.normalAt(x, z);
       g.nor.push(n.x, n.y, n.z);
       this.vertexColor(x, z, hm, false, g.colr);
@@ -2331,7 +2379,9 @@ export class Terrain {
         const vi = base + local;
         g.pos.push(g.pos[vi * 3], g.pos[vi * 3 + 1] - sd, g.pos[vi * 3 + 2]);
         g.nor.push(g.nor[vi * 3], g.nor[vi * 3 + 1], g.nor[vi * 3 + 2]);
-        g.colr.push(g.colr[vi * 3] * 0.8, g.colr[vi * 3 + 1] * 0.8, g.colr[vi * 3 + 2] * 0.8);
+        // 가장자리 정점과 같은 색 (어둡게 하면 해상도가 다른 청크 사이 몇 cm 틈 — 밭의 renderDrop 이 칸마다 달라 생김 —
+        // 으로 비친 스커트가 5m 청크 경계를 따라 가는 검은 줄로 그어져 고랑을 가로지르는 격자 무늬가 된다)
+        g.colr.push(g.colr[vi * 3], g.colr[vi * 3 + 1], g.colr[vi * 3 + 2]);
       }
       for (let q = 0; q < list.length - 1; q++) {
         const a = base + list[q];

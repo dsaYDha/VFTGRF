@@ -147,7 +147,16 @@ export class AudioSystem {
   // 전체 볼륨 0~1 (일시정지 메뉴 슬라이더). 브라우저에 저장한다
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.master) this.master.gain.setTargetAtTime(CONFIG.audio.master * this.volume, this.ctx.currentTime, 0.02);
+    if (this.master) {
+      const g = this.master.gain;
+      const target = CONFIG.audio.master * this.volume;
+      // 일시정지 중(컨텍스트 멈춤)에는 시간이 흐르지 않아 램프가 진행되지 않으므로 바로 넣는다
+      if (this.ctx.state === 'running') g.setTargetAtTime(target, this.ctx.currentTime, 0.02);
+      else {
+        g.cancelScheduledValues(0);
+        g.value = target;
+      }
+    }
     try {
       window.localStorage.setItem(VOLUME_KEY, String(this.volume));
     } catch {

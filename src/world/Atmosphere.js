@@ -5,6 +5,8 @@
 //    거리 = 카메라에서의 실제 거리, 높이 안개(위로 갈수록 옅음), 먼 곳 실루엣 몫 (CONFIG.atmosphere.fog)
 //    가까운 지수형 투과율과 먼 곳 몫은 부드러운 최댓값으로 합친다 → 600m 에서 거의 안개색, 3km 너머 지평선은 안개에 녹는다
 //    + 지면 연무 (CONFIG.atmosphere.groundHaze): 땅을 스치는 긴 시선만 더 뿌옇게 → 지면이 지평선 쪽으로 서서히 밝아져 안개 띠로 이어진다
+//      그중 수로 남쪽 저지대(groundHaze.lowland)는 연무가 더 짙게 깔려, 낮은 둔덕 뒤로 숨은 먼 골짜기 앞에서 지면이 칼 같은 선 없이
+//      안개로 녹아든다 (시선이 저지대 안을 지나는 길이로 적분 — 북쪽 적 진지 쪽 시선은 그대로)
 //  - 하늘: 절차적 흐린 하늘 돔. 층운 두께 텍스처 두 겹이 바람 방향으로 아주 천천히 흐르고,
 //    지평선 연무 띠가 안개색과 정확히 같은 색으로 이어진다 (톤매핑 없이 화면 값 그대로).
 //  - 조명: 반구광 + 구름 뒤 해(약한 방향광). 그림자는 플레이어 주변만 옅고 부드럽게, 가장자리에서 사라진다.
@@ -14,6 +16,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { cloudTexture } from './textures.js';
+import { MAP } from './mapData.js';
 
 const glf = (v) => {
   const s = Number(v).toPrecision(7);
@@ -26,25 +29,45 @@ const glc = (hex) => {
 
 // ---------------------------------------------------------------------------- 안개 식 (JS 판, 점검·보고용)
 // d: 카메라에서의 거리(m), dy: 카메라 기준 높이차(m), camY: 카메라 월드 높이 (생략하면 연무층 바닥 + 1.6m, 선 눈높이).
+// camZ / dz: 카메라 월드 z 와 물체까지의 z 차 (남쪽 저지대 연무용, camZ 를 생략하면 저지대 연무는 빼고 계산).
 // 반환: 안개 비율 0..1
-export function fogFactorAt(d, dy = 0, camY = null) {
+export function fogFactorAt(d, dy = 0, camY = null, camZ = null, dz = 0) {
   const F = CONFIG.atmosphere.fog;
   let k = Math.max(-1.5, Math.min(12, dy / F.hazeHeight));
   const hf = Math.abs(k) < 1e-3 ? 1 : (1 - Math.exp(-k)) / k;
   const cy = camY === null ? (CONFIG.atmosphere.groundHaze?.ref ?? 0) + 1.6 : camY;
-  return 1 - fogTransmit(d * hf, groundHazeTau(d, cy, cy + dy));
+  return 1 - fogTransmit(d * hf, groundHazeTau(d, cy, cy + dy, camZ, dz));
 }
 
-// 지면 연무가 더하는 광학 깊이 (GLSL atmoGroundHaze 와 같은 식). hc / hp: 카메라 / 물체의 월드 높이
-function groundHazeTau(d, hc, hp) {
+// 지면 연무가 더하는 광학 깊이 (GLSL atmoGroundHaze 와 같은 식). hc / hp: 카메라 / 물체의 월드 높이, zc / dz: 카메라 월드 z / z 차
+function groundHazeTau(d, hc, hp, zc = null, dz = 0) {
   const G = CONFIG.atmosphere.groundHaze;
-  if (!G || !(G.tau > 0)) return 0;
+  if (!G) return 0;
+  const g = (G.tau > 0 ? G.tau * (1 - Math.exp(-d / G.length)) : 0) + (zc === null ? 0 : lowlandTau(d, zc, dz));
+  if (!(g > 0)) return 0;
   const a = Math.max(hc - G.ref, 0);
   const b = Math.max(hp - G.ref, 0);
   const ea = Math.exp(-a / G.height);
   const eb = Math.exp(-b / G.height);
   const m = Math.abs(b - a) < 0.02 ? 0.5 * (ea + eb) : (G.height * (ea - eb)) / (b - a);
-  return G.tau * m * (1 - Math.exp(-d / G.length));
+  return g * m;
+}
+
+// 남쪽 저지대 연무 (GLSL atmoLowland 와 같은 식): 밀도가 수로 남쪽 start m 에서 0 → ramp m 에 걸쳐 1 로 오르는 띠를
+// 시선이 지나는 길이(밀도 가중)를 구해 tau·(1 - e^(-길이/length)) 로 더한다 (연무층 높이 배수 m 은 지면 연무와 같이 곱한다)
+function lowlandZ0() {
+  return MAP.canal.z + CONFIG.atmosphere.groundHaze.lowland.start;
+}
+function lowlandR(z, z0, w) {
+  const u = Math.max(z - z0, 0);
+  return u < w ? (0.5 * u * u) / w : u - 0.5 * w;
+}
+function lowlandTau(d, zc, dz) {
+  const L = CONFIG.atmosphere.groundHaze.lowland;
+  if (!L || !(L.tau > 0)) return 0;
+  const z0 = lowlandZ0();
+  const len = Math.abs(dz) < 0.05 ? d * Math.min(Math.max((zc - z0) / L.ramp, 0), 1) : (d * (lowlandR(zc + dz, z0, L.ramp) - lowlandR(zc, z0, L.ramp))) / dz;
+  return L.tau * (1 - Math.exp(-len / L.length));
 }
 
 // 높이 보정한 거리 dd 의 투과율: 가까운 지수형 A 와 먼 곳 실루엣 몫 B 의 부드러운 최댓값 (p-노름, 거리에 따라 단조 감소)
@@ -116,33 +139,56 @@ function installShaderChunks() {
   const SC = THREE.ShaderChunk;
   const F = CONFIG.atmosphere.fog;
   if (SC.fog_fragment.includes('atmoFogFactor')) return; // 핫 리로드 등으로 두 번 불릴 때
-  // 정점: 깊이 대신 실제 거리 + 카메라 기준 월드 높이차 (높이 안개용)
+  // 정점: 깊이 대신 실제 거리 + 카메라 기준 월드 높이차 (높이 안개용) + 월드 z 차 (남쪽 저지대 연무용)
   SC.fog_pars_vertex = `
 #ifdef USE_FOG
 	varying float vFogDepth;
 	varying float vFogDY;
+	varying float vFogDZ;
 #endif
 `;
   SC.fog_vertex = `
 #ifdef USE_FOG
 	vFogDepth = length( mvPosition.xyz );
-	vFogDY = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).y;
+	{
+		vec3 atmoOff = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).xyz;
+		vFogDY = atmoOff.y;
+		vFogDZ = atmoOff.z;
+	}
 #endif
 `;
   // 조각: 광학 깊이 tau = linear·d + (밀도·d)² + 지면 연무, 투과율 = (e^-tau ^p + (r·e^(-d/L))^p)^(1/p), 높이 안개 배수 hf
   // 지면 연무: 연무층 밀도 e^(-h/height) 를 카메라→물체 시선 위에서 평균 (h = 월드 높이 - ref, 0 아래는 최대 밀도).
   // cameraPosition 은 Three.js 가 모든 (Raw 가 아닌) 재질의 조각 셰이더 머리에 넣어 둔다
   const GH = CONFIG.atmosphere.groundHaze;
+  // 남쪽 저지대 연무: 밀도 = 수로 남쪽 start m 에서 0 → ramp m 에 걸쳐 1 (z 에 대한 선형 경사). 시선 위 밀도 적분 =
+  // 거리 × (R(물체 z) - R(카메라 z)) / z 차 (R = 밀도의 원시함수), 동서로 나란한 시선은 카메라 자리 밀도 × 거리
+  const LL = GH && GH.lowland && GH.lowland.tau > 0 ? GH.lowland : null;
+  const llGlsl = LL
+    ? `
+		float atmoLowR( float z ) {
+			float u = max( z - ${glf(MAP.canal.z + LL.start)}, 0.0 );
+			return u < ${glf(LL.ramp)} ? 0.5 * u * u / ${glf(LL.ramp)} : u - ${glf(0.5 * LL.ramp)};
+		}
+		float atmoLowland( float d ) {
+			float zc = cameraPosition.z;
+			float len = abs( vFogDZ ) < 0.05
+				? d * clamp( ( zc - ${glf(MAP.canal.z + LL.start)} ) / ${glf(LL.ramp)}, 0.0, 1.0 )
+				: d * ( atmoLowR( zc + vFogDZ ) - atmoLowR( zc ) ) / vFogDZ;
+			return ${glf(LL.tau)} * ( 1.0 - exp( -len / ${glf(LL.length)} ) );
+		}`
+    : `
+		float atmoLowland( float d ) { return 0.0; }`;
   const ghGlsl =
-    GH && GH.tau > 0
-      ? `
+    GH && (GH.tau > 0 || LL)
+      ? `${llGlsl}
 		float atmoGroundHaze( float d, float dy ) {
 			float a = max( cameraPosition.y - ${glf(GH.ref)}, 0.0 );
 			float b = max( cameraPosition.y + dy - ${glf(GH.ref)}, 0.0 );
 			float ea = exp( -a / ${glf(GH.height)} );
 			float eb = exp( -b / ${glf(GH.height)} );
 			float m = abs( b - a ) < 0.02 ? 0.5 * ( ea + eb ) : ${glf(GH.height)} * ( ea - eb ) / ( b - a );
-			return ${glf(GH.tau)} * m * ( 1.0 - exp( -d / ${glf(GH.length)} ) );
+			return m * ( ${glf(Math.max(GH.tau, 0))} * ( 1.0 - exp( -d / ${glf(GH.length)} ) ) + atmoLowland( d ) );
 		}`
       : `
 		float atmoGroundHaze( float d, float dy ) { return 0.0; }`;
@@ -151,6 +197,7 @@ function installShaderChunks() {
 	uniform vec3 fogColor;
 	varying float vFogDepth;
 	varying float vFogDY;
+	varying float vFogDZ;
 	#ifdef FOG_EXP2
 		uniform float fogDensity;${ghGlsl}
 		float atmoFogFactor( float d, float dy ) {

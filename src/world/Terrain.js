@@ -1294,13 +1294,17 @@ export class Terrain {
               // 밭 흙길: 옅어지는 끝과 농로(배수로 포함)를 건너는 곳에는 물을 두지 않는다
               if (rd.field) {
                 if (lineEndFade(pts, px, pz, FT.endFade) < 0.8) bad = true;
+                // 자국이 지나는 포탄 구덩이 안(자국보다 훨씬 깊은 곳)에는 자국 모양 물을 두지 않는다 (구덩이 물은 따로)
+                if (this.heightAt(px, pz) < this.baseHeight(px, pz) - FT.rutDepth - 0.12) bad = true;
                 for (const mr of mainRoads) if (polylineDistance(mr.points, px, pz) < mr.width / 2 + R.ditchOffset + R.ditchHalf + 0.6) bad = true;
               }
               minB = Math.min(minB, this.heightAt(px, pz));
               line.push([px, pz]);
             }
             if (bad || line.length < 3) continue;
-            this.puddles.push({ type: 'strip', pts: line, hw: R.rutFlat + R.rutWall * 0.75, level: minB + rng.range(0.05, 0.1) });
+            // 밭 흙길 자국은 가장자리 가까이까지 찬다 (낮은 시선에서도 보이게, fieldTrack.puddleLevel). 난수 소비는 같게 (농로 물웅덩이 배치 유지)
+            const lv = rd.field ? FT.puddleLevel : [0.05, 0.1];
+            this.puddles.push({ type: 'strip', pts: line, hw: R.rutFlat + R.rutWall * 0.75, level: minB + rng.range(lv[0], lv[1]) });
           }
         }
       }
@@ -2168,13 +2172,20 @@ export class Terrain {
     const nK = k1 - k0;
     const nJ = j1 - j0;
     const at = (u, v) => [u * px + v * dx, u * pz + v * dz];
+    // 이랑(k)마다 고랑 방향 정점 행을 엇갈린다 (0..rowStagger 칸): 행 위치가 모든 이랑에서 같으면 행마다 꺾이는 정점색·법선·마루 높이
+    // (잡초 얼룩 경계·끝 마루 낮추기)가 고랑을 가로지르는 가로줄로 줄지어 바둑판 무늬가 된다. 구획마다 다른 난수
+    const stag = (k) => {
+      const h = Math.sin(k * 12.9898 + P.index * 78.233) * 43758.5453;
+      return (h - Math.floor(h)) * RG.rowStagger;
+    };
     // 칸 유효성 (상자와 무관하게 위치만으로 정해 묶음 경계에서 이어진다)
     const valid = new Uint8Array(nK * nJ);
     const inBox = new Uint8Array(nK * nJ);
     let any = false;
     for (let k = k0; k < k1; k++) {
+      const ok = stag(k);
       for (let j = j0; j < j1; j++) {
-        const [x, z] = at((k + 0.5) * sp, (j + 0.5) * L);
+        const [x, z] = at((k + 0.5) * sp, (j + 0.5 + ok) * L);
         const c = (k - k0) * nJ + (j - j0);
         if (this.furrowWeight(x, z) < 0.08) continue;
         if (!this.ridgeSmooth(x, z, px * sp * 0.5, pz * sp * 0.5, dx * L * 0.5, dz * L * 0.5)) continue;
@@ -2206,7 +2217,7 @@ export class Terrain {
     };
     // 한 행(v): 오르막 비탈(바닥, 마루), 내리막 비탈(마루, 바닥) 정점 4개
     const row = (k, j) => {
-      const v = j * L;
+      const v = (j + stag(k)) * L;
       const uT = k * sp;
       const uC = uT + sp * 0.5;
       const [cx, cz] = at(uC, v);

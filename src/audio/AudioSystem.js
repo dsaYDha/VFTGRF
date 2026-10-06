@@ -106,9 +106,17 @@ export class AudioSystem {
     this.muffle = ctx.createBiquadFilter();
     this.muffle.type = 'lowpass';
     this.muffle.frequency.value = 20000;
+    // 마지막 리미터: 연발·여러 총성이 겹쳐도 출력이 1.0 을 넘어 찢어지지 않게
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -3;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.001;
+    this.limiter.release.value = 0.12;
     this.master.connect(this.muffle);
     this.muffle.connect(this.comp);
-    this.comp.connect(ctx.destination);
+    this.comp.connect(this.limiter);
+    this.limiter.connect(ctx.destination);
   }
 
   // 임무 시작(클릭) 때 호출: 컨텍스트를 깨우고, 처음 한 번은 소리 묶음·잔향·환경음을 만든다

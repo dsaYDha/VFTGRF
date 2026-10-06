@@ -108,66 +108,286 @@ export class StructureBuilder {
   }
 
   // ------------------------------------------------------------------ 벽
-  // w: {ox, oz, ux, uz, len, thick, y0, height, openings, collapses, matKey, colMat, tag, color}
+  // w: {ox, oz, ux, uz, len, thick, y0, height, openings, collapses, notches, matKey, colMat, tag, color}
+  // 열린 곳 중 prof 가 있는 것(축사 포탄 구멍, holeProfile)은 보이는 윤곽이 들쭉날쭉하다: 그 둘레(prof.k0..k1 기둥)는 wallJagColumns 가
+  // 벽돌 반 장 폭 기둥으로 따로 쌓고, 여기서는 충돌 상자만 둔다 (충돌 구멍 = 맵 데이터 사각형 + 윗변이 확실히 뚫린 만큼 — 적 사격·엄폐 사선 그대로).
+  // notches = 벽 꼭대기의 부서진 자리 (wallTopNotches — 보이는 상자·충돌 상자 모두 낮아짐)
   wall(w) {
     const bps = new Set([0, w.len]);
     for (const o of w.openings) {
       bps.add(clamp(o.s0, 0, w.len));
       bps.add(clamp(o.s1, 0, w.len));
+      if (o.prof) {
+        bps.add(clamp(o.prof.ms0, 0, w.len));
+        bps.add(clamp(o.prof.ms1, 0, w.len));
+        if (o.prof.through) for (const s of o.prof.through) bps.add(clamp(s, 0, w.len));
+      }
     }
     for (const c of w.collapses) {
       for (let s = c.s0; s < c.s1; s += 0.55) bps.add(clamp(s, 0, w.len));
       bps.add(clamp(c.s1, 0, w.len));
     }
+    for (const n of w.notches || []) {
+      for (let k = 0; k <= n.depth.length; k++) bps.add(clamp(n.s0 + k * n.step, 0, w.len));
+    }
     const arr = [...bps].sort((a, b) => a - b);
     const yaw = Math.atan2(-w.uz, w.ux);
-    const uvs = w.uvScale || 2;
     for (let i = 0; i < arr.length - 1; i++) {
       const sa = arr[i];
       const sb = arr[i + 1];
       if (sb - sa < 0.02) continue;
       const mid = (sa + sb) * 0.5;
-      let top = w.height;
-      let broken = false;
-      for (const c of w.collapses) {
-        if (mid > c.s0 && mid < c.s1) {
-          top = Math.min(top, c.h + (hash1(mid + w.ox) - 0.5) * 0.7);
-          broken = true;
-        }
-      }
+      const top = this.wallTop(w, mid);
+      const broken = w.collapses.some((c) => mid > c.s0 && mid < c.s1);
       let intervals = [[0, top]];
       let nearHole = false;
+      let jag = false;
       for (const o of w.openings) {
-        if (o.s0 <= sa + 1e-3 && o.s1 >= sb - 1e-3) intervals = subtractInterval(intervals, o.y0, o.y1);
+        if (o.s0 <= sa + 1e-3 && o.s1 >= sb - 1e-3) {
+          // 들쭉날쭉한 구멍: 윗변 위로 모든 기둥이 뚫린 높이(minRise)까지, 벽 꼭대기까지 뚫린 구간(through)은 꼭대기까지 충돌도 뚫는다
+          const P = o.prof;
+          const thr = P && P.through && mid > P.through[0] && mid < P.through[1];
+          intervals = subtractInterval(intervals, o.y0, thr ? top + 1 : o.y1 + (P ? P.minRise : 0));
+        }
         if (o.hole && sb > o.s0 - 0.8 && sa < o.s1 + 0.8) nearHole = true;
+        if (o.prof && mid > o.prof.ms0 && mid < o.prof.ms1) jag = true;
       }
       for (const [ya, yb] of intervals) {
         if (yb - ya < 0.03) continue;
         const cx = w.ox + w.ux * mid;
         const cz = w.oz + w.uz * mid;
         const cy = w.y0 + (ya + yb) * 0.5;
-        const dark = nearHole || broken ? 0.62 : 1;
         // 정점색 벽(shade)은 구멍·무너진 곳 둘레 어둡기를 shadeWall 이 거리에 따라 부드럽게 준다 (상자마다 끊긴 사각형 얼룩이 생기지 않게)
-        const c = new THREE.Color(w.color || 0xffffff).multiplyScalar(w.shade ? 1 : dark);
-        if (w.shade) {
-          // 정점색 띠(벽 아래 습기)를 그리려고 보이는 상자만 띠 경계 높이에서 나눈다 (충돌 상자는 그대로 하나)
-          const ys = [ya, ...w.shade.rows.filter((y) => y > ya + 0.05 && y < yb - 0.05), yb];
-          for (let q = 0; q < ys.length - 1; q++) {
-            const g = boxGeo(sb - sa, ys[q + 1] - ys[q], w.thick, uvs);
-            offsetUV(g, sa / uvs, ys[q] / uvs);
-            place(g, cx, w.y0 + (ys[q] + ys[q + 1]) * 0.5, cz, yaw);
-            this.shadeWall(g, w, c);
-            this.batch.add(w.matKey, g);
-          }
-        } else {
-          const g = boxGeo(sb - sa, yb - ya, w.thick, uvs);
-          offsetUV(g, sa / uvs, ya / uvs);
-          place(g, cx, cy, cz, yaw);
-          this.batch.add(w.matKey, g, c, 0.18);
-        }
+        if (!jag) this.wallBox(w, sa, sb, ya, yb, nearHole || broken ? 0.62 : 1);
         if (w.colMat) this.col.addBox(cx, cy, cz, (sb - sa) / 2, (yb - ya) / 2, w.thick / 2, yaw, w.colMat, w.tag);
       }
     }
+    for (const o of w.openings) if (o.prof) this.wallJagColumns(w, o);
+  }
+
+  // 벽 꼭대기 높이 (벽 바닥 기준): 무너진 구간(collapses, 0.55m 토막마다 들쭉날쭉) · 꼭대기의 부서진 자리(notches, 토막마다 깊이)
+  wallTop(w, s) {
+    let top = w.height;
+    for (const c of w.collapses) if (s > c.s0 && s < c.s1) top = Math.min(top, c.h + (hash1(s + w.ox) - 0.5) * 0.7);
+    for (const n of w.notches || []) {
+      if (s > n.s0 && s < n.s1) top = Math.min(top, w.height - n.depth[Math.min(n.depth.length - 1, Math.floor((s - n.s0) / n.step))]);
+    }
+    return top;
+  }
+
+  // 보이는 벽 상자 하나 (s sa..sb, 높이 ya..yb). 정점색 벽(shade)은 띠 경계(rows)와 extraRows 에서 나눠 shadeWall 로 칠한다
+  wallBox(w, sa, sb, ya, yb, dark = 1, extraRows = null) {
+    const yaw = Math.atan2(-w.uz, w.ux);
+    const uvs = w.uvScale || 2;
+    const mid = (sa + sb) * 0.5;
+    const cx = w.ox + w.ux * mid;
+    const cz = w.oz + w.uz * mid;
+    const c = new THREE.Color(w.color || 0xffffff).multiplyScalar(w.shade ? 1 : dark);
+    if (w.shade) {
+      // 정점색 띠(벽 아래 습기)를 그리려고 보이는 상자만 띠 경계 높이에서 나눈다 (충돌 상자는 그대로 하나)
+      const rows = extraRows ? [...w.shade.rows, ...extraRows] : w.shade.rows;
+      const ys = [ya, ...rows.filter((y) => y > ya + 0.05 && y < yb - 0.05).sort((a, b) => a - b), yb];
+      for (let q = 0; q < ys.length - 1; q++) {
+        if (ys[q + 1] - ys[q] < 1e-3) continue;
+        const g = boxGeo(sb - sa, ys[q + 1] - ys[q], w.thick, uvs);
+        offsetUV(g, sa / uvs, ys[q] / uvs);
+        place(g, cx, w.y0 + (ys[q] + ys[q + 1]) * 0.5, cz, yaw);
+        this.shadeWall(g, w, c);
+        this.batch.add(w.matKey, g);
+      }
+    } else {
+      const g = boxGeo(sb - sa, yb - ya, w.thick, uvs);
+      offsetUV(g, sa / uvs, ya / uvs);
+      place(g, cx, w.y0 + (ya + yb) * 0.5, cz, yaw);
+      this.batch.add(w.matKey, g, c, 0.18);
+    }
+  }
+
+  // 들쭉날쭉한 포탄 구멍 둘레 (보이는 상자만 — 충돌은 wall 의 큰 상자): 벽돌 반 장 폭 기둥마다 [0, 꼭대기] 에서 보이는 구멍(prof.cols[].open)과
+  // 이 기둥을 다 덮는 다른 열린 곳(창 등)을 빼고 쌓는다. 그을음 정점색이 2차원으로 번지게 rowStep 마다 나눈다
+  wallJagColumns(w, o) {
+    const P = o.prof;
+    const HP = CONFIG.farm.barn.hole;
+    const rows = [];
+    for (let y = HP.rowStep; y < w.height - 0.05; y += HP.rowStep) rows.push(y);
+    for (const cl of P.cols) {
+      const mid = (cl.sa + cl.sb) * 0.5;
+      const top = this.wallTop(w, mid);
+      let iv = [[0, top]];
+      for (const q of w.openings) {
+        if (q !== o && q.s0 <= cl.sa + 1e-3 && q.s1 >= cl.sb - 1e-3) iv = subtractInterval(iv, q.y0, q.y1);
+      }
+      for (const [a, b] of cl.open) iv = subtractInterval(iv, a, b >= w.height - 1e-3 ? top + 1 : b);
+      for (const [ya, yb] of iv) if (yb - ya > 0.03) this.wallBox(w, cl.sa, cl.sb, ya, yb, 1, rows);
+    }
+  }
+
+  // 포탄 구멍의 보이는 윤곽 (CONFIG.farm.barn.hole): 벽 s 0 에 맞춘 벽돌 반 장(col) 기둥마다 열린 구간 [lo, hi] (벽 바닥 기준, 벽돌 줄 단위).
+  // 맵 데이터 사각형(= 충돌 구멍)에서 바깥으로만 넓힌다 — 윗변은 가운데가 솟은 아치 + 줄 단위 들쭉날쭉, 위쪽 모서리는 safeY 위에서만 옆으로,
+  // 바닥이 뜬 구멍은 아래로 한두 줄. safeY 아래 옆 가장자리는 사각형 안쪽으로 벽돌 반 장이 줄마다 들쭉날쭉 튀어나온다
+  // (벽 뒤에 엄폐한 적이 넓힌 가장자리로 드러나지 않게). 남는 윗벽이 breakLintel 보다 얇으면 벽 꼭대기까지 뚫린다 (through, 충돌도).
+  // 다른 열린 곳·벽 끝과는 띄우고, 그 바깥 여백(soot.reach)까지 그을음 정점색용 기둥을 만든다 (열린 곳 없음)
+  holeProfile(op, openings, len, H, rng) {
+    const P = CONFIG.farm.barn.hole;
+    const col = P.col;
+    const crs = P.course;
+    const qy = (y) => Math.round(y / crs) * crs;
+    let roomL = op.s0 - 0.5;
+    let roomR = len - 0.5 - op.s1;
+    for (const o of openings) {
+      if (o === op) continue;
+      if (o.s1 <= op.s0 + 1e-3) roomL = Math.min(roomL, op.s0 - o.s1 - 0.15);
+      else if (o.s0 >= op.s1 - 1e-3) roomR = Math.min(roomR, o.s0 - op.s1 - 0.15);
+    }
+    const eL = clamp(Math.min(P.side * rng.range(0.5, 1), roomL - 0.2), 0, P.side);
+    const eR = clamp(Math.min(P.side * rng.range(0.5, 1), roomR - 0.2), 0, P.side);
+    const k0 = Math.floor((op.s0 - eL - clamp(roomL - eL, 0, P.soot.reach)) / col);
+    const k1 = Math.ceil((op.s1 + eR + clamp(roomR - eR, 0, P.soot.reach)) / col);
+    const ki0 = Math.ceil(op.s0 / col - 1e-6); // 사각형 안에 다 들어가는 첫 기둥
+    const ki1 = Math.floor(op.s1 / col + 1e-6); // (끝, 미포함)
+    const sm = (op.s0 + op.s1) / 2;
+    const half = (op.s1 - op.s0) / 2 + Math.max(eL, eR, col);
+    const rise = rng.range(P.top[0], P.top[1]);
+    const lowSill = op.y0 > 0.3;
+    let walk = 0;
+    let bw = 0;
+    const cols = [];
+    for (let k = k0; k < k1; k++) {
+      const sa = k * col;
+      const sb = sa + col;
+      const mid = sa + col / 2;
+      walk = walk * 0.65 + rng.range(-1, 1) * crs * 0.8;
+      const u = (mid - sm) / half;
+      const archY = op.y1 + Math.max(0, rise * Math.pow(Math.max(0, 1 - u * u), 0.6) + walk);
+      const inside = k >= ki0 && k < ki1;
+      const e = Math.max(op.s0 - mid, mid - op.s1);
+      const eSide = mid < sm ? eL : eR;
+      const cl = { sa, sb, open: [], inside, through: false };
+      if (inside) {
+        bw = clamp(bw + rng.range(-1, 1) * crs * 0.7, 0, P.bottom);
+        const lo = lowSill ? Math.min(op.y0, qy(op.y0 - bw)) : op.y0;
+        cl.open.push([lo, Math.max(op.y1, qy(archY))]);
+      } else if (eSide > 0 && e < eSide) {
+        // 위쪽 모서리: safeY 위에서만 옆으로 (사각형에서 멀수록 위로 좁아짐)
+        const f = clamp(e / eSide, 0, 1);
+        const base = Math.max(P.safeY, op.y0);
+        const hi = qy(archY - rise * 0.35 * f);
+        const lo = qy(base + (hi - base) * clamp(Math.pow(f, 0.8) + rng.range(-0.15, 0.15), 0, 1));
+        if (hi - lo >= crs - 1e-3) cl.open.push([lo, hi]);
+      }
+      cols.push(cl);
+    }
+    // 옆 가장자리 이빨 (safeY 아래): 사각형 안 첫·끝 기둥의 줄을 군데군데 막고, 그 줄의 절반쯤은 한 기둥 더 안쪽까지 (벽돌 한 장 깊이)
+    for (const [k, dir] of [
+      [ki0, 1],
+      [ki1 - 1, -1],
+    ]) {
+      const cl = cols[k - k0];
+      const cl2 = cols[k + dir - k0];
+      if (!cl || !cl.inside || ki1 - ki0 < 4) continue;
+      const deep = cl2 && cl2.inside && ki1 - ki0 >= 8;
+      const [lo, hi] = cl.open[0];
+      let open = [[lo, hi]];
+      let open2 = deep ? [cl2.open[0].slice()] : null;
+      for (let y = Math.ceil(lo / crs) * crs; y < Math.min(hi, P.safeY) - 1e-3; y += crs) {
+        if (rng.next() >= P.teeth) continue;
+        const y1 = Math.min(y + crs * (rng.next() < 0.3 ? 2 : 1), P.safeY);
+        open = subtractInterval(open, y, y1);
+        if (deep && rng.next() < 0.5) open2 = subtractInterval(open2, y, y1);
+      }
+      cl.open = open.filter(([a, b]) => b - a > 0.02);
+      if (deep) cl2.open = open2.filter(([a, b]) => b - a > 0.02);
+    }
+    // 벽 꼭대기까지 뚫림: 남는 윗벽이 breakLintel 보다 얇은 사각형 안 기둥들을 한 구간으로 이어 (충돌도 뚫음),
+    // 그 양옆으로 이어지는 모서리 기둥도 윗벽이 얇으면 같이 뚫는다 (보이는 것만)
+    const thin = (cl) => {
+      const last = cl.open[cl.open.length - 1];
+      return last && H - last[1] < P.breakLintel;
+    };
+    const setThrough = (cl) => {
+      if (!cl.open.length) return;
+      cl.open[cl.open.length - 1][1] = H;
+      cl.through = true;
+    };
+    let t0 = -1;
+    let t1 = -1;
+    cols.forEach((cl, i) => {
+      if (!cl.inside || !thin(cl)) return;
+      if (t0 < 0) t0 = i;
+      t1 = i;
+    });
+    let through = null;
+    if (t0 >= 0) {
+      for (let i = t0; i <= t1; i++) setThrough(cols[i]);
+      for (let i = t0 - 1; i >= 0 && thin(cols[i]); i--) setThrough(cols[i]);
+      for (let i = t1 + 1; i < cols.length && thin(cols[i]); i++) setThrough(cols[i]);
+      through = [cols[t0].sa, cols[t1].sb];
+    }
+    // 충돌 구멍을 위로 넓혀도 되는 높이: 사각형 안 모든 기둥이 그만큼은 뚫려 있다
+    let minRise = Infinity;
+    for (const cl of cols) {
+      if (!cl.inside || cl.through) continue;
+      minRise = cl.open.length ? Math.min(minRise, cl.open[cl.open.length - 1][1] - op.y1) : 0;
+    }
+    if (!Number.isFinite(minRise)) minRise = 0;
+    // 보이는 구멍 경계 상자 (데칼·잔해 배치용)
+    let vs0 = Infinity;
+    let vs1 = -Infinity;
+    let vy0 = Infinity;
+    let vy1 = -Infinity;
+    for (const cl of cols) {
+      for (const [a, b] of cl.open) {
+        vs0 = Math.min(vs0, cl.sa);
+        vs1 = Math.max(vs1, cl.sb);
+        vy0 = Math.min(vy0, a);
+        vy1 = Math.max(vy1, b);
+      }
+    }
+    return { cols, ms0: k0 * col, ms1: k1 * col, through, minRise: Math.max(0, minRise), vis: { s0: vs0, s1: vs1, y0: vy0, y1: vy1 } };
+  }
+
+  // 보이는 구멍 윤곽까지 거리 (벽 면 위 s, y)
+  holeDist(P, s, y) {
+    if (s < P.ms0 - 1.5 || s > P.ms1 + 1.5) return Infinity;
+    let d = Infinity;
+    for (const cl of P.cols) {
+      if (!cl.open.length) continue;
+      const dx = Math.max(0, cl.sa - s, s - cl.sb);
+      if (dx >= d) continue;
+      for (const [a, b] of cl.open) d = Math.min(d, Math.hypot(dx, Math.max(0, a - y, y - b)));
+    }
+    return d;
+  }
+
+  // 긴 벽 꼭대기의 부서진 자리 (CONFIG.farm.barn.topNotches): 벽 끝·열린 곳(구멍 둘레 여백 포함)·무너진 곳을 피해 몇 군데,
+  // 가운데가 깊은 들쭉날쭉한 홈 (step 토막마다 벽돌 줄 단위 깊이)
+  wallTopNotches(openings, collapses, len, rng) {
+    const N = CONFIG.farm.barn.topNotches;
+    const crs = CONFIG.farm.barn.hole.course;
+    const busy = [];
+    for (const o of openings) busy.push(o.prof ? [o.prof.ms0, o.prof.ms1] : [o.s0, o.s1]);
+    for (const c of collapses) busy.push([c.s0 - 0.6, c.s1 + 0.6]);
+    const out = [];
+    for (let tries = 0; tries < N.perWall * 8 && out.length < N.perWall; tries++) {
+      const L = Math.round(rng.range(N.length[0], N.length[1]) / N.step) * N.step;
+      const s0 = Math.round(rng.range(1.5, len - 1.5 - L) / N.step) * N.step;
+      const s1 = s0 + L;
+      if (L < N.step * 2 || s0 < 1.2 || s1 > len - 1.2) continue;
+      if (busy.some(([a, b]) => s1 > a - 0.4 && s0 < b + 0.4)) continue;
+      const D = rng.range(N.depth[0], N.depth[1]);
+      const depth = [];
+      const n = Math.round(L / N.step);
+      let walk = 0;
+      for (let k = 0; k < n; k++) {
+        const u = ((k + 0.5) / n) * 2 - 1;
+        walk = walk * 0.6 + rng.range(-1, 1) * crs * 0.8;
+        depth.push(Math.max(0, Math.round((D * Math.sqrt(Math.max(0, 1 - u * u)) + walk) / crs) * crs));
+      }
+      if (Math.max(...depth) < crs) continue;
+      out.push({ s0, s1, step: N.step, depth });
+      busy.push([s0, s1]);
+    }
+    return out;
   }
 
   // 축사 벽 정점색 (CONFIG.farm.barn.wallShade, wall 의 w.shade): 벽 아래 빗물 튐·습기·그을음 띠(높이·짙기가 벽을 따라 흔들림),
@@ -188,12 +408,29 @@ export class StructureBuilder {
       const y1 = S.band[1] * (1 + S.bandVar * 0.7 * bv);
       const dk = S.dark * (0.85 + 0.3 * nz.noise(s / 2.2 + S.seed * 1.7, 3.1));
       let k = 1 - clamp(dk, 0, 0.9) * (1 - THREE.MathUtils.smoothstep(y, y0, y1));
+      // 벽 맨 아래 흙탕물 튄 자국·젖은 띠 (splash): 앞 참호 흉벽의 밝은 황갈색 마루선이 흰 벽 아래쪽에 묻히지 않게 짙게
+      if (S.splash) {
+        const sv = nz.noise(s / 1.7 + S.seed * 0.9, 2.3 - S.seed * 0.2);
+        const sp = S.splash;
+        const sk = sp.dark * (0.8 + 0.4 * nz.noise(s / 0.9 - S.seed, 5.1));
+        k *= 1 - clamp(sk, 0, 0.9) * (1 - THREE.MathUtils.smoothstep(y, sp.band[0] * (1 + sp.var * sv), sp.band[1] * (1 + sp.var * 0.6 * sv)));
+      }
       k *= 1 + S.macroAmp * nz.noise(s / S.macroSize + S.seed * 2.3, y / (S.macroSize * 0.6) - 5.7);
       // 포탄 구멍·무너진 벽 둘레: 그을리고 부서진 벽면 (구멍 가장자리에서 멀어지며 옅어짐)
       let dh = Infinity;
-      for (const o of w.openings) if (o.hole) dh = Math.min(dh, Math.max(0, o.s0 - s, s - o.s1));
+      let dj = Infinity;
+      for (const o of w.openings) {
+        if (o.prof) dj = Math.min(dj, this.holeDist(o.prof, s, y));
+        else if (o.hole) dh = Math.min(dh, Math.max(0, o.s0 - s, s - o.s1));
+      }
       for (const cl of w.collapses) dh = Math.min(dh, Math.max(0, cl.s0 - s, s - cl.s1));
       if (dh < 2) k *= 1 - S.holeDark * (1 - THREE.MathUtils.smoothstep(dh, 0.25, 2.0));
+      // 들쭉날쭉한 구멍: 보이는 윤곽에서 2차원으로, 노이즈로 들쭉날쭉하게 번진 그을음
+      if (dj < 1.6) {
+        const HS = CONFIG.farm.barn.hole.soot;
+        const reach = HS.reach * (0.55 + 0.9 * (0.5 + 0.5 * nz.noise(s / 0.75 + S.seed * 3.1, y / 0.6 + 1.3)));
+        k *= 1 - HS.dark * (1 - THREE.MathUtils.smoothstep(dj, 0.0, reach));
+      }
       if (n < -0.01) k *= S.inner;
       arr[i * 3] = c.r * k;
       arr[i * 3 + 1] = c.g * k;
@@ -283,7 +520,15 @@ export class StructureBuilder {
         this.windows.push({ barn: b.id, side, x: ax + ux * sm, z: az + uz * sm, y0: floorY + op.y0, y1: floorY + op.y1 });
       }
       const collapses = b.collapse.filter((c) => c.side === side).map((c) => ({ s0: centerS(c.s0), s1: centerS(c.s1), h: c.h }));
-      if (long) collapsedS[side] = collapses.map((c) => [c.s0 - len / 2, c.s1 - len / 2]);
+      // 포탄 구멍의 들쭉날쭉한 윤곽 (CONFIG.farm.barn.hole) · 긴 벽 꼭대기의 부서진 자리 (topNotches — 박공이 얹히는 짧은 벽은 빼고)
+      for (const op of openings) if (op.hole) op.prof = this.holeProfile(op, openings, len, H, drng);
+      const notches = long ? this.wallTopNotches(openings, collapses, len, drng) : [];
+      if (long) {
+        collapsedS[side] = collapses.map((c) => [c.s0 - len / 2, c.s1 - len / 2]);
+        // 꼭대기까지 뚫린 구멍·부서진 자리 위로는 도리·서까래가 걸치지 않는다 (곧은 벽 윗선이 끊겨 보이게)
+        for (const op of openings) if (op.prof && op.prof.through) collapsedS[side].push([op.prof.vis.s0 - len / 2, op.prof.vis.s1 - len / 2]);
+        for (const n of notches) collapsedS[side].push([n.s0 - len / 2, n.s1 - len / 2]);
+      }
       for (const c of collapses) {
         // 무너진 벽: 바깥쪽에 벽돌 잔해 더미 (벽을 따라 길쭉), 안쪽에 낮은 더미 + 흩어진 벽돌
         const sm = (c.s0 + c.s1) / 2 - len / 2;
@@ -300,17 +545,19 @@ export class StructureBuilder {
       const WS = F.wallShade;
       const shade = WS && {
         ...WS,
-        rows: WS.band,
+        rows: WS.splash ? [...WS.splash.band, ...WS.band] : WS.band,
         dark: WS.dark[b.brick] ?? WS.dark.red,
+        splash: WS.splash && { ...WS.splash, dark: WS.splash.dark[b.brick] ?? WS.splash.dark.red },
         nx,
         nz,
         seed: (b.x * 0.37 + b.z * 0.11 + Object.keys(sides).indexOf(side) * 13.7) % 97,
       };
-      this.wall({ ox: ax, oz: az, ux, uz, len, thick: t, y0: floorY, height: H, openings, collapses, matKey, colMat: 'brick', tag: b.id, shade });
-      this.barnHoleTeeth(openings, { ax, az, ux, uz, t, floorY, matKey }, drng);
+      const wallDef = { ox: ax, oz: az, ux, uz, len, thick: t, y0: floorY, height: H, openings, collapses, notches, matKey, colMat: 'brick', tag: b.id, shade };
+      this.wall(wallDef);
+      this.barnHoleDebris(wallDef, { nx, nz, brick: b.brick }, drng);
       // 불난 축사: 불 가까운 창은 모두 그을음
       const fireS = fire ? (side === 'south' || side === 'north' ? fire.lx : fire.lz) + len / 2 : null;
-      this.barnWallDecals(b, { ax, az, ux, uz, nx, nz, len, t, H, floorY, openings, collapses, long, fireS }, drng);
+      this.barnWallDecals(b, { ax, az, ux, uz, nx, nz, len, t, H, floorY, openings, collapses, long, fireS, topAt: (s) => this.wallTop(wallDef, s) }, drng);
       // 문
       for (const op of openings.filter((p) => p.door && p.door.wood)) {
         const sMid = (op.s0 + op.s1) / 2;
@@ -467,33 +714,52 @@ export class StructureBuilder {
     }
   }
 
-  // 포탄 구멍 위쪽 가장자리: 벽돌이 들쭉날쭉하게 매달림 (구멍 위 1/4 높이 안, 아래로 최대 0.16m — 사격 사선·이동 높이 위).
-  // 구멍 옆 가장자리도 1.95m 위에서만 벽돌 반 장씩 튀어나온다. 충돌 없음 (벽 면 안의 작은 조각)
-  barnHoleTeeth(openings, { ax, az, ux, uz, t, floorY, matKey }, rng) {
-    const yaw = Math.atan2(-uz, ux);
-    const col = 0x9a948c;
-    for (const op of openings) {
-      if (!op.hole || op.y1 < 2.1) continue;
-      for (let s = op.s0 + 0.06; s < op.s1 - 0.06; s += 0.125) {
-        const courses = Math.floor(rng.next() * 3); // 0..2 줄 (한 줄 0.075m)
-        if (!courses) continue;
-        const hgt = courses * 0.075;
-        const cx = ax + ux * (s + 0.0625);
-        const cz = az + uz * (s + 0.0625);
-        this.batch.add(matKey, place(boxGeo(0.125, hgt, t * rng.range(0.6, 0.95), 0.5), cx, floorY + op.y1 - hgt / 2, cz, yaw), col);
+  // 포탄 구멍·꼭대기 부서진 자리 아래로 떨어진 벽돌 (인스턴스 'brick', 충돌 없음 — 작은 조각): 벽 양쪽 땅에 흩어지고 (바깥에 더 많이),
+  // 바닥이 뜬 구멍은 아래 턱에도 몇 장 얹혀 있다. 공용 난수(this.rng)는 쓰지 않는다 (뒤 배치가 같은 난수 흐름을 이어받음)
+  barnHoleDebris(w, { nx, nz, brick }, rng) {
+    const F = CONFIG.farm.barn;
+    const cols = brick === 'red' ? [0x6e4a3e, 0x5e4038, 0x7a5444] : [0xb8b4aa, 0xa29e94, 0x8e8a82];
+    const put = (s, out, y = null) => {
+      const x = w.ox + w.ux * s + nx * out;
+      const z = w.oz + w.uz * s + nz * out;
+      const gy = y === null ? this.terrain.heightAt(x, z) + 0.04 : y;
+      this.inst.add('brick', x, gy, z, rng.range(-0.5, 0.5), rng.next() * Math.PI, rng.range(-0.5, 0.5), 1, 1, 1, cols[Math.floor(rng.next() * cols.length)]);
+    };
+    // 벽 면에서 바깥(+)·안(-)으로 떨어진 거리: 벽 가까이 몰림
+    const fall = () => (rng.next() < 0.62 ? 1 : -1) * (w.thick / 2 + 0.08 + Math.abs(rng.gaussian()) * 0.85);
+    for (const op of w.openings) {
+      const P = op.prof;
+      if (!P) continue;
+      for (let k = 0; k < F.hole.spill; k++) put(rng.range(P.vis.s0 - 0.3, P.vis.s1 + 0.3), fall());
+      if (op.y0 < 0.3) {
+        // 땅까지 뚫린 구멍: 바닥에 벽 안팎으로 걸친 낮은 벽돌 잔해 둔덕 (바닥 콘크리트 턱이 문지방처럼 보이지 않게) + 그 위 벽돌
+        const HP = F.hole.heap;
+        const sm = (op.s0 + op.s1) / 2;
+        const ra = (op.s1 - op.s0) / 2 + 0.35;
+        const x = w.ox + w.ux * sm;
+        const z = w.oz + w.uz * sm;
+        const yaw = Math.atan2(-w.uz, w.ux);
+        const hh = HP.height * rng.range(0.85, 1.1);
+        const y = Math.max(w.y0, this.terrain.heightAt(x, z));
+        this.batch.add('rubbleHeap', place(this.moundGeo(ra, HP.depth, hh, rng), x, y, z, yaw), brick === 'red' ? 0xb08a7a : 0xc8c4b8);
+        for (let k = 0; k < Math.round(ra * 9); k++) {
+          const ls = rng.range(-0.8, 0.8) * ra;
+          const lo = rng.range(-0.75, 0.75) * HP.depth;
+          const rr = Math.hypot(ls / ra, lo / HP.depth);
+          put(sm + ls, lo, y + Math.max(0.02, hh * (1 - rr * rr)) * 0.8);
+        }
+        // 충돌: 둔덕 가운데 낮은 상자 (잔해, 관통 불가, 올라설 수 있음) — 사수 눈높이·사선보다 훨씬 낮다
+        this.col.addBox(x, y + hh * 0.3, z, ra * 0.7, hh * 0.3, HP.depth * 0.55, yaw, 'rubble', 'RUBBLE');
+        this.contactShadows?.add({ x, z, hx: ra * 1.05, hz: HP.depth * 1.05, rot: yaw, shape: 'ellipse', preset: 'rubble' });
       }
-      for (const [edge, dir] of [
-        [op.s0, 1],
-        [op.s1, -1],
-      ]) {
-        for (let y = Math.max(op.y0, 1.95); y < op.y1 - 0.05; y += 0.075) {
-          if (rng.next() < 0.45) continue;
-          const w = rng.range(0.06, 0.13);
-          const sc = edge + dir * (w / 2);
-          this.batch.add(matKey, place(boxGeo(w, 0.07, t * rng.range(0.6, 0.95), 0.5), ax + ux * sc, floorY + y + 0.035, az + uz * sc, yaw), col);
+      if (op.y0 > 0.3) {
+        for (const cl of P.cols) {
+          if (!cl.inside || !cl.open.length || rng.next() > 0.22) continue;
+          put(cl.sa + 0.0625, rng.range(-0.08, 0.08), w.y0 + cl.open[0][0] + 0.035);
         }
       }
     }
+    for (const n of w.notches || []) for (let k = 0; k < F.topNotches.spill; k++) put(rng.range(n.s0 - 0.2, n.s1 + 0.2), fall());
   }
 
   // 축사 벽 한 면의 데칼 (벽 바깥·안쪽 면에서 decalLift 만큼 띄운 투명 사각형, 아틀라스 칸은 textures.farmDecalTexture):
@@ -503,18 +769,23 @@ export class StructureBuilder {
     const F = CONFIG.farm.barn;
     const { ax, az, ux, uz, nx, nz, len, t, H, floorY, openings, collapses, long, fireS } = w;
     const lift = CONFIG.farm.decalLift;
+    // 벽 꼭대기 (w.topAt = 꼭대기의 부서진 자리·무너진 구간이 반영된 높이) — 무너진 구간 둘레는 더 넉넉히 비운다
+    const wallTopAt = w.topAt || (() => H);
     const topAt = (s) => {
-      let top = H;
+      let top = wallTopAt(s);
       for (const c of collapses) if (s > c.s0 - 0.3 && s < c.s1 + 0.3) top = Math.min(top, c.h - 0.42);
       return top;
     };
+    // 열린 곳의 보이는 범위 (들쭉날쭉한 포탄 구멍은 넓힌 윤곽 상자 prof.vis — 벽 꼭대기까지 뚫렸으면 꼭대기까지)
+    const vis = (op) => (op.prof ? op.prof.vis : op);
     const free = (s0, s1, y0, y1, except = null) => {
       if (s0 < 0.2 || s1 > len - 0.2 || y0 < -0.01) return false;
       for (const op of openings) {
         if (op === except) continue;
-        if (s1 > op.s0 - 0.05 && s0 < op.s1 + 0.05 && y1 > op.y0 - 0.05 && y0 < op.y1 + 0.05) return false;
+        const v = vis(op);
+        if (s1 > v.s0 - 0.05 && s0 < v.s1 + 0.05 && y1 > v.y0 - 0.05 && y0 < v.y1 + 0.05) return false;
       }
-      for (let s = s0; s <= s1 + 1e-3; s += 0.25) if (y1 > topAt(Math.min(s, s1)) - 0.02) return false;
+      for (let s = s0; s <= s1 + 1e-3; s += 0.125) if (y1 > topAt(Math.min(s, s1)) - 0.02) return false;
       return true;
     };
     const put = (cell, s0, s1, y0, y1, face, color, edge = 'bottom', flip = false) => {
@@ -522,33 +793,55 @@ export class StructureBuilder {
       this.pushDecal(cell, ax + nx * off, floorY, az + nz * off, ux, uz, s0, s1, y0, y1, nx * face, nz * face, color, edge, flip);
     };
     const south = nz > 0.7;
-    // 창·구멍 위 그을음 (구멍은 양쪽 면, 불난 축사의 불 가까운 창도)
+    // 창·구멍 위 그을음 (구멍은 양쪽 면, 불난 축사의 불 가까운 창도). 들쭉날쭉한 구멍은 보이는 윤곽 위에서 시작 (꼭대기까지 뚫렸으면 없음)
     for (const op of openings) {
       if (op.loophole) continue;
       const nearFire = fireS !== null && Math.abs((op.s0 + op.s1) / 2 - fireS) < 16;
       if (!op.hole && !nearFire && rng.next() > F.sootChance) continue;
-      const wdt = (op.s1 - op.s0) * 1.7 + 0.4;
-      const sm = (op.s0 + op.s1) / 2;
-      const y0 = op.y1 + 0.01;
+      const v = vis(op);
+      const wdt = (v.s1 - v.s0) * (op.prof ? 1.35 : 1.7) + 0.4;
+      const sm = (v.s0 + v.s1) / 2;
+      const y0 = v.y1 + 0.01;
       const hgt = Math.min(F.sootHeight * rng.range(0.7, 1.15) * (nearFire ? 1.3 : 1), topAt(sm) - y0 - 0.03);
       if (hgt < 0.25) continue;
       const faces = op.hole || nearFire ? [1, -1] : [1];
       for (const face of faces) if (free(sm - wdt / 2, sm + wdt / 2, y0, y0 + hgt, op)) put(0, sm - wdt / 2, sm + wdt / 2, y0, y0 + hgt, face, 0xffffff, 'bottom', rng.next() < 0.5);
     }
-    // 포탄 구멍 둘레 그을림 띠 (위·양옆·아래, 양쪽 면) + 모서리 금
+    // 포탄 구멍 둘레: 들쭉날쭉한 구멍(prof)은 그을음을 정점색(shadeWall)이 윤곽을 따라 칠하고, 둘레에 빠지고 깨진 벽돌 무리(칸 7)를 흩는다
+    // (곧은 그을림 띠를 사각형 네 변에 붙이면 문틀·인방처럼 보인다). 그 밖의 구멍은 예전처럼 그을림 띠 (위·양옆·아래, 양쪽 면). + 모서리 금
     const sw = F.scorchWidth;
+    const brickCol = b.brick === 'red' ? 0xe0b0a0 : 0xffffff;
     for (const op of openings) {
       if (!op.hole) continue;
-      for (const face of [1, -1]) {
-        const top = Math.min(op.y1 + sw, topAt((op.s0 + op.s1) / 2) - 0.02);
-        if (top > op.y1 + 0.1 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, face, 0xffffff, 'bottom');
-        if (free(op.s0 - sw, op.s0, op.y0, op.y1, op)) put(1, op.s0 - sw, op.s0, op.y0, op.y1, face, 0xffffff, 'b');
-        if (free(op.s1, op.s1 + sw, op.y0, op.y1, op)) put(1, op.s1, op.s1 + sw, op.y0, op.y1, face, 0xffffff, 'a');
-        if (op.y0 > sw * 0.6 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, face, 0xffffff, 'top');
+      const v = vis(op);
+      if (op.prof) {
+        for (const face of [1, -1]) {
+          const want = face > 0 ? F.hole.missingBricks : Math.ceil(F.hole.missingBricks / 2);
+          let got = 0;
+          for (let k = 0; k < want * 8 && got < want; k++) {
+            // 칸 7 = 벽돌 3장 x 3줄 (0.75 x 0.375m): 벽돌 줄·반 장 격자에 맞춰 놓는다
+            const crs = F.hole.course;
+            const wd = 0.75;
+            const hd = crs * 3;
+            const s0 = Math.round(rng.range(v.s0 - 0.95, v.s1 + 0.95 - wd) / F.hole.col) * F.hole.col;
+            const y0 = Math.round(rng.range(Math.max(0.1, v.y0 - 0.8), Math.min(H, v.y1 + 0.8) - hd) / crs) * crs;
+            if (!free(s0, s0 + wd, y0, y0 + hd)) continue;
+            put(7, s0, s0 + wd, y0, y0 + hd, face, brickCol, 'bottom', rng.next() < 0.5);
+            got++;
+          }
+        }
+      } else {
+        for (const face of [1, -1]) {
+          const top = Math.min(op.y1 + sw, topAt((op.s0 + op.s1) / 2) - 0.02);
+          if (top > op.y1 + 0.1 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y1, top, face, 0xffffff, 'bottom');
+          if (free(op.s0 - sw, op.s0, op.y0, op.y1, op)) put(1, op.s0 - sw, op.s0, op.y0, op.y1, face, 0xffffff, 'b');
+          if (free(op.s1, op.s1 + sw, op.y0, op.y1, op)) put(1, op.s1, op.s1 + sw, op.y0, op.y1, face, 0xffffff, 'a');
+          if (op.y0 > sw * 0.6 && free(op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, op)) put(1, op.s0 - sw * 0.4, op.s1 + sw * 0.4, op.y0 - sw, op.y0, face, 0xffffff, 'top');
+        }
       }
-      const cs = rng.next() < 0.5 ? op.s1 + 0.05 : op.s0 - 0.95;
+      const cs = rng.next() < 0.5 ? v.s1 + 0.05 : v.s0 - 0.95;
       const cy = Math.min(op.y1 + 0.05, topAt(cs) - 0.95);
-      if (cy > op.y1 - 0.3 && free(cs, cs + 0.9, cy, cy + 0.9, op)) put(6, cs, cs + 0.9, cy, cy + 0.9, 1, 0xffffff, 'bottom', rng.next() < 0.5);
+      if (cy > op.y1 - 0.6 && free(cs, cs + 0.9, cy, cy + 0.9, op.prof ? null : op)) put(6, cs, cs + 0.9, cy, cy + 0.9, 1, 0xffffff, 'bottom', rng.next() < 0.5);
     }
     // 탄흔 무리 (남쪽 벽에 많이) · 떨어져 나간 벽면
     const spallCol = b.brick === 'red' ? 0xd0a090 : 0xffffff;
@@ -622,9 +915,8 @@ export class StructureBuilder {
     else D.idx.push(base, base + 2, base + 1, base, base + 3, base + 2);
   }
 
-  // 벽돌·콘크리트 잔해 더미: 울퉁불퉁한 낮은 둔덕 (잔해 텍스처 + 벽돌 색 정점색) + 벽돌 여러 장 붙은 큰 벽 조각 몇 개 + 흩어진 조각.
-  // ra = 길이 방향(yaw) 반지름, rb = 폭 반지름. 충돌: 낮은 상자 (잔해, 관통 불가, 올라설 수 있음) + 접지 그림자
-  rubbleHeap(x, z, ra, rb, h, yaw, brick, rng) {
+  // 울퉁불퉁한 낮은 둔덕 (반구를 눌러 펴고 혹을 얹음, 잔해 텍스처 UV): 길이 반지름 ra (로컬 x), 폭 반지름 rb (로컬 z), 높이 h
+  moundGeo(ra, rb, h, rng) {
     const g = new THREE.SphereGeometry(1, 18, 6, 0, Math.PI * 2, 0, Math.PI / 2);
     const p = g.attributes.position;
     const uv = g.attributes.uv;
@@ -640,6 +932,13 @@ export class StructureBuilder {
       uv.setXY(i, X / 1.4, Z / 1.4);
     }
     g.computeVertexNormals();
+    return g;
+  }
+
+  // 벽돌·콘크리트 잔해 더미: 울퉁불퉁한 낮은 둔덕 (잔해 텍스처 + 벽돌 색 정점색) + 벽돌 여러 장 붙은 큰 벽 조각 몇 개 + 흩어진 조각.
+  // ra = 길이 방향(yaw) 반지름, rb = 폭 반지름. 충돌: 낮은 상자 (잔해, 관통 불가, 올라설 수 있음) + 접지 그림자
+  rubbleHeap(x, z, ra, rb, h, yaw, brick, rng) {
+    const g = this.moundGeo(ra, rb, h, rng);
     const y = this.terrain.heightAt(x, z);
     place(g, x, y, z, yaw);
     this.batch.add('rubbleHeap', g, brick === 'red' ? 0xb08a7a : 0xc8c4b8);
@@ -773,6 +1072,22 @@ export class StructureBuilder {
       // 뒷문 (뒤편에서 들어오는 증원용)
       if (w.backDoor !== undefined) openings.push({ s0: len / 2 + w.backDoor - 0.6, s1: len / 2 + w.backDoor + 0.6, y0: 0, y1: 2.1 });
       const collapses = w.door ? [{ s0: len - 4, s1: len, h: 3.0 }] : [];
+      const alongX = Math.abs(w.a[1] - w.b[1]) < 1e-6;
+      const nx = alongX ? 0 : Math.sign(w.a[0]);
+      const nz = alongX ? Math.sign(w.a[1]) : 0;
+      // 벽 정점색: 축사와 같은 아래 습기 띠·흙탕물 튄 자국 (CONFIG.farm.barn.wallShade, 콘크리트 몫) — 앞 참호 흉벽 마루선이 밝은 벽 아래에 묻히지 않게
+      const WS = CONFIG.farm.barn.wallShade;
+      const shade = WS && {
+        ...WS,
+        rows: WS.splash ? [...WS.splash.band, ...WS.band] : WS.band,
+        dark: WS.dark.concrete ?? WS.dark.silicate,
+        splash: WS.splash && { ...WS.splash, dark: WS.splash.dark.concrete ?? WS.splash.dark.silicate },
+        holeDark: 0.3,
+        inner: 0.6,
+        nx,
+        nz,
+        seed: (gd.x * 0.29 + walls.indexOf(w) * 17.3) % 97,
+      };
       this.wall({
         ox: ax,
         oz: az,
@@ -789,11 +1104,9 @@ export class StructureBuilder {
         tag: 'GARAGE',
         uvScale: 3,
         color: 0xb4b0a6,
+        shade,
       });
       // 벽 데칼 (탄흔·빗물 줄·습기·문 위 그을음 — 축사와 같은 규칙)
-      const alongX = Math.abs(w.a[1] - w.b[1]) < 1e-6;
-      const nx = alongX ? 0 : Math.sign(w.a[0]);
-      const nz = alongX ? Math.sign(w.a[1]) : 0;
       this.barnWallDecals({ brick: 'concrete' }, { ax, az, ux: (bx - ax) / len, uz: (bz - az) / len, nx, nz, len, t, H, floorY, openings, collapses, long: alongX, fireS: null }, drng);
     }
     // 골함석 지붕 (일부 없음, 관통 가능)

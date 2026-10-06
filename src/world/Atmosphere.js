@@ -4,10 +4,11 @@
 //    (지형 스플랫, 식생 인스턴스), fog 를 켠 ShaderMaterial(파티클) 이 모두 같은 안개를 받는다.
 //    거리 = 카메라에서의 실제 거리, 높이 안개(위로 갈수록 옅음), 먼 곳 실루엣 몫 (CONFIG.atmosphere.fog)
 //    가까운 지수형 투과율과 먼 곳 몫은 부드러운 최댓값으로 합친다 → 600m 에서 거의 안개색, 3km 너머 지평선은 안개에 녹는다
+//    + 지면 연무 (CONFIG.atmosphere.groundHaze): 땅을 스치는 긴 시선만 더 뿌옇게 → 지면이 지평선 쪽으로 서서히 밝아져 안개 띠로 이어진다
 //  - 하늘: 절차적 흐린 하늘 돔. 층운 두께 텍스처 두 겹이 바람 방향으로 아주 천천히 흐르고,
 //    지평선 연무 띠가 안개색과 정확히 같은 색으로 이어진다 (톤매핑 없이 화면 값 그대로).
 //  - 조명: 반구광 + 구름 뒤 해(약한 방향광). 그림자는 플레이어 주변만 옅고 부드럽게, 가장자리에서 사라진다.
-//  - 색감: ACESFilmic + 채도·색조 보정을 CustomToneMapping 으로 (후처리 패스 없음)
+//  - 색감: ACESFilmic + 채도·색조 보정 + 어두운 쪽 들어 올림(흑토·풀밭이 검게 뭉개지지 않게)을 CustomToneMapping 으로 (후처리 패스 없음)
 // 셰이더 청크 교체는 이 모듈을 불러올 때 한 번 (어떤 재질도 컴파일되기 전).
 // =============================================================================
 import * as THREE from 'three';
@@ -24,18 +25,33 @@ const glc = (hex) => {
 };
 
 // ---------------------------------------------------------------------------- 안개 식 (JS 판, 점검·보고용)
-// d: 카메라에서의 거리(m), dy: 카메라 기준 높이차(m). 반환: 안개 비율 0..1
-export function fogFactorAt(d, dy = 0) {
+// d: 카메라에서의 거리(m), dy: 카메라 기준 높이차(m), camY: 카메라 월드 높이 (생략하면 연무층 바닥 + 1.6m, 선 눈높이).
+// 반환: 안개 비율 0..1
+export function fogFactorAt(d, dy = 0, camY = null) {
   const F = CONFIG.atmosphere.fog;
   let k = Math.max(-1.5, Math.min(12, dy / F.hazeHeight));
   const hf = Math.abs(k) < 1e-3 ? 1 : (1 - Math.exp(-k)) / k;
-  return 1 - fogTransmit(d * hf);
+  const cy = camY === null ? (CONFIG.atmosphere.groundHaze?.ref ?? 0) + 1.6 : camY;
+  return 1 - fogTransmit(d * hf, groundHazeTau(d, cy, cy + dy));
+}
+
+// 지면 연무가 더하는 광학 깊이 (GLSL atmoGroundHaze 와 같은 식). hc / hp: 카메라 / 물체의 월드 높이
+function groundHazeTau(d, hc, hp) {
+  const G = CONFIG.atmosphere.groundHaze;
+  if (!G || !(G.tau > 0)) return 0;
+  const a = Math.max(hc - G.ref, 0);
+  const b = Math.max(hp - G.ref, 0);
+  const ea = Math.exp(-a / G.height);
+  const eb = Math.exp(-b / G.height);
+  const m = Math.abs(b - a) < 0.02 ? 0.5 * (ea + eb) : (G.height * (ea - eb)) / (b - a);
+  return G.tau * m * (1 - Math.exp(-d / G.length));
 }
 
 // 높이 보정한 거리 dd 의 투과율: 가까운 지수형 A 와 먼 곳 실루엣 몫 B 의 부드러운 최댓값 (p-노름, 거리에 따라 단조 감소)
-function fogTransmit(dd) {
+// extra: 더할 광학 깊이 (지면 연무)
+function fogTransmit(dd, extra = 0) {
   const F = CONFIG.atmosphere.fog;
-  const tau = F.linear * dd + F.quad * F.quad * dd * dd;
+  const tau = F.linear * dd + F.quad * F.quad * dd * dd + extra;
   const a = Math.max(Math.exp(-tau), 1e-6);
   const b = Math.max(F.farResidual * Math.exp(-dd / F.farLength), 1e-6);
   const p = F.blendPow;
@@ -71,7 +87,15 @@ export function toneMapLinear(rgb) {
   const o = ACES_OUT.map((r) => sat01(r[0] * a[0] + r[1] * a[1] + r[2] * a[2]));
   const l = 0.2126 * o[0] + 0.7152 * o[1] + 0.0722 * o[2];
   const G = R.grade;
-  return o.map((v, i) => sat01((l + (v - l) * G.saturation) * G.tint[i]));
+  const g = o.map((v, i) => sat01((l + (v - l) * G.saturation) * G.tint[i]));
+  // 어두운 쪽 들어 올림 (GLSL 판과 같은 식)
+  const Lf = G.lift;
+  if (!Lf || !(Lf.amount > 0)) return g;
+  const l2 = 0.2126 * g[0] + 0.7152 * g[1] + 0.0722 * g[2];
+  const t = Math.max(1 - l2 / Lf.end, 0);
+  const add = (Lf.amount * l2 * t * t) / (l2 + Lf.knee);
+  const r = (l2 + add) / Math.max(l2, 1e-5);
+  return g.map((v) => sat01(v * r * (1 - Lf.neutral) + (v + add) * Lf.neutral));
 }
 
 // 화면에 이 색(sRGB hex)으로 보여야 하는 장면 쪽(톤매핑 전) 선형 색. 물·젖은 흙에 비치는 하늘처럼
@@ -105,19 +129,35 @@ function installShaderChunks() {
 	vFogDY = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).y;
 #endif
 `;
-  // 조각: 광학 깊이 tau = linear·d + (밀도·d)², 투과율 = (e^-tau ^p + (r·e^(-d/L))^p)^(1/p), 높이 안개 배수 hf
+  // 조각: 광학 깊이 tau = linear·d + (밀도·d)² + 지면 연무, 투과율 = (e^-tau ^p + (r·e^(-d/L))^p)^(1/p), 높이 안개 배수 hf
+  // 지면 연무: 연무층 밀도 e^(-h/height) 를 카메라→물체 시선 위에서 평균 (h = 월드 높이 - ref, 0 아래는 최대 밀도).
+  // cameraPosition 은 Three.js 가 모든 (Raw 가 아닌) 재질의 조각 셰이더 머리에 넣어 둔다
+  const GH = CONFIG.atmosphere.groundHaze;
+  const ghGlsl =
+    GH && GH.tau > 0
+      ? `
+		float atmoGroundHaze( float d, float dy ) {
+			float a = max( cameraPosition.y - ${glf(GH.ref)}, 0.0 );
+			float b = max( cameraPosition.y + dy - ${glf(GH.ref)}, 0.0 );
+			float ea = exp( -a / ${glf(GH.height)} );
+			float eb = exp( -b / ${glf(GH.height)} );
+			float m = abs( b - a ) < 0.02 ? 0.5 * ( ea + eb ) : ${glf(GH.height)} * ( ea - eb ) / ( b - a );
+			return ${glf(GH.tau)} * m * ( 1.0 - exp( -d / ${glf(GH.length)} ) );
+		}`
+      : `
+		float atmoGroundHaze( float d, float dy ) { return 0.0; }`;
   SC.fog_pars_fragment = `
 #ifdef USE_FOG
 	uniform vec3 fogColor;
 	varying float vFogDepth;
 	varying float vFogDY;
 	#ifdef FOG_EXP2
-		uniform float fogDensity;
+		uniform float fogDensity;${ghGlsl}
 		float atmoFogFactor( float d, float dy ) {
 			float k = clamp( dy / ${glf(F.hazeHeight)}, -1.5, 12.0 );
 			float hf = abs( k ) < 1e-3 ? 1.0 : ( 1.0 - exp( -k ) ) / k;
 			float dd = d * hf;
-			float tau = ${glf(F.linear)} * dd + fogDensity * fogDensity * dd * dd;
+			float tau = ${glf(F.linear)} * dd + fogDensity * fogDensity * dd * dd + atmoGroundHaze( d, dy );
 			return 1.0 - ${glslTransmit('tau', 'dd')};
 		}
 	#else
@@ -149,14 +189,24 @@ function installShaderChunks() {
     n++ < 3 ? fade : m,
   );
 
-  // 톤매핑: ACESFilmic → 채도 낮춤 + 차가운 색조 (renderer.toneMapping = CustomToneMapping)
+  // 톤매핑: ACESFilmic → 채도 낮춤 + 차가운 색조 → 어두운 쪽 들어 올림 (renderer.toneMapping = CustomToneMapping)
   const G = R.grade;
+  const Lf = G.lift && G.lift.amount > 0 ? G.lift : null;
+  // 들어 올림: 밝기 l 에 amount·l/(l+knee)·(1-l/end)² 를 더한다. 색조 유지 몫(배율)과 회색 몫(더하기)을 neutral 로 섞는다
+  const liftGlsl = Lf
+    ? `
+	float l2 = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+	float lt = max( 1.0 - l2 / ${glf(Lf.end)}, 0.0 );
+	float la = ${glf(Lf.amount)} * l2 * lt * lt / ( l2 + ${glf(Lf.knee)} );
+	c = mix( c * ( ( l2 + la ) / max( l2, 1e-5 ) ), c + la, ${glf(Lf.neutral)} );`
+    : '';
   SC.tonemapping_pars_fragment = SC.tonemapping_pars_fragment.replace(
     'vec3 CustomToneMapping( vec3 color ) { return color; }',
     `vec3 CustomToneMapping( vec3 color ) {
 	vec3 c = ACESFilmicToneMapping( color );
 	float l = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
 	c = mix( vec3( l ), c, ${glf(G.saturation)} ) * vec3( ${glf(G.tint[0])}, ${glf(G.tint[1])}, ${glf(G.tint[2])} );
+	c = saturate( c );${liftGlsl}
 	return saturate( c );
 }`,
   );

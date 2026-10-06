@@ -1929,7 +1929,7 @@ function pixelCanvas(w, h, fn) {
 // 벽 데칼 아틀라스 (4 x 2 칸, 칸마다 알파 무늬). UV 칸 번호는 Structures 의 DECAL 표와 같다:
 //  0 창·구멍 위로 번진 그을음 (아래 가운데에서 위로 넓어짐)  1 포탄 구멍·무너진 곳 가장자리 그을림 띠 (아래 끝 = 구멍 가장자리)
 //  2 탄흔 무리 (어두운 구멍 + 밝게 떨어져 나간 둘레)  3 떨어져 나간 회반죽·벽면 (밝은 얼룩 + 어두운 테두리)
-//  4 위에서 흘러내린 빗물·그을음 세로줄  5 벽 아래 습기·이끼 띠  6 금 (가지 친 가는 선)  7 둥근 그을림 얼룩
+//  4 위에서 흘러내린 빗물·그을음 세로줄  5 벽 아래 습기·이끼 띠  6 금 (가지 친 가는 선)  7 포탄 구멍 둘레 빠지고 깨진 벽돌 무리
 // 칸 가장자리 몇 px 는 비워 밉맵 번짐을 막는다. 칸 안 y 는 위로 증가 (캔버스는 뒤집어 그린다).
 export function farmDecalTexture(w = 1024, h = 512) {
   return cached(`farmDecal${w}x${h}`, () => {
@@ -1987,9 +1987,50 @@ export function farmDecalTexture(w = 1024, h = 512) {
         a = (1 - smooth(top * 0.6, top, v)) * (0.55 + 0.3 * m);
         rgb = mix3([46, 44, 36], [58, 66, 44], smooth(0.45, 0.7, m));
       } else if (cell === 7) {
-        // 둥근 그을림 얼룩
-        const r = Math.hypot(u - 0.5, v - 0.5) * 2 + (n - 0.5) * 0.55;
-        a = (1 - smooth(0.25, 0.92, r)) * 0.85;
+        // 포탄 구멍 둘레의 빠지고 깨진 벽돌 무리 (0.75 x 0.375m 사각형 = 벽돌 3장 x 3줄, 줄마다 반 장 엇갈림 — 놓는 높이를 벽돌 줄에 맞춤):
+        // 가운데로 갈수록 빠진 벽돌(줄눈째 떨어져 나간 시커먼 자리 + 부서진 밝은 줄눈 테두리)이 많고, 일부는 모서리만 깨져 밝은 속살이 드러난다.
+        // 둘레에 옅은 그을음
+        const row = Math.min(2, Math.floor(v * 3));
+        const bu = u * 3 + (row % 2) * 0.5;
+        const bi = Math.floor(bu);
+        const fu = bu - bi;
+        const fv = v * 3 - row;
+        const h = hashPx(bi + 17, row + 5, 71);
+        const h2 = hashPx(bi + 3, row + 11, 73);
+        const bcx = (bi + 0.5 - (row % 2) * 0.5) / 3;
+        const r = Math.hypot((bcx - 0.5) * 2, ((row + 0.5) / 3 - 0.5) * 2) / 1.2;
+        const grain = (hashPx(x, y, 75) - 0.5) * 0.06;
+        const mg = 0.06 + 0.07 * n + grain; // 들쭉날쭉한 깨진 가장자리
+        const edgeD = Math.min(fu, 1 - fu, fv, 1 - fv);
+        const soot = (1 - smooth(0.35, 1.0, Math.hypot(u - 0.5, (v - 0.5) * 0.5) * 2 + (m - 0.5) * 0.5)) * 0.32;
+        a = soot;
+        rgb = [30, 27, 24];
+        if (h < 0.78 * (1 - r * r)) {
+          // 빠진 벽돌 (가끔 반 장만)
+          const half = h2 < 0.3 ? (h2 < 0.15 ? fu > 0.5 : fu < 0.5) : true;
+          if (half && edgeD > mg) {
+            const s = 22 + (m - 0.5) * 14 + (hashPx(x, y, 77) - 0.5) * 10;
+            rgb = [s, s * 0.92, s * 0.85];
+            a = 0.9;
+          } else if (half && edgeD > mg - 0.07) {
+            const s = 118 + (hashPx(x, y, 79) - 0.5) * 30;
+            rgb = [s, s * 0.95, s * 0.88];
+            a = 0.5;
+          }
+        } else if (h2 > 0.6) {
+          // 모서리만 깨진 벽돌: 밝은 속살 + 어두운 깨진 선
+          const cu = h2 > 0.8 ? fu : 1 - fu;
+          const cv = h > 0.9 ? fv : 1 - fv;
+          const chip = cu + cv * 0.8 - (0.42 + (n - 0.5) * 0.25);
+          if (chip < 0 && edgeD > 0.03) {
+            const s = 150 + (hashPx(x, y, 81) - 0.5) * 34;
+            rgb = [s, s * 0.94, s * 0.86];
+            a = 0.55;
+          } else if (chip < 0.05 && edgeD > 0.03) {
+            rgb = [34, 30, 27];
+            a = 0.6;
+          }
+        }
       }
       if (edge < pad) a = 0;
       col[0] = clamp255(rgb[0]);

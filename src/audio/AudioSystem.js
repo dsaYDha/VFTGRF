@@ -11,6 +11,9 @@ import { buildSoundBank } from './SoundBank.js';
 import { SR, buf, rng, noise, lowpass, toBuffer } from './dsp.js';
 import { rand, randRange } from '../core/Random.js';
 
+const VOLUME_KEY = 'vftgrf.volume';
+// 새 재질 이름 → 비슷한 탄착음
+const IMPACT_ALIAS = { subsoil: 'dirt', hay: 'sand', rubber: 'mud', fabric: 'sand', sandbag: 'sand', earth: 'dirt' };
 const _f = new THREE.Vector3();
 const _u = new THREE.Vector3();
 
@@ -20,6 +23,18 @@ export class AudioSystem {
     this.ctx = null;
     this.ready = false;
     this.muted = false;
+    this.bank = null;
+    this.error = null;
+    this.pausedByGame = false;
+    this.activeCount = 0;
+    this.volume = CONFIG.audio.defaultVolume;
+    try {
+      const v = parseFloat(window.localStorage.getItem(VOLUME_KEY));
+      if (Number.isFinite(v)) this.volume = Math.max(0, Math.min(1, v));
+    } catch {
+      // 저장소를 못 쓰면 기본 볼륨
+    }
+    this.installUnlock();
     this.nextArtillery = 5;
     this.nextDistantFire = 9;
     this.pendingCasing = [];
@@ -42,42 +57,122 @@ export class AudioSystem {
     });
   }
 
-  // 사용자 입력(클릭) 뒤에 호출해야 소리가 난다
-  async init() {
-    if (this.ctx) {
-      if (this.ctx.state === 'suspended') await this.ctx.resume();
-      return;
+  // ------------------------------------------------------------------ 시작·잠금 해제
+  // 브라우저 자동재생 정책: AudioContext 는 사용자 입력(클릭·키) 처리 중에 만들거나 resume() 해야 소리가 난다.
+  // 그래서 첫 입력 순간 바로 컨텍스트를 만들고 resume() 한다 (무거운 소리 합성은 그 뒤에).
+  // 이후에도 게임이 멈춘 것도 아닌데 컨텍스트가 멈춰 있으면 다음 입력 때 다시 켠다.
+  installUnlock() {
+    const h = () => this.unlock();
+    for (const type of ['pointerdown', 'keydown', 'touchend', 'click']) document.addEventListener(type, h, true);
+  }
+
+  unlock() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) {
+        this.error = 'Web Audio 미지원';
+        return;
+      }
+      try {
+        this.ctx = new AC({ latencyHint: 'interactive' });
+      } catch (e) {
+        this.error = String(e && e.message ? e.message : e);
+        return;
+      }
+      const ctx = this.ctx;
+      ctx.addEventListener('statechange', () => this.onStateChange());
+      this.buildOutput();
+      // 아주 짧은 무음 버퍼를 재생해 두면 (특히 Safari) 출력 장치가 확실히 열린다
+      const silent = ctx.createBufferSource();
+      silent.buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+      silent.connect(ctx.destination);
+      silent.start(0);
     }
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
-    this.ctx = new AC();
+    if (this.ctx.state !== 'running' && this.ctx.state !== 'closed' && !this.pausedByGame) {
+      this.ctx.resume().catch(() => {});
+    }
+  }
+
+  // 출력 체인: master(볼륨) → muffle(피격 시 먹먹함) → compressor → destination
+  buildOutput() {
     const ctx = this.ctx;
-    this.bank = buildSoundBank(ctx);
-    // 출력 체인: master → compressor → destination
     this.comp = ctx.createDynamicsCompressor();
     this.comp.threshold.value = -14;
     this.comp.ratio.value = 4;
     this.comp.attack.value = 0.003;
     this.comp.release.value = 0.25;
     this.master = ctx.createGain();
-    this.master.gain.value = CONFIG.audio.master;
-    // 피격·폭발 시 먹먹해지는 효과용 저역 통과
+    this.master.gain.value = CONFIG.audio.master * this.volume;
     this.muffle = ctx.createBiquadFilter();
     this.muffle.type = 'lowpass';
     this.muffle.frequency.value = 20000;
     this.master.connect(this.muffle);
     this.muffle.connect(this.comp);
     this.comp.connect(ctx.destination);
-    // 잔향 (합성 임펄스 응답)
-    this.reverb = ctx.createConvolver();
-    this.reverb.buffer = this.makeIR();
-    this.reverbGain = ctx.createGain();
-    this.reverbGain.gain.value = 0.8;
-    this.reverb.connect(this.reverbGain);
-    this.reverbGain.connect(this.master);
-    this.startAmbience();
-    this.ready = true;
-    if (ctx.state === 'suspended') await ctx.resume();
+  }
+
+  // 임무 시작(클릭) 때 호출: 컨텍스트를 깨우고, 처음 한 번은 소리 묶음·잔향·환경음을 만든다
+  async init() {
+    this.pausedByGame = false;
+    this.unlock();
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (!this.bank) {
+      this.bank = buildSoundBank(ctx);
+      // 잔향 (합성 임펄스 응답)
+      this.reverb = ctx.createConvolver();
+      this.reverb.buffer = this.makeIR();
+      this.reverbGain = ctx.createGain();
+      this.reverbGain.gain.value = 0.8;
+      this.reverb.connect(this.reverbGain);
+      this.reverbGain.connect(this.master);
+      this.startAmbience();
+      this.ready = true;
+    }
+    if (ctx.state !== 'running') await ctx.resume().catch(() => {});
+  }
+
+  onStateChange() {
+    const st = this.ctx.state;
+    // 게임이 멈추지 않았는데 오디오가 멈춤 (자동재생 차단·탭 전환·다른 앱이 출력 장치를 가져감 등)
+    if (st !== 'running' && !this.pausedByGame && this.game.state === 'playing') {
+      const now = performance.now();
+      if (now - (this.lastBlockedMsg || -1e9) > 8000) {
+        this.lastBlockedMsg = now;
+        this.game.events.emit(EV.MESSAGE, { text: '소리가 멈췄다 — 화면을 클릭하면 다시 켜진다', kind: 'warn' });
+      }
+    }
+  }
+
+  // 전체 볼륨 0~1 (일시정지 메뉴 슬라이더). 브라우저에 저장한다
+  setVolume(v) {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.master) this.master.gain.setTargetAtTime(CONFIG.audio.master * this.volume, this.ctx.currentTime, 0.02);
+    try {
+      window.localStorage.setItem(VOLUME_KEY, String(this.volume));
+    } catch {
+      // 저장소를 못 쓰는 환경 (사생활 보호 모드 등)
+    }
+  }
+
+  // F3 디버그 표시용
+  status() {
+    const c = this.ctx;
+    return {
+      state: c ? c.state : this.error || '아직 없음 (첫 클릭 전)',
+      active: this.activeCount,
+      sampleRate: c ? c.sampleRate : 0,
+      volume: this.volume,
+      ready: this.ready,
+    };
+  }
+
+  // 재생 중인 소리 수 세기 (예약된 것 포함)
+  track(src) {
+    this.activeCount++;
+    src.onended = () => {
+      this.activeCount--;
+    };
   }
 
   makeIR() {
@@ -105,12 +200,15 @@ export class AudioSystem {
     return toBuffer(this.ctx, chans);
   }
 
+  // 일시정지 메뉴가 열려 있는 동안만 멈춘다 (이때는 클릭해도 다시 켜지 않는다)
   suspend() {
+    this.pausedByGame = true;
     if (this.ctx && this.ctx.state === 'running') this.ctx.suspend();
   }
 
   resume() {
-    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+    this.pausedByGame = false;
+    if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume().catch(() => {});
   }
 
   pick(name) {
@@ -152,6 +250,7 @@ export class AudioSystem {
       s.connect(this.reverb);
     }
     src.start(ctx.currentTime + Math.max(0, delay));
+    this.track(src);
   }
 
   // 귀 바로 앞 소리 (내 총·조작음)
@@ -172,6 +271,7 @@ export class AudioSystem {
       s.connect(this.reverb);
     }
     src.start(ctx.currentTime + delay);
+    this.track(src);
   }
 
   listenerDist(x, y, z) {
@@ -211,7 +311,7 @@ export class AudioSystem {
     const A = CONFIG.audio;
     const d = this.listenerDist(imp.x, imp.y, imp.z);
     if (d > A.impactMaxDist) return;
-    const name = this.bank[imp.effect] ? imp.effect : 'dirt';
+    const name = this.bank[imp.effect] ? imp.effect : IMPACT_ALIAS[imp.effect] || 'dirt';
     const g = A.impactGain * Math.min(1, Math.pow(4 / Math.max(4, d), 1.1));
     if (g < 0.01) return;
     this.playAt(name, imp.x, imp.y, imp.z, {
@@ -285,6 +385,7 @@ export class AudioSystem {
     src.start();
     lfo.start();
     lfo2.start();
+    this.activeCount++; // 바람 (계속 재생)
     this.wind = { src, g };
   }
 

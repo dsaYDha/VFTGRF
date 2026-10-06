@@ -3,7 +3,8 @@
 // 조명·그림자·안개·톤매핑은 Three.js 표준 경로(lights/fog 청크)를 그대로 쓰고, 여기서는
 //  1) 혼합 마스크(0.5m)에서 재질 비율·길/궤도 거리장·밭 구획을 읽고
 //  2) 비율이 가장 큰 두 재질만 텍스처(배열 텍스처 층)를 읽어 높이 기반으로 섞고
-//     (가까운 곳만 반복 깨기 두 번째 샘플·근거리 디테일, 픽셀당 텍스처 읽기 수를 묶어 둔다)
+//     (가까운 곳만 반복 깨기 두 번째 샘플·근거리 디테일, 픽셀당 텍스처 읽기 수를 묶어 둔다.
+//      밭 재질은 고랑마다 고랑 방향 좌표를 엇갈려 타일 반복이 고랑을 가로지르는 바둑판 무늬로 줄지어 보이지 않게 한다)
 //  3) 밭 고랑은 해석적 노멀·어둡기(화면에서 가늘어지면 평균으로 흐림)로 그리고
 //  4) 큰 규모 색 변화·물(고랑에 고인 물, 진흙 물기)의 하늘 반사를 더한다.
 // 변형: T_FAR = 원거리 LOD (노멀맵·디테일·반복 깨기 없음, 텍스처 읽기 5~6회),
@@ -66,8 +67,16 @@ ${variant === 'ridge' ? '#define T_RIDGE' : ''}
 #define T_WATER_REFL ${f(G.waterReflect)}
 #define T_TRACK_TREAD ${f(T.tracks.treadPitch)}
 #define T_TRACK_TREAD_STR ${f(T.tracks.treadStrength)}
+#define T_TRACK_TREAD_JIT ${f(T.tracks.treadJitter)}
+#define T_TRACK_TREAD_SHADE ${f(T.tracks.treadShade)}
 #define T_TRACK_MUD ${f(T.tracks.mud)}
+#define T_TRACK_ALB ${f(T.tracks.albedo)}
+#define T_TRACK_SHEEN ${f(T.tracks.sheen)}
+#define T_TRACK_WATER ${f(T.tracks.water)}
+#define T_TRACK_ROUGH ${f(T.tracks.roughness)}
+#define T_TRACK_SPEC ${f(T.tracks.sunSpecular)}
 #define T_NTRACK ${MAX_TRACK_SEGS}
+#define T_FIELD_ANTI_ROT ${f((G.fieldAntiTileRotDeg * Math.PI) / 180)}
 `;
 
   // ---------------------------------------------------------------- 정점
@@ -150,6 +159,10 @@ float tHash(float n) {
 vec3 tVP;
 vec4 tVW;
 vec2 tVS;
+// 밭 재질의 고랑 방향 반복 엇갈림 (terrainSurface 가 픽셀마다 채운다): x = 흑토 층(0) 띠 폭, y = 그루터기 층(1) 띠 폭 (m, 0 = 엇갈리지 않음),
+// z = 구획 난수. 고랑 방향 좌표를 띠(고랑 한 줄)마다 다른 양만큼 밀어, 텍스처 반복이 모든 고랑에서 같은 위상으로 줄지어
+// 고랑을 가로지르는 가로 띠(바둑판 무늬)가 되지 않게 한다. 띠 경계는 고랑 바닥(어두운 선)이라 이음매가 묻힌다
+vec3 tFB;
 
 // 고랑 단면 (s = 고랑 간격 단위 좌표). 0 = 고랑 바닥, 1 안팎 = 이랑 마루.
 // 쟁기가 흙을 한쪽으로 넘겨 약간 비대칭, 이랑마다 높이가 조금씩 다르다 (바닥에서 이어지게).
@@ -170,6 +183,11 @@ void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 fperp, vec2 f
   vec2 uv = fr ? vec2(dot(wp, fperp), dot(wp, fdir)) : wp;
   float k = 1.0 / T_TILE[li];
   float l = float(li);
+  if (fr) {
+    // 고랑(띠)마다 고랑 방향 좌표를 엇갈리게 (tFB 설명 참고)
+    float bw = li == 0 ? tFB.x : tFB.y;
+    if (bw > 0.0) uv.y += tHash(floor(uv.x / bw) + tFB.z) * T_TILE[li];
+  }
   a = vec4(0.0);
   n = vec4(0.0);
   if (anti < 0.996) {
@@ -182,8 +200,9 @@ void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 fperp, vec2 f
 #ifndef T_FAR
   if (anti > 0.004) {
     float k2 = k / T_ANTI_TILE;
-    mat2 rm = fr ? mat2(1.0) : mat2(0.8, 0.6, -0.6, 0.8);
-    vec3 c2 = vec3(rm * uv * k2 + vec2(0.37, 0.71), l);
+    // 밭 재질은 흙덩이 결(고랑 방향)이 크게 돌지 않게 조금만 돌리고, 구획마다 다른 자리에서 읽는다
+    mat2 rm = fr ? mat2(cos(T_FIELD_ANTI_ROT), sin(T_FIELD_ANTI_ROT), -sin(T_FIELD_ANTI_ROT), cos(T_FIELD_ANTI_ROT)) : mat2(0.8, 0.6, -0.6, 0.8);
+    vec3 c2 = vec3(rm * uv * k2 + vec2(0.37, 0.71) + (fr ? vec2(0.29, 0.53) * tFB.z : vec2(0.0)), l);
     vec4 a2 = texture(tAlb, c2);
     vec4 n2 = texture(tGNrm, c2);
     n2.xy = transpose(rm) * (n2.xy * 2.0 - 1.0) * 0.5 + 0.5;
@@ -282,6 +301,9 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis,
   float spacing = parcel > 0 ? PP.z : 1.0;
   float fDepth = (parcel > 0 ? PP.w : 0.0) * smoothstep(0.3, 0.75, wPl) * (1.0 - band) * (1.0 - rut);
   float s0 = dot(wp, fperp) / spacing;
+  // 밭 재질 반복 엇갈림 띠: 고랑 진 밭(흑토·해바라기) = 고랑 한 줄 (경계 = 고랑 바닥), 그루터기 밭 = 그루터기 3줄 (경계 = 줄 사이,
+  // 그루터기 텍스처는 한 장에 12줄), 그루터기 밭의 흑토 얼룩과 구획 밖은 엇갈리지 않는다
+  tFB = parcel > 0 ? (PP.w > 0.0 ? vec3(spacing, spacing, float(parcel) * 17.31) : vec3(0.0, T_TILE[1] * 0.25, float(parcel) * 17.31)) : vec3(0.0);
   float aa = 1.0 - smoothstep(0.22, 0.6, fwidth(s0));
 #ifdef T_RIDGE
   // 실제 고랑 형상이 있는 곳은 형상이 음영을 맡는다
@@ -386,28 +408,38 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis,
         ts = dot(wp - sg.xy, tdir);
       }
     }
-    float ph = ts / T_TRACK_TREAD;
-    float taa = band * (1.0 - smoothstep(0.25, 0.6, fwidth(ph)));
+    // 궤도판 간격을 조금씩 흔들고(미끄러짐·진흙에 뭉개짐, 띠를 가로질러 살짝 비뚤게) 또렷한 구간과 뭉개진 구간이 번갈아 나오게 한다
+    // (일정한 가로 줄이 사다리·판자 길처럼 읽히지 않게)
+    float ph = ts / T_TRACK_TREAD + T_TRACK_TREAD_JIT * (sin(ts * 0.83 + 1.7 * sin(ts * 0.29)) + 0.5 * sin(ts * 2.3 + bd * 3.0));
+    float keep = smoothstep(0.15, 0.75, 0.5 + 0.35 * sin(ts * 0.37 + 2.0 * sin(ts * 0.11)) + 0.25 * sin(ts * 1.13 + bd));
+    float taa = band * keep * (1.0 - smoothstep(0.25, 0.6, fwidth(ph)));
     float cs = cos(6.2831853 * ph);
-    alb *= 1.0 - 0.1 * taa * (0.5 + 0.5 * cs);
+    alb *= 1.0 - T_TRACK_TREAD_SHADE * taa * (0.5 + 0.5 * cs);
     nxz += tdir * (sin(6.2831853 * ph) * T_TRACK_TREAD_STR * taa);
   }
 #endif
+
+  // ---- 궤도 자국 띠: 눌려 다져진 젖은 진흙 — 주변 흙보다 어둡고, 하늘 윤기·진흙 물기는 거의 없다
+  // (밝은 물은 띠 바닥 물웅덩이 메시에만. 띠 전체가 밝은 회색 판자 길처럼 보이지 않게)
+  alb *= mix(1.0, T_TRACK_ALB, band);
+  sheen *= mix(1.0, T_TRACK_SHEEN, band);
+  // 다져진 자국 바닥은 거칠어 해 쪽을 봐도 번들거리지 않는다 (궤도판 무늬가 윤기 줄무늬로 튀지 않게)
+  rough = mix(rough, T_TRACK_ROUGH, band);
 
   // ---- 큰 규모 색 변화 (타일 반복이 보이지 않게)
   alb *= (1.0 - 0.5 * T_MAC_SA + T_MAC_SA * macA.r) * (1.0 - 0.5 * T_MAC_SB + T_MAC_SB * macA.b);
   alb *= furrowAO;
   col *= alb;
 
-  // ---- 물: 젖은 저지대 고랑에 고인 물 + 진흙의 오목한 곳 물기
-  float water = max(furrowWater, bMud * (1.0 - smoothstep(0.17, 0.27, hMud)) * 0.85 * smoothstep(0.45, 0.8, wMud));
+  // ---- 물: 젖은 저지대 고랑에 고인 물 + 진흙의 오목한 곳 물기 (궤도 자국 띠 안은 거의 없음)
+  float water = max(furrowWater, bMud * (1.0 - smoothstep(0.17, 0.27, hMud)) * 0.85 * smoothstep(0.45, 0.8, wMud) * mix(1.0, T_TRACK_WATER, band));
   water = clamp(water, 0.0, 1.0);
   float fres = 0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0);
   col = mix(col, col * 0.3, water);
   // 흐린 날: 물·젖은 흙은 하늘 반사(프레넬, 자체 발광 — 지평선 색을 넘지 않는다)로만 밝아지고,
   // 해(방향광) 반사는 거칠기 하한 + 배수로 넓고 약한 윤기만 남긴다 (좁고 하얀 번쩍임 방지)
   rough = max(mix(rough, T_WATER_ROUGH, water), T_ROUGH_MIN);
-  specK = T_SUN_SPEC * mix(1.0, T_WATER_SPEC, water);
+  specK = T_SUN_SPEC * mix(1.0, T_WATER_SPEC, water) * mix(1.0, T_TRACK_SPEC, band);
   emis = uSkyRefl * fres * (water * T_WATER_REFL + sheen * (1.0 - water));
 
   // ---- 법선: 텍스처 + 고랑 요철 → 기하 법선 기준 탄젠트 공간 (x = 월드 X, y = 월드 Z)

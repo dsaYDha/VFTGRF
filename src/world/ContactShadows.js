@@ -126,10 +126,13 @@ export class ContactShadows {
 
 // 검은 반투명 데칼: 알파 = 발자국 거리장 → 가장자리 바깥 soft 폭에 걸쳐 사라짐, 깊은 안쪽은 inner 배.
 // 안개는 표준 fog 청크 (검정이 안개색으로 섞여, 멀리서도 '안개 낀 어두운 땅'과 정확히 같은 결과)
+// 톤매핑은 받지 않는다: 색감 보정의 어두운 쪽 들어 올림(render.grade.lift)이 데칼 색까지 밝혀 그림자가 옅어지지 않게
+// (C.color 가 화면 출력 색 그대로 → 땅이 들어 올려진 만큼 비율로 어두워진다)
 function createContactShadowMaterial() {
   const C = CONFIG.contactShadows;
   const mat = new THREE.MeshBasicMaterial({
     color: C.color,
+    toneMapped: false,
     transparent: true,
     depthWrite: false,
     polygonOffset: true,

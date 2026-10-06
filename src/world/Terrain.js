@@ -60,6 +60,24 @@ function bbox(points) {
   return { x0, x1, z0, z1 };
 }
 
+// 선(궤도 자국·밭 흙길) 양 끝이 옅어지는 비율: 가장 가까운 점이 끝에서 len m 안쪽이면 0 → 1 (끝 = 0, 그 너머 둥근 끝도 0)
+// (자국이 칼같이 끊기거나 양쪽 띠가 끝에서 U 자로 이어지지 않게). 선 길이표는 점 배열마다 한 번 만든다
+const _lineLens = new WeakMap();
+const _lineHit = {};
+function lineEndFade(points, x, z, len) {
+  let L = _lineLens.get(points);
+  if (!L) {
+    const cum = [0];
+    for (let i = 1; i < points.length; i++) cum.push(cum[i - 1] + Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]));
+    L = { cum, total: cum[cum.length - 1] };
+    _lineLens.set(points, L);
+  }
+  polylineDistance(points, x, z, _lineHit);
+  const i = _lineHit.index;
+  const s = L.cum[i] + (L.cum[i + 1] - L.cum[i]) * _lineHit.t;
+  return smoothstep(0, len, Math.min(s, L.total - s));
+}
+
 // 차량 바닥 크기 (반길이·반폭, 로컬 x = 차체 길이 방향)
 const VEHICLE_HALF = {
   apc: [3.6, 1.6],
@@ -802,16 +820,19 @@ export class Terrain {
   buildCraterList() {
     const C = CONFIG.terrain.craters;
     const rng = this.rng;
+    // 수로 앞 낮은 시선용 지정 구덩이(cue): 무작위 배치가 끝난 뒤에 더한다 (무작위 구덩이·잔해 배치가 바뀌지 않게)
+    const cue = [];
     for (const c of MAP.craters) {
       const cr = { ...c, fresh: !!c.fresh, seed: (c.x * 13.1 + c.z * 7.7) % 100 };
       // AI 사격 위치가 쓰는 지정 구덩이(F1·F2)는 형상을 그대로 둔다
       cr.legacy = !!c.tag;
-      cr.rimH = c.tag ? 0.12 * c.d + 0.06 : clamp(0.12 * c.d + (cr.fresh ? 0.2 : 0.1), 0.2, 0.42);
-      this.craters.push(cr);
+      cr.rimH = c.rim ?? (c.tag ? 0.12 * c.d + 0.06 : clamp(0.12 * c.d + (cr.fresh ? 0.2 : 0.1), 0.2, 0.42));
+      (c.cue ? cue : this.craters).push(cr);
     }
     const excl = MAP.craterExclusions;
     const fps = this.footprints;
-    const roads = MAP.roads;
+    // 밭 흙길(field)은 피하지 않는다 (나중에 더한 길이 무작위 구덩이 배치를 바꾸지 않게, 길 위 구덩이도 자연스럽다)
+    const roads = MAP.roads.filter((rd) => !rd.field);
     const solids = [MAP.apc, MAP.tractor, ...MAP.cars, ...MAP.dugouts];
     const points = [...MAP.pylons, ...MAP.trees];
     const zones = MAP.craterZones || [{ kind: 'rect', x0: -235, x1: 235, z0: -215, z1: 90, weight: 1 }];
@@ -861,6 +882,7 @@ export class Terrain {
       this.craters.push({ x, z, r, d, fresh, rimH, seed: rng.next() * 100 });
       made++;
     }
+    for (const cr of cue) this.craters.push(cr);
   }
 
   // 분출물 방사 줄기 (0..1). 각도에 대해 주기적
@@ -1055,16 +1077,24 @@ export class Terrain {
   // 농로: 주변보다 조금 꺼진 길, 가운데 솟음, 깊게 팬 두 줄 바퀴 자국, 길가 흙 턱과 배수로
   applyRoads() {
     const R = CONFIG.terrain.road;
+    const FT = CONFIG.terrain.fieldTrack;
     for (const rd of MAP.roads) {
       const { x0, x1, z0, z1 } = bbox(rd.points);
       const hw = rd.width / 2;
-      const ext = hw + R.ditchOffset + R.ditchHalf + 1.2;
+      const ext = rd.field ? R.rutOffset + R.rutFlat + R.rutWall + 0.9 : hw + R.ditchOffset + R.ditchHalf + 1.2;
       this.addRoadDetail(rd.points, ext);
       this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
         const d = polylineDistance(rd.points, x, z);
         if (d > ext) return;
         // 수로 바로 위는 건드리지 않는다 (배수관 둑 위는 길만, 배수로는 없음)
         if (this.nearCanal(x, z)) return;
+        if (rd.field) {
+          // 밭 흙길: 자갈·배수로 없이 깊게 팬 두 줄 바퀴 자국 + 바퀴에 밀려 자국 가장자리로 조금 솟은 흙. 끝은 얕아지며 사라진다
+          const fade = lineEndFade(rd.points, x, z, FT.endFade);
+          const rd2 = Math.abs(d - R.rutOffset);
+          this.h[k] += fade * (FT.lip * bump((rd2 - R.rutFlat - R.rutWall * 0.4) / 0.5, 0.35) - FT.rutDepth * flatProfile(rd2, R.rutFlat, R.rutWall));
+          return;
+        }
         let dh = 0;
         if (d < hw + 0.3) {
           const inner = 1 - smoothstep(hw - 0.2, hw + 0.3, d);
@@ -1112,7 +1142,9 @@ export class Terrain {
       this.stamp(x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
         const d = polylineDistance(tr.points, x, z);
         if (d > ext || this.nearCanal(x, z, 7)) return;
-        this.h[k] -= T.depth * flatProfile(Math.abs(d - half), T.bandHalf * 0.55, T.bandHalf * 0.6);
+        // 양 끝은 얕아지며 사라진다
+        const fade = lineEndFade(tr.points, x, z, T.endFade);
+        this.h[k] -= T.depth * fade * flatProfile(Math.abs(d - half), T.bandHalf * 0.55, T.bandHalf * 0.6);
       });
     }
   }
@@ -1167,7 +1199,10 @@ export class Terrain {
         for (const c of this.craters) if (Math.hypot(x - c.x, z - c.z) < c.r * 1.6 + ext + RP.gap * 0.5) ok = false;
         for (const q of list) if (Math.hypot(x - q.x, z - q.z) < q.len + ext + RP.gap) ok = false;
         if (ok) {
-          for (const rd of MAP.roads) if (polylineDistance(rd.points, x, z) < rd.width / 2 + R.ditchOffset + R.ditchHalf + ext + 0.5) ok = false;
+          for (const rd of MAP.roads) {
+            const reach = rd.field ? R.rutOffset + R.rutFlat + R.rutWall + 0.5 : rd.width / 2 + R.ditchOffset + R.ditchHalf;
+            if (polylineDistance(rd.points, x, z) < reach + ext + 0.5) ok = false;
+          }
           for (const tr of MAP.vehicleTracks || []) if (polylineDistance(tr.points, x, z) < tr.gauge / 2 + TB.bandHalf + ext + 0.5) ok = false;
           for (const line of MAP.trench.lines) if (polylineDistance(line, x, z) < ext + 14) ok = false;
         }
@@ -1233,6 +1268,8 @@ export class Terrain {
     for (const p of this.puddles) if (p.type === 'disc') this.puddleRays(p, p.rain ? 20 : C.waterRays);
     const R = CONFIG.terrain.road;
     const rng = new Random(CONFIG.world.seed + 31);
+    const FT = CONFIG.terrain.fieldTrack;
+    const mainRoads = MAP.roads.filter((r) => !r.field);
     for (const rd of MAP.roads) {
       const pts = rd.points;
       for (let i = 0; i < pts.length - 1; i++) {
@@ -1242,7 +1279,7 @@ export class Terrain {
         const ux = (bx - ax) / len;
         const uz = (bz - az) / len;
         for (let s = 1.5; s < len - 1.5; s += R.puddleEvery * rng.range(0.6, 1.4)) {
-          if (!rng.chance(R.puddleChance)) continue;
+          if (!rng.chance(rd.field ? FT.puddleChance : R.puddleChance)) continue;
           const L = rng.range(2.5, 9);
           const across = rng.chance(0.15);
           const sides = across ? [-1, 1] : [rng.chance(0.5) ? 1 : -1];
@@ -1254,6 +1291,11 @@ export class Terrain {
               const px = ax + ux * Math.min(len, s + q) - uz * sd * R.rutOffset;
               const pz = az + uz * Math.min(len, s + q) + ux * sd * R.rutOffset;
               if (this.nearCanal(px, pz, 7) || Math.abs(px) > this.half - 2 || Math.abs(pz) > this.half - 2) bad = true;
+              // 밭 흙길: 옅어지는 끝과 농로(배수로 포함)를 건너는 곳에는 물을 두지 않는다
+              if (rd.field) {
+                if (lineEndFade(pts, px, pz, FT.endFade) < 0.8) bad = true;
+                for (const mr of mainRoads) if (polylineDistance(mr.points, px, pz) < mr.width / 2 + R.ditchOffset + R.ditchHalf + 0.6) bad = true;
+              }
               minB = Math.min(minB, this.heightAt(px, pz));
               line.push([px, pz]);
             }
@@ -1277,7 +1319,7 @@ export class Terrain {
         const uz = (bz - az) / len;
         for (let s = 1; s < len - 1; s += TB.puddleEvery * trng.range(0.6, 1.4)) {
           if (!trng.chance(TB.puddleChance)) continue;
-          const L = trng.range(2, 7);
+          const L = trng.range(TB.puddleLen[0], TB.puddleLen[1]);
           const sides = trng.chance(0.3) ? [-1, 1] : [trng.chance(0.5) ? 1 : -1];
           for (const sd of sides) {
             const line = [];
@@ -1287,11 +1329,13 @@ export class Terrain {
               const px = ax + ux * Math.min(len, s + q) - uz * sd * half;
               const pz = az + uz * Math.min(len, s + q) + ux * sd * half;
               if (this.nearCanal(px, pz, 8) || Math.abs(px) > this.half - 2 || Math.abs(pz) > this.half - 2) bad = true;
+              // 옅어지는 양 끝(얕은 자국)에는 물이 고이지 않는다
+              if (lineEndFade(pts, px, pz, TB.endFade) < 0.8) bad = true;
               minB = Math.min(minB, this.heightAt(px, pz));
               line.push([px, pz]);
             }
             if (bad || line.length < 3) continue;
-            this.puddles.push({ type: 'strip', pts: line, hw: TB.bandHalf * 0.7, level: minB + trng.range(0.03, 0.06) });
+            this.puddles.push({ type: 'strip', pts: line, hw: TB.bandHalf * 0.7, level: minB + trng.range(TB.puddleLevel[0], TB.puddleLevel[1]) });
           }
         }
       }
@@ -1352,6 +1396,13 @@ export class Terrain {
     const R = CONFIG.terrain.road;
     // 도로·배수로
     for (const rd of MAP.roads) {
+      if (rd.field) {
+        // 밭 흙길: 바퀴 자국만 진흙 (가운데 띠·길가는 풀이 난다)
+        this.forPolylineSurf(rd.points, R.rutOffset + 0.6, (x, z, k, d) => {
+          if (Math.abs(d - R.rutOffset) < 0.45 && !this.nearCanal(x, z) && lineEndFade(rd.points, x, z, CONFIG.terrain.fieldTrack.endFade) > 0.4) this.surf[k] = SID.wetMud;
+        });
+        continue;
+      }
       const hw = rd.width / 2 + 0.25;
       this.forPolylineSurf(rd.points, hw + R.ditchOffset + R.ditchHalf, (x, z, k, d) => {
         if (d < hw) this.surf[k] = SID.road;
@@ -1573,10 +1624,24 @@ export class Terrain {
   paintRoads(m) {
     const R = CONFIG.terrain.road;
     const nz = this.noise;
+    const FT = CONFIG.terrain.fieldTrack;
     for (const rd of MAP.roads) {
       const { x0, x1, z0, z1 } = bbox(rd.points);
       const hw = rd.width / 2;
       const ext = Math.min(ROAD_RANGE, hw + R.ditchOffset + R.ditchHalf + 1.6);
+      if (rd.field) {
+        // 밭 흙길: 바퀴 자국만 진흙 (셰이더가 길 중심 거리로 날카롭게 더 칠한다), 가운데·바깥은 밭·풀 그대로.
+        // 옅어지는 끝에서는 길 거리장을 쓰지 않아 셰이더 자국도 끊긴다
+        this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
+          const d = polylineDistance(rd.points, x, z);
+          if (d > ext || this.nearCanal(x, z)) return;
+          const fade = lineEndFade(rd.points, x, z, FT.endFade);
+          if (fade > 0.5) m.road[k] = Math.min(m.road[k], d);
+          const e = nz.noise(x / 1.3, z / 1.3) * 0.12;
+          this.paint(m, k, GM.mud, (1 - smoothstep(0.12, 0.5, Math.abs(d - R.rutOffset) + e)) * FT.mud * fade);
+        });
+        continue;
+      }
       this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
         const d = polylineDistance(rd.points, x, z);
         if (d > ext) return;
@@ -1606,11 +1671,13 @@ export class Terrain {
       this.maskStamp(m, x0 - ext, z0 - ext, x1 + ext, z1 + ext, (x, z, k) => {
         if (this.nearCanal(x, z, 7)) return;
         const d = polylineDistance(tr.points, x, z);
-        const bd = Math.abs(d - half);
+        // 양 끝: 띠 거리를 늘려 띠가 가늘어지며 사라진다 (셰이더 띠·궤도판 무늬도 함께)
+        const fade = lineEndFade(tr.points, x, z, T.endFade);
+        const bd = Math.abs(d - half) / Math.max(fade, 0.05);
         if (bd < m.track[k]) m.track[k] = bd;
         // 눌린 띠 = 젖은 진흙 (셰이더가 띠 거리장으로 날카롭게 더 칠한다), 띠 사이·바깥으로 밀려난 흙은 옅게
         this.paint(m, k, GM.mud, (1 - smoothstep(T.bandHalf * 0.5, T.bandHalf * 1.7, bd)) * T.mud * 0.6);
-        this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 1.0, d / half)) * 0.18);
+        this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 1.0, d / half)) * 0.18 * fade);
       });
     }
   }
@@ -1698,17 +1765,24 @@ export class Terrain {
         // 흉벽: 주변 흑토보다 밝은 황갈색 띠 (200m 에서 참호선이 읽히게). 앞면·마루는 갓 파낸 하층토,
         // 그 앞으로 흩뿌려진 흙이 얼룩덜룩하게 apron m 까지 옅어진다 (먼 곳에서 마스크 밉맵이 띠를 주변과 섞어도 밝게 남도록 넓게)
         let sub;
+        let env = 0;
         if (d < T.topHalf) sub = 0.85;
         else if (front) {
           const wall = 1 - smoothstep(0.85, 1.25, t + n * 0.12);
           const out = d - (T.topHalf * 0.85 + wallW);
-          const patch = smoothstep(-0.3, 0.35, nz.noise(x / E.patch + 11.3, z / E.patch - 5.1) + 0.3 * nz.noise(x / 0.9 + 2, z / 0.9 + 7));
-          const apron = (1 - smoothstep(E.apron * 0.3, E.apron, out + n * 1.6)) * E.strength * (0.4 + 0.6 * patch);
+          // 흉벽 앞 흙: 마루에서 멀어질수록 옅어지고 (env), 얼룩 경계는 넓게 + 잔 흙덩이 노이즈로 잘게 깨진다 (또렷한 섬 무늬가 아니게)
+          env = Math.pow(1 - smoothstep(-0.5, E.apron, out + n * 1.6), E.falloff);
+          const pn = nz.noise(x / E.patch + 11.3, z / E.patch - 5.1) + 0.3 * nz.noise(x / 0.9 + 2, z / 0.9 + 7) + 0.4 * nz.noise(x / E.clod - 4.2, z / E.clod + 8.8);
+          const patch = smoothstep(-E.patchSoft, E.patchSoft * 0.8, pn);
+          const apron = env * E.strength * (0.45 + 0.55 * patch);
           sub = Math.max(wall * E.crest, apron);
+          // 얼룩 사이는 풀 대신 흑토와 섞인 흙 (하층토보다 먼저 칠해 셰이더 높이 혼합이 흙덩이 사이사이로 섞음 → 중간 밝기).
+          // 흙 띠 바깥 끝은 하층토보다 조금 더 멀리까지 흑토로 이어져, 밝은 흙에서 풀밭으로 바로 끊기지 않는다
+          this.paint(m, k, GM.plowed, (1 - smoothstep(-0.5, E.apron * 1.3, out + n * 1.6)) * E.gapSoil);
         } else sub = (1 - smoothstep(0.75, 1.15, t + n * 0.12)) * E.parados;
         this.paint(m, k, GM.subsoil, sub);
-        // 풀 덩이: 후벽과 흉벽 앞 흙 얼룩 사이에만 (흉벽 앞면·마루는 갓 파낸 흙)
-        if (d > T.topHalf && (!front || t > 0.95)) this.paint(m, k, GM.grass, smoothstep(0.55, 0.9, nz.noise(x / 1.6 + 3, z / 1.6)) * 0.45 * (1 - sub));
+        // 풀 덩이: 후벽 쪽과, 흉벽 앞 흙이 다 옅어진 바깥에만 (흉벽 앞면·마루는 갓 파낸 흙)
+        if (d > T.topHalf && (!front || t > 0.95)) this.paint(m, k, GM.grass, smoothstep(0.55, 0.9, nz.noise(x / 1.6 + 3, z / 1.6)) * 0.45 * (1 - sub) * (1 - env));
       });
     }
     for (const line of T.commLines) {

@@ -48,6 +48,31 @@ export class Screens {
     this.buildPause();
     this.bindQuality(this.briefing);
     this.bindQuality(this.pause);
+    this.bindVolume();
+  }
+
+  // 전체 볼륨 슬라이더 (일시정지 메뉴). 이 칸 안의 클릭·드래그로 게임이 다시 시작되지 않게 막는다
+  bindVolume() {
+    const box = this.pause.querySelector('.volume-select');
+    const slider = document.getElementById('vol-slider');
+    for (const type of ['click', 'pointerdown', 'mousedown']) box.addEventListener(type, (e) => e.stopPropagation());
+    slider.addEventListener('input', () => {
+      this.game.audio.setVolume(slider.value / 100);
+      this.refreshVolume();
+    });
+    this.refreshVolume();
+  }
+
+  refreshVolume() {
+    const a = this.game.audio;
+    const slider = document.getElementById('vol-slider');
+    if (!slider) return;
+    const pct = Math.round(a.volume * 100);
+    if (+slider.value !== pct) slider.value = String(pct);
+    document.getElementById('vol-value').textContent = `${pct}%`;
+    const st = a.status();
+    const STATE = { running: '켜짐', suspended: '일시정지 중 (계속하면 다시 켜짐)', interrupted: '다른 앱이 사용 중', closed: '닫힘' };
+    document.getElementById('audio-status').textContent = `오디오: ${STATE[st.state] || st.state}${st.sampleRate ? ` · ${st.sampleRate}Hz` : ''}`;
   }
 
   // 그래픽 품질 버튼: 누르면 바로 적용하고 선택 표시·설명을 갱신한다.
@@ -130,6 +155,15 @@ export class Screens {
         <div class="sub">빈 곳을 클릭하면 계속합니다</div>
         <div style="text-align:left;margin-top:14px">${keysHtml()}</div>
         ${qualityHtml()}
+        <div class="volume-select" style="cursor:default;margin:6px 0 14px">
+          <h2 style="text-align:left">소리</h2>
+          <label for="vol-slider" style="display:flex;align-items:center;justify-content:center;gap:12px">
+            전체 볼륨
+            <input type="range" id="vol-slider" min="0" max="100" step="1" style="width:min(280px,50vw);accent-color:#c8b878">
+            <span id="vol-value" style="min-width:3.2em;text-align:right;font-variant-numeric:tabular-nums"></span>
+          </label>
+          <div class="sub" id="audio-status" style="margin-top:6px"></div>
+        </div>
         <div class="btn" id="btn-resume">계속</div>
         <div class="btn" id="btn-restart-pause" style="margin-left:10px;background:#4a4840">처음부터</div>
       </div>`;
@@ -144,6 +178,7 @@ export class Screens {
 
   showPause(onResume, onRestart) {
     this.refreshQuality();
+    this.refreshVolume();
     this.pause.classList.remove('hidden');
     document.getElementById('btn-restart-pause').onclick = (e) => {
       e.stopPropagation();

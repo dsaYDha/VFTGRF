@@ -231,6 +231,8 @@ export class DebugOverlay {
         `지형 LOD ${CONFIG.terrain.mesh.lodDistance}m  원경 ${CONFIG.distant.range}m`,
     );
     lines.push(`GPU ${this.gpuName()}`);
+    const au = g.audio.status();
+    lines.push(`오디오 ${au.state}  재생 중 ${au.active}개  볼륨 ${Math.round(au.volume * 100)}%${au.sampleRate ? `  ${au.sampleRate}Hz` : ''}${au.ready ? '' : '  (소리 준비 전)'}`);
     return lines;
   }
 

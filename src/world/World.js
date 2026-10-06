@@ -36,7 +36,9 @@ function createPuddleMaterial() {
     uZenith: { value: new THREE.Color(A.skyZenith) },
     uReflect: { value: P.reflect },
     uMinRefl: { value: P.minReflect },
-    uEdge: { value: new THREE.Vector2(P.edgeSoft, P.edgeNoise) },
+    uEdge: { value: new THREE.Vector3(P.edgeSoft, P.edgeNoise, P.shallowAlpha) },
+    uCloud: { value: P.cloudReflect },
+    uShallowDepth: { value: P.shallowDepth },
   };
   mat.name = 'puddle';
   mat.userData.puddleUniforms = uniforms;
@@ -49,7 +51,7 @@ function createPuddleMaterial() {
     sh.fragmentShader = sh.fragmentShader
       .replace(
         '#include <common>',
-        '#include <common>\nuniform vec3 uHorizon;\nuniform vec3 uZenith;\nuniform float uReflect;\nuniform float uMinRefl;\nuniform vec2 uEdge;\nvarying vec3 vPWPos;\nvarying float vPDepth;',
+        '#include <common>\nuniform vec3 uHorizon;\nuniform vec3 uZenith;\nuniform float uReflect;\nuniform float uMinRefl;\nuniform vec3 uEdge;\nuniform float uCloud;\nuniform float uShallowDepth;\nvarying vec3 vPWPos;\nvarying float vPDepth;',
       )
       .replace(
         '#include <opaque_fragment>',
@@ -60,19 +62,26 @@ function createPuddleMaterial() {
           vec3 N = normalize(vec3(0.012 * sin(q.x + 1.7 * sin(q.y)), 1.0, 0.012 * sin(q.y * 1.3 + 1.1 * sin(q.x))));
           vec3 R = reflect(V, N);
           vec3 sky = mix(uHorizon, uZenith, pow(clamp(R.y, 0.0, 1.0), 0.55));
+          // 비친 구름 얼룩: 반사 방향이 구름층에 닿는 자리의 큰 명암 무늬 (보는 자리가 움직이면 함께 흘러 한 가지 회색 판이 아니라 수면으로 읽힌다)
+          vec2 cp = R.xz / max(R.y, 0.12) * 3.2;
+          sky *= 1.0 + uCloud * sin(cp.x * 1.1 + 1.6 * sin(cp.y * 0.7)) * sin(cp.y * 0.9 + 1.3 * sin(cp.x * 0.6));
           float fres = max(uMinRefl, clamp(0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0), 0.0, 1.0));
           outgoingLight = mix(outgoingLight, sky * uReflect, fres);
-          // 물가: 수심이 얕아지면 투명 (노이즈로 흔든 불규칙한 물가 선)
+          // 물가: 노이즈로 흔든 또렷한 물가 선 (수심 0 → edgeSoft, 화면에서 1.5px 보다 좁아지지 않게 — 계단 현상 방지),
+          // 그 안쪽 얕은 띠(수심 shallowDepth 까지)는 바닥 진흙이 조금 비친다. 물가 쪽 수심은 완만하게 0 이 되므로 두 폭 모두 수심으로 아주 작게 잡는다
           vec2 e = vPWPos.xz;
           float en = sin(e.x * 3.7 + 1.9 * sin(e.y * 2.3)) * sin(e.y * 3.1 + 2.1 * sin(e.x * 1.7)) * 0.7
             + sin(e.x * 9.3 - e.y * 7.1) * 0.3;
-          float edge = smoothstep(0.0, uEdge.x, vPDepth + en * uEdge.y);
-          diffuseColor.a = mix(diffuseColor.a, 1.0, fres) * edge;
+          float dd = vPDepth + en * uEdge.y;
+          float ew = max(uEdge.x, fwidth(dd) * 1.5);
+          float edge = smoothstep(0.0, ew, dd);
+          float shallow = mix(uEdge.z, 1.0, smoothstep(ew, ew + uShallowDepth, dd));
+          diffuseColor.a = mix(diffuseColor.a * shallow, 1.0, fres) * edge;
         }
         #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'puddleSky2';
+  mat.customProgramCacheKey = () => 'puddleSky4';
   return mat;
 }
 

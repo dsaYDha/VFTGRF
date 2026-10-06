@@ -3,6 +3,7 @@
 //  - 안개: Three.js fog 셰이더 청크를 이 모듈의 식으로 바꿔 끼운다 → 표준 재질, onBeforeCompile 로 고친 재질
 //    (지형 스플랫, 식생 인스턴스), fog 를 켠 ShaderMaterial(파티클) 이 모두 같은 안개를 받는다.
 //    거리 = 카메라에서의 실제 거리, 높이 안개(위로 갈수록 옅음), 먼 곳 실루엣 몫 (CONFIG.atmosphere.fog)
+//    가까운 지수형 투과율과 먼 곳 몫은 부드러운 최댓값으로 합친다 → 600m 에서 거의 안개색, 3km 너머 지평선은 안개에 녹는다
 //  - 하늘: 절차적 흐린 하늘 돔. 층운 두께 텍스처 두 겹이 바람 방향으로 아주 천천히 흐르고,
 //    지평선 연무 띠가 안개색과 정확히 같은 색으로 이어진다 (톤매핑 없이 화면 값 그대로).
 //  - 조명: 반구광 + 구름 뒤 해(약한 방향광). 그림자는 플레이어 주변만 옅고 부드럽게, 가장자리에서 사라진다.
@@ -28,10 +29,24 @@ export function fogFactorAt(d, dy = 0) {
   const F = CONFIG.atmosphere.fog;
   let k = Math.max(-1.5, Math.min(12, dy / F.hazeHeight));
   const hf = Math.abs(k) < 1e-3 ? 1 : (1 - Math.exp(-k)) / k;
-  const dd = d * hf;
+  return 1 - fogTransmit(d * hf);
+}
+
+// 높이 보정한 거리 dd 의 투과율: 가까운 지수형 A 와 먼 곳 실루엣 몫 B 의 부드러운 최댓값 (p-노름, 거리에 따라 단조 감소)
+function fogTransmit(dd) {
+  const F = CONFIG.atmosphere.fog;
   const tau = F.linear * dd + F.quad * F.quad * dd * dd;
-  const T = (1 - F.farResidual) * Math.exp(-tau) + F.farResidual * Math.exp(-dd / F.farLength);
-  return 1 - T;
+  const a = Math.max(Math.exp(-tau), 1e-6);
+  const b = Math.max(F.farResidual * Math.exp(-dd / F.farLength), 1e-6);
+  const p = F.blendPow;
+  return Math.pow(Math.pow(a, p) + Math.pow(b, p), 1 / p);
+}
+
+// GLSL 판 (dd, tau 가 이미 있는 자리에 넣는 식). 밀도 항 계수는 호출하는 쪽이 tau 에 넣는다
+function glslTransmit(tau, dd) {
+  const F = CONFIG.atmosphere.fog;
+  const p = glf(F.blendPow);
+  return `pow( pow( max( exp( -( ${tau} ) ), 1e-6 ), ${p} ) + pow( max( ${glf(F.farResidual)} * exp( -( ${dd} ) / ${glf(F.farLength)} ), 1e-6 ), ${p} ), ${glf(1 / F.blendPow)} )`;
 }
 
 // ---------------------------------------------------------------------------- 톤매핑 (JS 판)
@@ -90,7 +105,7 @@ function installShaderChunks() {
 	vFogDY = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).y;
 #endif
 `;
-  // 조각: 광학 깊이 tau = linear·d + (밀도·d)², 투과율 = (1-r)·e^-tau + r·e^(-d/L), 높이 안개 배수 hf
+  // 조각: 광학 깊이 tau = linear·d + (밀도·d)², 투과율 = (e^-tau ^p + (r·e^(-d/L))^p)^(1/p), 높이 안개 배수 hf
   SC.fog_pars_fragment = `
 #ifdef USE_FOG
 	uniform vec3 fogColor;
@@ -103,8 +118,7 @@ function installShaderChunks() {
 			float hf = abs( k ) < 1e-3 ? 1.0 : ( 1.0 - exp( -k ) ) / k;
 			float dd = d * hf;
 			float tau = ${glf(F.linear)} * dd + fogDensity * fogDensity * dd * dd;
-			float T = ${glf(1 - F.farResidual)} * exp( -tau ) + ${glf(F.farResidual)} * exp( -dd / ${glf(F.farLength)} );
-			return 1.0 - T;
+			return 1.0 - ${glslTransmit('tau', 'dd')};
 		}
 	#else
 		uniform float fogNear;
@@ -199,7 +213,7 @@ function createSkyMaterial() {
         // 유효 거리 = hazeHeight / sin(고도)) → 지평선에서 정확히 안개색, 먼 연기·언덕은 뒤 하늘보다 조금 어둡게 남는다
         float dd = ${glf(F.hazeHeight * S.hazeMul)} / max(h, 1e-4);
         float tau = ${glf(F.linear)} * dd + ${glf(F.quad * F.quad)} * dd * dd;
-        float T = ${glf(1 - F.farResidual)} * exp(-tau) + ${glf(F.farResidual)} * exp(-dd / ${glf(F.farLength)});
+        float T = ${glslTransmit('tau', 'dd')};
         col = mix(col, ${glc(A.fogColor)}, 1.0 - T);
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>

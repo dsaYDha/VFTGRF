@@ -9,6 +9,7 @@ import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferG
 import { boxGeo, cylGeo, gableGeo, place, tint } from './geom.js';
 import { clamp, polylineDistance } from '../core/mathUtils.js';
 import { Random } from '../core/Random.js';
+import { crateTexture } from './textures.js';
 
 const _v = new THREE.Vector3();
 const _m4 = new THREE.Matrix4();
@@ -145,15 +146,61 @@ export class StructureBuilder {
         const cx = w.ox + w.ux * mid;
         const cz = w.oz + w.uz * mid;
         const cy = w.y0 + (ya + yb) * 0.5;
-        const g = boxGeo(sb - sa, yb - ya, w.thick, uvs);
-        offsetUV(g, sa / uvs, ya / uvs);
-        place(g, cx, cy, cz, yaw);
         const dark = nearHole || broken ? 0.62 : 1;
-        const c = new THREE.Color(w.color || 0xffffff).multiplyScalar(dark);
-        this.batch.add(w.matKey, g, c, 0.18);
+        // 정점색 벽(shade)은 구멍·무너진 곳 둘레 어둡기를 shadeWall 이 거리에 따라 부드럽게 준다 (상자마다 끊긴 사각형 얼룩이 생기지 않게)
+        const c = new THREE.Color(w.color || 0xffffff).multiplyScalar(w.shade ? 1 : dark);
+        if (w.shade) {
+          // 정점색 띠(벽 아래 습기)를 그리려고 보이는 상자만 띠 경계 높이에서 나눈다 (충돌 상자는 그대로 하나)
+          const ys = [ya, ...w.shade.rows.filter((y) => y > ya + 0.05 && y < yb - 0.05), yb];
+          for (let q = 0; q < ys.length - 1; q++) {
+            const g = boxGeo(sb - sa, ys[q + 1] - ys[q], w.thick, uvs);
+            offsetUV(g, sa / uvs, ys[q] / uvs);
+            place(g, cx, w.y0 + (ys[q] + ys[q + 1]) * 0.5, cz, yaw);
+            this.shadeWall(g, w, c);
+            this.batch.add(w.matKey, g);
+          }
+        } else {
+          const g = boxGeo(sb - sa, yb - ya, w.thick, uvs);
+          offsetUV(g, sa / uvs, ya / uvs);
+          place(g, cx, cy, cz, yaw);
+          this.batch.add(w.matKey, g, c, 0.18);
+        }
         if (w.colMat) this.col.addBox(cx, cy, cz, (sb - sa) / 2, (yb - ya) / 2, w.thick / 2, yaw, w.colMat, w.tag);
       }
     }
+  }
+
+  // 축사 벽 정점색 (CONFIG.farm.barn.wallShade, wall 의 w.shade): 벽 아래 빗물 튐·습기·그을음 띠(높이·짙기가 벽을 따라 흔들림),
+  // 벽을 따라가는 큰 얼룩(벽돌 텍스처 2m 반복을 깸), 안쪽 면은 어둡게. 정점 위치(월드)에서 계산하므로 맞닿은 상자끼리 색이 이어진다
+  shadeWall(g, w, c) {
+    const S = w.shade;
+    const nz = this.terrain.noise;
+    const pos = g.attributes.position;
+    const arr = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const dx = pos.getX(i) - w.ox;
+      const dz = pos.getZ(i) - w.oz;
+      const s = dx * w.ux + dz * w.uz;
+      const y = pos.getY(i) - w.y0;
+      const n = dx * S.nx + dz * S.nz; // 벽 중심면에서 바깥(+)·안(-)
+      const bv = nz.noise(s / 3.3 + S.seed, 7.7 + S.seed * 0.3);
+      const y0 = S.band[0] * (1 + S.bandVar * bv);
+      const y1 = S.band[1] * (1 + S.bandVar * 0.7 * bv);
+      const dk = S.dark * (0.85 + 0.3 * nz.noise(s / 2.2 + S.seed * 1.7, 3.1));
+      let k = 1 - clamp(dk, 0, 0.9) * (1 - THREE.MathUtils.smoothstep(y, y0, y1));
+      k *= 1 + S.macroAmp * nz.noise(s / S.macroSize + S.seed * 2.3, y / (S.macroSize * 0.6) - 5.7);
+      // 포탄 구멍·무너진 벽 둘레: 그을리고 부서진 벽면 (구멍 가장자리에서 멀어지며 옅어짐)
+      let dh = Infinity;
+      for (const o of w.openings) if (o.hole) dh = Math.min(dh, Math.max(0, o.s0 - s, s - o.s1));
+      for (const cl of w.collapses) dh = Math.min(dh, Math.max(0, cl.s0 - s, s - cl.s1));
+      if (dh < 2) k *= 1 - S.holeDark * (1 - THREE.MathUtils.smoothstep(dh, 0.25, 2.0));
+      if (n < -0.01) k *= S.inner;
+      arr[i * 3] = c.r * k;
+      arr[i * 3 + 1] = c.g * k;
+      arr[i * 3 + 2] = c.b * k;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+    return g;
   }
 
   // ------------------------------------------------------------------ 축사
@@ -215,7 +262,8 @@ export class StructureBuilder {
       // 창문
       const long = side === 'south' || side === 'north';
       if (long) {
-        for (let s = -L / 2 + 3; s <= L / 2 - 3; s += b.windowSpacing) {
+        // 북쪽 벽 창은 남쪽 벽 창과 엇갈리게 (남쪽 창 너머로 하늘이 뚫려 보이지 않게, CONFIG.farm.barn.northWindowShift)
+        for (let s = -L / 2 + 3 + (side === 'north' ? F.northWindowShift || 0 : 0); s <= L / 2 - 3; s += b.windowSpacing) {
           const s0 = centerS(s - 0.55);
           const s1 = centerS(s + 0.55);
           if (openings.some((op) => s1 > op.s0 - 0.4 && s0 < op.s1 + 0.4)) continue;
@@ -248,7 +296,17 @@ export class StructureBuilder {
         const [rx, rz] = toW(o, ...this.wallLocal(side, sm, L, W, t, 0));
         this.rubblePile(rx, rz, 2.2, 60, b.brick);
       }
-      this.wall({ ox: ax, oz: az, ux, uz, len, thick: t, y0: floorY, height: H, openings, collapses, matKey, colMat: 'brick', tag: b.id });
+      // 벽 정점색: 아래 습기 띠·큰 얼룩·어두운 안쪽 면 (CONFIG.farm.barn.wallShade)
+      const WS = F.wallShade;
+      const shade = WS && {
+        ...WS,
+        rows: WS.band,
+        dark: WS.dark[b.brick] ?? WS.dark.red,
+        nx,
+        nz,
+        seed: (b.x * 0.37 + b.z * 0.11 + Object.keys(sides).indexOf(side) * 13.7) % 97,
+      };
+      this.wall({ ox: ax, oz: az, ux, uz, len, thick: t, y0: floorY, height: H, openings, collapses, matKey, colMat: 'brick', tag: b.id, shade });
       this.barnHoleTeeth(openings, { ax, az, ux, uz, t, floorY, matKey }, drng);
       // 불난 축사: 불 가까운 창은 모두 그을음
       const fireS = fire ? (side === 'south' || side === 'north' ? fire.lx : fire.lz) + len / 2 : null;
@@ -884,7 +942,8 @@ export class StructureBuilder {
         const lv = k < E.entranceBags / 2 ? 0 : 1;
         const kk = k % Math.ceil(E.entranceBags / 2);
         const [px, pz] = toW(o, bx0 + side * lv * 0.05, front + 0.35 + kk * 0.36);
-        this.inst.add('sandbag', px, this.terrain.heightAt(px, pz) + 0.08 + lv * 0.15, pz, 0, yaw + Math.PI / 2 + rng.range(-0.1, 0.1), 0, 1, 1, 1, 0xc8c0a8);
+        const bc = CONFIG.enemyPosition.sandbags.colors;
+        this.inst.add('sandbag', px, this.terrain.heightAt(px, pz) + 0.08 + lv * 0.15, pz, 0, yaw + Math.PI / 2 + rng.range(-0.1, 0.1), 0, 1, 1, 1, bc[(k + lv * 2) % bc.length]);
       }
       const [qx, qz] = toW(o, bx0, front + 0.7);
       this.col.addBox(qx, this.terrain.heightAt(qx, qz) + 0.16, qz, 0.2, 0.16, 0.55, yaw, 'sandbag', 'DUGOUT');
@@ -943,6 +1002,7 @@ export class StructureBuilder {
     }
     this.trenchSandbags();
     this.parapetClods();
+    this.spoilLumps();
   }
 
   // 참호 사격 위치 x (참호선 번호별, AI_MAP 의 trench 노드)
@@ -1032,11 +1092,13 @@ export class StructureBuilder {
   // 흉벽 앞면·마루의 흙덩이 (인스턴스 'clod' — 밝은 황갈색 하층토): 들쭉날쭉한 마루 윤곽을 만들어 200m 밖에서 참호선이 읽히게.
   // 사격 위치 둘레(fpClear)와 모래주머니 구간에는 두지 않는다 (사수 눈높이가 흉벽 마루 + 0.12m 라서).
   // 충돌 없음 (지형 흉벽 표면의 요철)
+  // 뒤쪽 건물 엎드려쏴 사선 띠 (CONFIG.enemyPosition.proneCorridor) 안에서는 마루 위로 corridorTop 까지만 솟게 묻는다.
   parapetClods() {
     const C = CONFIG.enemyPosition.clods;
     const T = MAP.trench;
     const rng = new Random(CONFIG.world.seed + 945);
     const fpX = this.trenchFpX();
+    const corr = this.proneCorridors();
     T.lines.forEach((line, li) => {
       const runs = (T.sandbagRuns || []).filter((r) => r.line === li);
       for (const sg of this.trenchSegments(line)) {
@@ -1057,7 +1119,100 @@ export class StructureBuilder {
           if (fpX[li].some((x) => Math.abs(px - x) < C.fpClear)) continue;
           if (runs.some((r) => px > r.x0 - 0.6 && px < r.x1 + 0.6)) continue;
           const sy = sz * flat;
-          this.inst.add('clod', px, this.terrain.heightAt(px, pz) + sy * 0.1, pz, rng.range(-0.2, 0.2), ry, rng.range(-0.2, 0.2), sz * rng.range(1.0, 1.7), sy, sz, col);
+          const gy = this.terrain.heightAt(px, pz);
+          // 기본: 아래 40% 가 흙에 묻힘 (마루 위로 0.6·sy). 엎드려쏴 사선 띠 안: 꼭대기가 corridorTop 을 넘지 않게 더 묻는다
+          const inCorr = corr[li].some(([a, b]) => px > a && px < b);
+          const y = inCorr ? Math.min(gy + sy * 0.1, gy + C.corridorTop - sy * 0.5) : gy + sy * 0.1;
+          this.inst.add('clod', px, y, pz, rng.range(-0.2, 0.2), ry, rng.range(-0.2, 0.2), sz * rng.range(1.0, 1.7), sy, sz, col);
+        }
+      }
+    });
+  }
+
+  // 뒤쪽 건물·잔해의 엎드려쏴 사격 위치(AI_MAP 건물·잔해 노드 prone fps)에서 수로 사격 발판의 앉은 눈(canalX 범위)으로 가는 사선이
+  // 흉벽 마루 위 minClear 안으로 지나는 참호선 x 띠 [x0, x1] (참호선 번호별, margin 포함). 이 띠의 마루 위에는 솟은 물체를 두지 않는다
+  proneCorridors() {
+    if (this._proneCorr) return this._proneCorr;
+    const P = CONFIG.enemyPosition.proneCorridor;
+    const T = MAP.trench;
+    const t = this.terrain;
+    const out = T.lines.map(() => []);
+    const ext = T.topHalf + T.parapet.width;
+    const eyeC = CONFIG.player.eyeHeights.crouch;
+    const offZ = t.canalZ(MAP.playerSpawn.x) - MAP.playerSpawn.z; // 수로 중심선 → 사격 발판 (북쪽, 시작 위치와 같은 거리)
+    for (const node of Object.values(AI_MAP.nodes)) {
+      if (node.kind !== 'building' && node.kind !== 'rubble') continue;
+      for (const fp of node.fps) {
+        if (fp.fire !== 'prone' || fp.x === undefined) continue;
+        const fx = fp.x + (fp.fireOffset ? fp.fireOffset[0] : 0);
+        const fz = fp.z + (fp.fireOffset ? fp.fireOffset[1] : 0);
+        const fy = t.heightAt(fx, fz) + 0.38;
+        T.lines.forEach((line, li) => {
+          let lo = Infinity;
+          let hi = -Infinity;
+          for (let xc = P.canalX[0]; xc <= P.canalX[1]; xc += 5) {
+            const zc = t.canalZ(xc) - offZ;
+            const yc = t.heightAt(xc, zc) + eyeC;
+            const L = Math.hypot(xc - fx, zc - fz);
+            let minC = Infinity;
+            let atX = 0;
+            for (let s = 0; s <= L; s += 0.25) {
+              const f = s / L;
+              const px = fx + (xc - fx) * f;
+              const pz = fz + (zc - fz) * f;
+              if (polylineDistance(line, px, pz) > ext) continue;
+              const c = fy + (yc - fy) * f - t.heightAt(px, pz);
+              if (c < minC) {
+                minC = c;
+                atX = px;
+              }
+            }
+            if (minC < P.minClear) {
+              lo = Math.min(lo, atX);
+              hi = Math.max(hi, atX);
+            }
+          }
+          if (hi >= lo) out[li].push([lo - P.margin, hi + P.margin]);
+        });
+      }
+    }
+    this._proneCorr = out;
+    return out;
+  }
+
+  // 흉벽 마루를 따라 늘어선 흙무더기 (인스턴스 'spoilLump' — 하층토, 충돌 상자 'subsoil'): 마루 위로 0.15~0.3m 솟아
+  // 200m 에서 흉벽 앞면 위에 들쭉날쭉한 밝은 마루선을 더한다. 사격 위치 둘레·모래주머니 구간·엎드려쏴 사선 띠에는 두지 않는다
+  spoilLumps() {
+    const C = CONFIG.enemyPosition.lumps;
+    const CL = CONFIG.enemyPosition.clods;
+    const T = MAP.trench;
+    const rng = new Random(CONFIG.world.seed + 949);
+    const fpX = this.trenchFpX();
+    const corr = this.proneCorridors();
+    const crest = T.topHalf * 0.85 + T.parapet.width * 0.33;
+    T.lines.forEach((line, li) => {
+      const runs = (T.sandbagRuns || []).filter((r) => r.line === li);
+      for (const sg of this.trenchSegments(line)) {
+        const yaw = Math.atan2(-sg.uz, sg.ux);
+        for (let s = rng.range(0, 1 / C.perMeter); s < sg.len; s += rng.range(0.55, 1.45) / C.perMeter) {
+          const len = rng.range(C.length[0], C.length[1]);
+          const wid = rng.range(C.width[0], C.width[1]);
+          const hgt = rng.range(C.height[0], C.height[1]);
+          const d = crest + rng.range(-0.15, 0.35);
+          const px = sg.ax + sg.ux * s + sg.nx * d;
+          const pz = sg.az + sg.uz * s + sg.nz * d;
+          const col = C.colors[Math.floor(rng.next() * C.colors.length)];
+          const tilt = rng.range(-0.08, 0.08);
+          if (s < len * 0.4 || s > sg.len - len * 0.4) continue;
+          if (fpX[li].some((x) => Math.abs(px - x) < CL.fpClear + len * 0.5)) continue;
+          if (runs.some((r) => px > r.x0 - 0.8 - len * 0.5 && px < r.x1 + 0.8 + len * 0.5)) continue;
+          if (corr[li].some(([a, b]) => px > a - len * 0.5 && px < b + len * 0.5)) continue;
+          // 둥근 둔덕 (반구, 높이 = 마루 위로 hgt): 밑면 둘레가 흉벽 표면 아래로 묻히게 조금 내린다
+          const gy = this.terrain.heightAt(px, pz);
+          const ry = yaw + rng.range(-0.25, 0.25);
+          this.inst.add('spoilLump', px, gy - 0.05, pz, tilt, ry, 0, len, hgt + 0.05, wid, col);
+          // 충돌: 둔덕 가운데 낮은 상자 (하층토, 관통 불가 — 탄착 효과는 밝은 흙먼지). 사격 위치·엎드려쏴 사선 띠 밖이라 적 사선은 그대로
+          this.col.addBox(px, gy + hgt * 0.4, pz, len * 0.36, hgt * 0.4, wid * 0.36, ry, 'subsoil', 'PARAPET_LUMP');
         }
       }
     });
@@ -1089,7 +1244,9 @@ export class StructureBuilder {
       if (bags.some((b) => b[1] < floorY + 0.9)) continue;
       for (const [px, py, pz] of bags) {
         for (let lv = 0; lv < 2; lv++) {
-          this.inst.add('sandbag', px, py + 0.08 + lv * 0.15, pz, 0, yaw + (lv ? 0.08 : -0.05), 0, 1, 1, 1, 0xffffff);
+          // 색은 흉벽 모래주머니와 같은 후보에서 (흰색이면 200m 밖에서 사격 위치마다 밝은 점으로 튄다)
+          const bc = CONFIG.enemyPosition.sandbags.colors;
+          this.inst.add('sandbag', px, py + 0.08 + lv * 0.15, pz, 0, yaw + (lv ? 0.08 : -0.05), 0, 1, 1, 1, bc[Math.floor(hash1(px * 3.1 + pz * 1.7 + lv) * bc.length)]);
         }
       }
       const cx = x + fx * fwd + rx * side * (inner + 0.48);
@@ -1110,7 +1267,8 @@ export class StructureBuilder {
       this.col.addBox(x, y + 0.4, z, 0.7, 0.4, 0.35, b.rot + k * 0.12, 'concrete', 'BARRICADE');
     }
     for (let k = 0; k < 8; k++) {
-      this.inst.add('sandbag', b.x - 2.4 + k * 0.5, y + 0.08, b.z - 0.9, 0, b.rot, 0, 1, 1, 1, 0xffffff);
+      const bc = CONFIG.enemyPosition.sandbags.colors;
+      this.inst.add('sandbag', b.x - 2.4 + k * 0.5, y + 0.08, b.z - 0.9, 0, b.rot, 0, 1, 1, 1, bc[(k * 3) % bc.length]);
     }
   }
 
@@ -1146,7 +1304,8 @@ export class StructureBuilder {
       const pz = n.z - lx * s + lz * c;
       const py = this.terrain.heightAt(px, pz);
       const ph = Math.max(0.6, y + n.h + 0.1 - py);
-      this.batch.add('wood', place(cylGeo(0.04, 0.05, ph + 0.3, 6), px, py + ph / 2 - 0.15, pz), 0x7a6a56);
+      // 기둥은 짙게 (200m 밖에서 위장망 아래 어두운 세로 줄로 읽히게)
+      this.batch.add('wood', place(cylGeo(0.045, 0.055, ph + 0.3, 6), px, py + ph / 2 - 0.15, pz), 0x4e4236);
     }
     this.col.addConcealer(n.x, y + n.h * 0.5, n.z, n.w / 2, n.h * 0.6, n.d / 2, rot, 'camoNet');
   }
@@ -1651,7 +1810,21 @@ export class StructureBuilder {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(this.barbed, 3));
       geo.computeBoundingSphere();
-      const mat = new THREE.LineBasicMaterial({ color: W.color, transparent: W.opacity < 1, opacity: W.opacity });
+      const mat = new THREE.LineBasicMaterial({ color: W.color, transparent: W.opacity < 1 || !!W.fade, opacity: W.opacity });
+      if (W.fade) {
+        // 거리 감쇠: 1px 선이 먼 곳에서 실제 굵기보다 훨씬 짙어 흉벽을 덮지 않게 (CONFIG.enemyPosition.wire.fade)
+        const fade = { value: new THREE.Vector3(W.fade[0], W.fade[1], W.fade[2]) };
+        mat.onBeforeCompile = (sh) => {
+          sh.uniforms.uWireFade = fade;
+          sh.vertexShader = sh.vertexShader
+            .replace('#include <common>', '#include <common>\nvarying float vWireD;')
+            .replace('#include <project_vertex>', '#include <project_vertex>\nvWireD = length(mvPosition.xyz);');
+          sh.fragmentShader = sh.fragmentShader
+            .replace('#include <common>', '#include <common>\nuniform vec3 uWireFade;\nvarying float vWireD;')
+            .replace('#include <alphatest_fragment>', '#include <alphatest_fragment>\ndiffuseColor.a *= clamp(pow(uWireFade.x / max(vWireD, 0.1), uWireFade.y), uWireFade.z, 1.0);');
+        };
+        mat.customProgramCacheKey = () => 'wireFade1';
+      }
       const lines = new THREE.LineSegments(geo, mat);
       lines.name = 'barbedWire';
       lines.matrixAutoUpdate = false;
@@ -2081,6 +2254,28 @@ export class StructureBuilder {
     puddle.rotateZ(-HALF - Math.PI * 0.35);
     puddle.scale(1.25, 0.32, 1.6);
     k.put('rubber', puddle, x, r * 0.62, z, 0, 0xffffff, 0);
+    // 녹아 흘러내려 땅에서 굳은 고무: 바퀴 바깥쪽으로 더 퍼진, 가운데가 살짝 볼록한 불규칙한 납작 원판
+    const P = CONFIG.midfield.car.meltPuddle;
+    const segs = 14;
+    const pool = new THREE.CircleGeometry(1, segs);
+    pool.rotateX(-HALF);
+    const pp = pool.attributes.position;
+    const seed = x * 3.1 + z * 7.7 + r * 13;
+    for (let i = 0; i < pp.count; i++) {
+      const px = pp.getX(i);
+      const pz = pp.getZ(i);
+      if (Math.hypot(px, pz) < 1e-3) {
+        pp.setY(i, P.height);
+        continue;
+      }
+      const j = Math.round(((Math.atan2(pz, px) + Math.PI * 2) % (Math.PI * 2)) / ((Math.PI * 2) / segs)) % segs;
+      const kk = 0.62 + hash1(seed + j * 1.7) * 0.5;
+      pp.setXYZ(i, px * kk, 0, pz * kk);
+    }
+    pool.scale(r * P.size * 1.15, 1, r * P.size * 0.85);
+    pool.computeVertexNormals();
+    const gz = z + side * r * 0.45;
+    k.put('rubber', pool, x, k.groundY(x, gz) + 0.012, gz, 0, 0xffffff, 0);
   }
 
   // 승용차 (VAZ-2107 계열 4도어 세단): 바퀴 아치가 뚫린 아래 차체, 살짝 들린 보닛, A·B·C 필러와 내려앉은 지붕 (창은 비어 있음),
@@ -2133,32 +2328,186 @@ export class StructureBuilder {
     for (const sx of [1.22, -1.22]) for (const sz of [-1, 1]) this.meltedWheel(k, sx, sz * 0.68, 0.19, 0.13, sz);
   }
 
-  // 승합차 (UAZ-452 계열 '빵 덩어리'): 둥근 앞모양 상자 차체 + 어두운 빈 창 구멍들, 바퀴 아치, 범퍼, 녹아 없어진 타이어
+  // 승합차 (UAZ-452 계열 '빵 덩어리'): 속이 빈 불탄 차체. 옆판(바퀴 아치와 창 구멍이 뚫린 얇은 판)·앞 경사면(앞유리 두 칸이 빈 틀)·
+  // 뒷문(창 두 칸)·가운데가 처져 내려앉은 지붕·바닥을 따로 만들어, 깨져 없어진 창 너머로 그을린 실내와 반대편 창이 보인다.
+  // 판의 안쪽 면은 그을음 재질(burnt), 실내엔 타 버린 앞좌석·뒷좌석 뼈대(스프링)·엔진 덮개·계기판·핸들.
+  // 바퀴는 타이어가 녹아 림이 땅에 닿고(아치 안에 보임) 둘레에 녹은 고무 웅덩이 (meltedWheel).
+  // 충돌: 창 아래 차체 상자 + 지붕 + 창 사이 옆판·뒷문 기둥 (carBody, 관통 가능) — 창 높이로는 탄과 시야가 지나간다. 앞 엔진·차축 = steel.
   vanWreck(k, tag) {
     const C = 'wreckCar';
+    const V = CONFIG.midfield.car.van;
     const b = 0.3;
     const top = 1.92;
-    const prof = [[-2.18, b], [1.95, b], [2.18, b + 0.2], [2.2, 0.95], [2.1, 1.25], [1.75, 1.85], [1.55, top], [-2.05, top], [-2.18, top - 0.12]];
-    k.putRaw(C, profileGeo(prof, 1.94, 0.94, 1.1, top, 2), 0xd8ccbc, 0.25);
-    k.box(0, 1.1, 0, 2.2, 0.8, 0.97, 'carBody', tag);
-    k.box(1.75, 0.65, 0, 0.42, 0.3, 0.55, 'steel', tag);
-    const halfAt = (yy) => 0.97 * (1 - 0.06 * clamp((yy - 1.1) / (top - 1.1), 0, 1));
-    // 옆 창 (어두운 빈 구멍)·바퀴 아치·문 틈
-    for (const sz of [-1, 1]) {
-      for (const [x0, x1] of [[0.95, 1.55], [-0.35, 0.6], [-1.75, -0.65]]) {
-        k.put('interior', boxGeo(x1 - x0, 0.42, 0.012), (x0 + x1) / 2, 1.5, sz * (halfAt(1.5) + 0.004));
+    const hw = 0.97; // 반폭 (위로 갈수록 lean 만큼 좁아짐)
+    const th = 0.035; // 판 두께
+    const floorY = 0.76;
+    const [sill, head] = V.windowBand;
+    const lean = (yy) => 1 - 0.06 * clamp((yy - 1.1) / (top - 1.1), 0, 1);
+    // 지붕선 (옆에서 본 윤곽): 가운데가 조금 처짐
+    const roofPts = [[1.55, top], [0.35, top - V.roofSag], [-0.85, top - V.roofSag * 1.2], [-2.05, top - 0.01]];
+    const roofY = (x) => {
+      for (let i = 0; i < roofPts.length - 1; i++) {
+        const [x0, y0] = roofPts[i];
+        const [x1, y1] = roofPts[i + 1];
+        if (x <= x0 && x >= x1) return y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
       }
-      for (const sx of [1.15, -1.15]) k.put('interior', boxGeo(0.78, 0.36, 0.012), sx, b + 0.16, sz * 0.975);
-      for (const sx of [0.88, -0.45]) k.put('interior', boxGeo(0.014, 0.7, 0.006), sx, 0.75, sz * 0.976);
+      return top;
+    };
+    // 판 기하 → 위로 기울이고(lean), 바깥 면 = 차체 재질 / 안쪽 면 = 그을음 재질로 나눠 넣는다
+    const shell = (g) => {
+      const p = g.attributes.position;
+      for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) * lean(p.getY(i)));
+      const [outer, inner] = splitShell(g, 1.1);
+      if (outer) k.putRaw(C, tint(outer, V.bodyTint, 0.25, [b, top]));
+      if (inner) k.putRaw('burnt', tint(inner, V.innerTint, 0.35, [b, top]));
+    };
+    // --- 옆판 두 장: 바퀴 아치가 파인 윤곽 + 창 구멍 세 개
+    const outline = [[-2.18, b]];
+    for (const wx of [-V.wheelX, V.wheelX]) {
+      for (let i = 0; i <= 8; i++) {
+        const a = Math.PI * (1 - i / 8);
+        outline.push([wx + Math.cos(a) * V.archR, b + Math.sin(a) * V.archR]);
+      }
     }
-    // 앞 유리 두 장 (기운 앞면)·전조등·뒷문 창
+    outline.push([1.95, b], [2.18, b + 0.2], [2.2, 0.95], [2.1, 1.25], [1.75, 1.85], ...roofPts, [-2.18, top - 0.12]);
+    const windows = [[0.95, 1.55], [-0.35, 0.6], [-1.75, -0.65]];
     for (const sz of [-1, 1]) {
-      k.put('interior', boxGeo(0.012, 0.6, 0.74), 1.93 + 0.012, 1.55, sz * 0.42, [0, 0, 0.528]);
-      k.put('interior', cylGeo(0.09, 0.09, 0.012, 10), 2.206, 0.8, sz * 0.66, [0, 0, Math.PI / 2]);
-      k.put('interior', boxGeo(0.012, 0.36, 0.5), -2.186, 1.48, sz * 0.42);
+      const shape = new THREE.Shape(outline.map(([x, y]) => new THREE.Vector2(x, y)));
+      for (const [x0, x1] of windows) {
+        const hole = new THREE.Path();
+        hole.moveTo(x0, sill);
+        hole.lineTo(x1, sill);
+        hole.lineTo(x1, head);
+        hole.lineTo(x0, head);
+        hole.lineTo(x0, sill);
+        shape.holes.push(hole);
+      }
+      const g = new THREE.ExtrudeGeometry(shape, { depth: th, bevelEnabled: false, curveSegments: 1 });
+      g.translate(0, 0, sz > 0 ? hw - th : -hw);
+      const uv = g.attributes.uv;
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / 2, uv.getY(i) / 2);
+      shell(g);
     }
+    // --- 앞·뒤 테두리 판 (차 폭 전체): 앞 아래·코, 앞유리 틀(아래·위 띠 + 양 끝·가운데 기둥), 앞 지붕 모서리, 뒤 경사, 뒷문(창 두 칸)
+    const wIn = 2 * (hw - th / 2);
+    const rim = (ax, ay, bx, by, zc = 0, w = wIn) => shell(stickGeo(ax, ay, zc, bx, by, zc, w, th, 2));
+    rim(1.95, b, 2.18, b + 0.2);
+    rim(2.18, b + 0.2, 2.2, 0.95);
+    rim(2.2, 0.95, 2.1, 1.25);
+    const ws = (s) => [2.1 - 0.35 * s, 1.25 + 0.6 * s]; // 앞유리 경사면 위 점 (s = 0..1)
+    const [w0, w1] = [0.1, 0.88];
+    rim(...ws(0), ...ws(w0));
+    rim(...ws(w1), ...ws(1));
+    const pil = 0.07;
+    for (const zc of [-(hw - th / 2 - pil / 2), 0, hw - th / 2 - pil / 2]) rim(...ws(w0), ...ws(w1), zc, pil);
+    rim(1.75, 1.85, 1.55, top);
+    rim(-2.18, top - 0.12, -2.05, top - 0.01);
+    const [rw0, rw1] = V.rearWindow; // 뒷문 창: 높이 범위, 가로 |z| 범위 0.17~0.67
+    rim(-2.18, b, -2.18, rw0);
+    rim(-2.18, rw1, -2.18, top - 0.12);
+    rim(-2.18, rw0, -2.18, rw1, 0, 0.34);
+    for (const sz of [-1, 1]) rim(-2.18, rw0, -2.18, rw1, sz * (0.67 + (hw - th / 2 - 0.67) / 2), hw - th / 2 - 0.67);
+    // --- 지붕: 가운데가 처져 내려앉은 얇은 판 (바깥 면·안쪽 면 따로)
+    for (const inner of [false, true]) {
+      const g = new THREE.PlaneGeometry(1, 1, 10, 6);
+      g.rotateX(-Math.PI / 2);
+      const p = g.attributes.position;
+      const uv = g.attributes.uv;
+      const x0 = -2.05;
+      const x1 = 1.55;
+      const zw = hw - th / 2;
+      for (let i = 0; i < p.count; i++) {
+        const fx = p.getX(i) + 0.5;
+        const fz = p.getZ(i) * 2;
+        const x = x0 + (x1 - x0) * fx;
+        const dent = V.roofDent * (1 - fz * fz) * Math.sin(Math.PI * fx) * (0.8 + 0.4 * hash1(i * 0.37 + 5));
+        const y = roofY(x) - dent - (inner ? th * 0.7 : 0);
+        p.setXYZ(i, x, y, fz * zw * lean(y));
+        uv.setXY(i, x / 2, (fz * zw) / 2);
+      }
+      if (inner) {
+        const idx = g.index.array;
+        for (let i = 0; i < idx.length; i += 3) [idx[i + 1], idx[i + 2]] = [idx[i + 2], idx[i + 1]];
+      }
+      g.computeVertexNormals();
+      if (inner) k.putRaw('burnt', tint(g, V.innerTint, 0));
+      else k.putRaw(C, tint(g, V.bodyTint, 0));
+    }
+    // --- 바닥 (윗면은 그을음) ·바퀴집(어두운 안쪽 벽)·차대
+    shell(place(boxGeo(4.06, 0.04, wIn, 2), -0.12, floorY - 0.02, 0));
+    for (const sz of [-1, 1]) {
+      for (const wx of [-V.wheelX, V.wheelX]) k.put('interior', boxGeo(V.archR * 2.1, floorY - 0.05, 0.02), wx, (floorY + 0.05) / 2, sz * 0.62);
+      k.put('darkSteel', boxGeo(4.0, 0.12, 0.08), -0.1, 0.42, sz * 0.45, 0, 0x4a4440);
+    }
+    // --- 실내: 앞좌석 둘 사이 엔진 덮개, 계기판, 핸들, 탄 좌석 뼈대 (앞좌석 둘 + 뒷좌석 둘, 뒤쪽 것은 등받이가 앞으로 꺾여 쓰러짐)
+    k.put('burnt', boxGeo(0.62, 0.36, 0.46, 2), 1.2, floorY + 0.18, 0, 0, V.innerTint, 0.3);
+    k.put('burnt', boxGeo(0.26, 0.12, wIn - 0.04, 2), 1.95, 1.2, 0, [0, 0, -0.35], V.innerTint, 0.3);
+    const FR = V.frameTint;
+    const stick = (ax, ay, az, bx, by, bz, t = 0.022) => k.putRaw('darkSteel', stickGeo(ax, ay, az, bx, by, bz, t, t), FR, 0);
+    const seat = (cx, cz, width, depth, backTilt) => {
+      const x0 = cx - depth / 2;
+      const x1 = cx + depth / 2;
+      const z0 = cz - width / 2;
+      const z1 = cz + width / 2;
+      const sy = floorY + 0.36;
+      stick(x0, sy, z0, x1, sy, z0);
+      stick(x0, sy, z1, x1, sy, z1);
+      stick(x0, sy, z0, x0, sy, z1);
+      stick(x1, sy, z0, x1, sy, z1);
+      for (const zz of [z0, z1]) for (const xx of [x0, x1]) stick(xx, sy, zz, xx + (xx === x1 ? -0.06 : 0.04), floorY, zz);
+      // 지그재그 스프링 (가로) — 쿠션이 타 버려 조금 처짐
+      const nS = Math.max(2, Math.round(depth / 0.12));
+      for (let s = 1; s < nS; s++) {
+        const xx = x0 + (s / nS) * depth;
+        const nZ = Math.max(3, Math.round(width / 0.14));
+        for (let j = 0; j < nZ; j++) {
+          const za = z0 + (j / nZ) * width;
+          const zb = z0 + ((j + 1) / nZ) * width;
+          const sag = (u) => 0.05 * Math.sin(Math.PI * u);
+          stick(xx + (j % 2 ? 0.03 : -0.03), sy - sag(j / nZ), za, xx + (j % 2 ? -0.03 : 0.03), sy - sag((j + 1) / nZ), zb, 0.008);
+        }
+      }
+      // 등받이 틀 (뒤 모서리에서 backTilt 만큼 젖혀짐; 음수면 앞으로 꺾여 쓰러짐)
+      const bh = 0.52;
+      const bx = x0 - Math.sin(backTilt) * bh;
+      const by = sy + Math.cos(backTilt) * bh;
+      stick(x0, sy, z0, bx, by, z0);
+      stick(x0, sy, z1, bx, by, z1);
+      stick(bx, by, z0, bx, by, z1);
+      for (let j = 1; j < 3; j++) {
+        const zz = z0 + (j / 3) * width;
+        stick(x0, sy + 0.04, zz, (x0 + bx) / 2 + (bx - x0) * 0.4, sy + (by - sy) * 0.9, zz, 0.008);
+      }
+    };
+    seat(1.2, -0.56, 0.42, 0.44, 0.22);
+    seat(1.2, 0.56, 0.42, 0.44, 0.22);
+    seat(-0.25, 0, 1.6, 0.44, 0.18);
+    seat(-1.35, 0, 1.6, 0.44, -1.15);
+    k.put('darkSteel', new THREE.TorusGeometry(0.2, 0.014, 4, 16), 1.68, 1.42, -0.56, [0.55, Math.PI / 2, 0, 'YXZ'], 0x3a3634, 0);
+    k.putRaw('darkSteel', stickGeo(1.68, 1.42, -0.56, 1.98, 0.95, -0.56, 0.04, 0.04), 0x3a3634, 0);
+    // --- 옆판 허리 주름 (가로 띠)·문 틈 (세로 어두운 선)·뒷문 가운데 틈·전조등 구멍·범퍼
+    for (const sz of [-1, 1]) {
+      k.put(C, boxGeo(3.95, 0.04, 0.02, 2), -0.08, 1.17, sz * (hw * lean(1.17) + 0.006), 0, 0xc4b8a8, 0);
+      for (const sx of [0.9, -0.42]) k.put('interior', boxGeo(0.014, sill - 0.66 - 0.02, 0.006), sx, (0.66 + sill) / 2, sz * (hw * lean((0.66 + sill) / 2) + 0.003));
+      k.put('interior', cylGeo(0.09, 0.09, 0.012, 10), 2.218, 0.8, sz * 0.66, [0, 0, Math.PI / 2]);
+    }
+    k.put('interior', boxGeo(0.006, rw0 - b - 0.06, 0.014), -2.18 - th / 2 - 0.003, (b + rw0) / 2 + 0.02, 0);
     for (const sx of [-1, 1]) k.put('darkSteel', boxGeo(0.1, 0.14, 1.9), sx * 2.24, b + 0.12, 0, 0, 0x5a5048);
-    for (const sx of [1.15, -1.15]) for (const sz of [-1, 1]) this.meltedWheel(k, sx, sz * 0.8, 0.2, 0.18, sz);
+    for (const sx of [V.wheelX, -V.wheelX]) for (const sz of [-1, 1]) this.meltedWheel(k, sx, sz * V.wheelZ, 0.21, 0.18, sz);
+    // --- 충돌
+    const bandY = (sill + head) / 2;
+    const bandH = (head - sill) / 2;
+    const hwB = hw * lean(bandY) - th / 2;
+    k.box(0, (b + sill) / 2, 0, 2.2, (sill - b) / 2, hw, 'carBody', tag);
+    k.box(-0.2, (head + top) / 2, 0, 1.98, (top - head) / 2, hw * lean(top), 'carBody', tag);
+    for (const sz of [-1, 1]) {
+      for (const [x0, x1] of [[-2.18, -1.75], [-0.65, -0.35], [0.6, 0.95], [1.55, 1.95]]) {
+        k.box((x0 + x1) / 2, bandY, sz * hwB, (x1 - x0) / 2, bandH, 0.03, 'carBody', tag);
+      }
+      k.box(-2.16, bandY, sz * (0.67 + (hwB - 0.67) / 2), 0.03, bandH, (hwB - 0.67) / 2, 'carBody', tag);
+    }
+    k.box(-2.16, bandY, 0, 0.03, bandH, 0.17, 'carBody', tag);
+    k.box(1.75, 0.65, 0, 0.42, 0.3, 0.55, 'steel', tag);
   }
 
   // 트럭 (GAZ-53 계열): 캐빈(어두운 빈 창)·둥근 엔진 덮개·앞 흙받기, 탄 나무 짐칸(바닥 판자 일부 빠짐, 한쪽 옆판은 타 버려
@@ -3043,16 +3392,25 @@ export class StructureBuilder {
   // ------------------------------------------------------------------ 북쪽 둔덕 모래주머니 사격 위치
   // 마루 가운데 사격 홈(지형을 낮춤) 양옆에 모래주머니를 3단으로 쌓고, 더미 바깥 끝을 사수 쪽으로 굽혀(말굽 모양) 정면 사계를 튼다.
   // 앉은 사수는 홈으로 고개만 내밀고, 양옆은 머리 높이까지 가린다. 충돌: 더미마다 모래주머니 상자 (관통 불가)
+  // 쌓는 법: 아래 단은 두 줄(앞·뒤), 맨 위는 한 줄. 단 간격(layerStep)이 자루 높이보다 작아 위 자루가 아래 자루를 눌러
+  // 단 사이 틈이 없고, 맨 아랫단은 sink 만큼 흙에 묻힌다. 가운데 단은 양끝에 가로로 놓은 자루(마구리) + 가운데 길이 방향 자루로
+  // 엇갈려 쌓아 이음매가 겹치지 않는다 (벽처럼 읽힘). 자루마다 앞(남)·뒤(북) 지면을 따라 앞으로 기울고, 높은 쪽에 얹힌다
+  // (굽힌 바깥 끝이 둔덕 앞면 비탈에 걸쳐도 흘러내린 것처럼 보이지 않게).
+  // 충돌 상자의 자리·길이·굽힘은 예전 더미와 같다 (적 사격 위치 ↔ 수로 시야가 바뀌지 않게), 높이는 맨 윗단 자루 윗면까지.
   canalSandbags() {
     const t = this.terrain;
     const C = MAP.canal;
     const SB = CONFIG.canal.sandbag;
+    const B = CONFIG.canal.bag;
     const rng = new Random(CONFIG.world.seed + 227);
-    const bagLen = 0.52;
-    const layerH = 0.15;
     const ca = Math.cos(SB.wrap);
     const sa = -Math.sin(SB.wrap);
     const bag = this.canalBagGeometry();
+    const pitch = SB.stackLen / SB.bagsPerRow; // 길이 방향 자루 간격
+    const rowGap = B.width - 0.01; // 앞·뒤 줄 간격 (자루 폭보다 조금 좁아 서로 눌린다)
+    const r0 = SB.row0;
+    const rMid = r0 + rowGap / 2;
+    const hBag = B.hTop + B.hBot;
     for (const sx of C.sandbagPositions) {
       const crest = this.bermCrestDist(sx);
       const yaw0 = -Math.atan(t.canalDzDx(sx));
@@ -3064,57 +3422,108 @@ export class StructureBuilder {
           const x = sx + ax;
           return [x, t.canalZ(x) - dd];
         };
-        const nAlong = Math.max(1, Math.round(SB.stackLen / bagLen));
+        const ground = (s, r) => {
+          const [x, z] = at(s, r);
+          return t.canalSurfaceY(x, z);
+        };
+        const yawS = yaw0 - side * SB.wrap;
         for (let lv = 0; lv < SB.layers; lv++) {
-          // 아래 단은 두 줄(앞·뒤), 맨 위는 한 줄. 마루 바로 뒤(완만한 뒤쪽)에 쌓고, 단마다 반 포대씩 엇갈린다
-          const rows = lv < SB.layers - 1 ? [0.06, 0.38] : [0.22];
-          for (const r of rows) {
-            for (let a = 0; a < nAlong; a++) {
-              const s = (a + 0.5) * bagLen + (lv % 2) * 0.12 - 0.06;
-              const [bx, bz] = at(s, r);
-              const by = t.canalSurfaceY(bx, bz) + 0.07 + lv * layerH;
-              const v = rng.range(0.86, 1.02);
-              const c = new THREE.Color(v, v * 0.98, v * 0.94);
-              const g = place(bag.clone(), bx, by, bz, [rng.range(-0.06, 0.06), yaw0 - side * SB.wrap + rng.range(-0.1, 0.1), rng.range(-0.05, 0.05), 'YXZ']);
-              this.batch.add('sandbag', g, c.getHex());
-            }
+          const top = lv === SB.layers - 1;
+          const rows = top ? [rMid] : [r0, r0 + rowGap];
+          // [s 가운데, r 가운데, 가로 놓임(마구리), 길이 배수]
+          const bags = [];
+          if (lv % 2 === 1 && !top) {
+            bags.push([B.width / 2, rMid, true, 1], [SB.stackLen - B.width / 2, rMid, true, 1]);
+            const inner = SB.stackLen - 2 * B.width; // 마구리 사이 (길이 방향 자루가 조금 눌려 들어간다)
+            for (const r of rows) for (let a = 0; a < SB.bagsPerRow - 1; a++) bags.push([B.width + ((a + 0.5) * inner) / (SB.bagsPerRow - 1), r, false, Math.min(1, (inner / (SB.bagsPerRow - 1) + 0.04) / B.len)]);
+          } else {
+            for (const r of rows) for (let a = 0; a < SB.bagsPerRow; a++) bags.push([(a + 0.5) * pitch, r, false, 1]);
+          }
+          for (const [s, r, header, lx] of bags) {
+            const [bx, bz] = at(s, r);
+            // 앞·뒤 지면: 높은 쪽에 얹히고 앞으로 기운다 (마구리는 길이 방향이 앞뒤라 기울이지 않고 높이만)
+            const gF = ground(s, r - 0.11);
+            const gB = ground(s, r + 0.11);
+            const g0 = (gF + gB) / 2 + 0.3 * Math.abs(gB - gF);
+            const tilt = header ? 0 : clamp(Math.atan2(gB - gF, 0.22) * 0.7, -0.3, 0.3);
+            const by = g0 + B.hBot - SB.sink + lv * SB.layerStep;
+            const g = bag.clone();
+            this.sagBag(g, rng.range(0.3, 1) * SB.sag, rng, lx);
+            place(g, bx, by, bz, [tilt + rng.range(-0.035, 0.035), yawS + (header ? Math.PI / 2 : 0) + rng.range(-0.06, 0.06), rng.range(-0.03, 0.03), 'YXZ']);
+            const v = rng.range(0.84, 1.02);
+            const c = new THREE.Color(v, v * rng.range(0.96, 0.99), v * rng.range(0.9, 0.95));
+            this.batch.add('sandbag', g, c.getHex(), SB.bottomDark);
           }
         }
-        const [cx, cz] = at(SB.stackLen / 2, 0.22);
-        const top = t.canalSurfaceY(cx, cz);
-        const hh = (SB.layers * layerH + 0.06) / 2;
-        this.col.addBox(cx, top + hh - 0.02, cz, SB.stackLen / 2, hh, 0.26, yaw0 - side * SB.wrap, 'sandbag', 'CANAL_SANDBAG');
+        // 충돌 상자: 예전 더미 자리 (축 가운데, r = colR, 반폭 colHalfDepth), 지면에서 맨 윗단 자루 윗면 + 1cm 까지
+        const [cx, cz] = at(SB.stackLen / 2, SB.colR);
+        const gy = t.canalSurfaceY(cx, cz);
+        const hTot = hBag - SB.sink + (SB.layers - 1) * SB.layerStep + 0.03;
+        this.col.addBox(cx, gy - 0.02 + hTot / 2, cz, SB.stackLen / 2, hTot / 2, SB.colHalfDepth, yawS, 'sandbag', 'CANAL_SANDBAG');
       }
     }
   }
 
-  // 가까이서 보는 모래주머니: 둥근 베개 모양(초타원체), 묶은 양끝이 좁고 바닥은 눌려 평평 (병합 기하, 참호의 먼 모래주머니는 인스턴스)
+  // 자루 하나를 조금씩 다르게: 양끝 처짐(sag), 길이·높이 배수, 윗면 한쪽으로 쏠림, UV 둘레 방향 이동 (병합 전 복제본에)
+  sagBag(g, sag, rng, lenScale = 1) {
+    const hx = CONFIG.canal.bag.len / 2;
+    const pos = g.attributes.position;
+    const uv = g.attributes.uv;
+    const sx = rng.range(0.96, 1.03) * lenScale;
+    const sy = rng.range(0.9, 1.06);
+    const lean = rng.range(-0.012, 0.012);
+    const dv = rng.next();
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const f = x / hx;
+      pos.setXYZ(i, x * sx, y * sy - sag * f * f + (y > 0 ? lean * f : 0), pos.getZ(i));
+      uv.setY(i, uv.getY(i) + dv);
+    }
+    g.computeVertexNormals();
+    return g;
+  }
+
+  // 가까이서 보는 모래주머니 (병합 기하, 분할 많게). 참호·엄체호의 먼 모래주머니는 같은 모양의 인스턴스 (sandbagGeometry)
   canalBagGeometry() {
-    if (this._bagGeo) return this._bagGeo;
-    const hx = 0.28;
-    const hy = 0.085;
-    const hz = 0.17;
-    let g = new THREE.BoxGeometry(2 * hx, 2 * hy, 2 * hz, 4, 2, 2);
+    if (!this._bagGeo) this._bagGeo = this.bagGeometry(CONFIG.canal.bag.seg);
+    return this._bagGeo;
+  }
+
+  // 눌린 베개 모양 모래주머니 (원점 = 자루 가운데, 길이 = x, 폭 = z). 초이차곡면으로 만든다:
+  //  바닥 둘레는 둥근 직사각형(지수 4), 옆 단면은 둥글게 부푼 모양(sideExp), 윗면·바닥은 눌려 평평하다(바닥이 더).
+  //  접어 꿰맨 양끝은 평면에서 뭉툭하고(뾰족하지 않게) 두께만 조금 얇아진다 (endThin).
+  //  상자 격자 정점을 곡면으로 지름 방향 투영하므로 양끝 가운데가 튀어나오지 않는다.
+  // UV: u = 길이 방향 0..1 (텍스처의 양끝 솔기 줄), v = 단면 둘레 (텍스처는 반복)
+  bagGeometry(seg) {
+    const B = CONFIG.canal.bag;
+    const hx = B.len / 2;
+    const hz = B.width / 2;
+    let g = new THREE.BoxGeometry(2, 2, 2, seg[0], seg[1], seg[2]);
     g.deleteAttribute('uv');
     g.deleteAttribute('normal');
     g = mergeVertices(g);
     const pos = g.attributes.position;
     const uv = new Float32Array(pos.count * 2);
+    const pv = B.sideExp;
     for (let i = 0; i < pos.count; i++) {
-      const nx = pos.getX(i) / hx;
-      const ny = pos.getY(i) / hy;
-      const nz = pos.getZ(i) / hz;
-      const k = Math.pow(nx ** 4 + ny ** 4 + nz ** 4, -0.25);
-      const end = 1 - 0.3 * Math.pow(Math.abs(nx), 6);
-      let y = ny * k * hy * end;
-      if (y < 0) y *= 0.55;
-      pos.setXYZ(i, nx * k * hx, y, nz * k * hz * end);
-      uv[i * 2] = nx * 0.5 + 0.5;
-      uv[i * 2 + 1] = nz * 0.35 + ny * 0.25 + 0.5;
+      const bx = pos.getX(i);
+      const by = pos.getY(i);
+      const bz = pos.getZ(i);
+      // 초이차곡면 (|x|^4 + |z|^4)^(pv/4) + |y|^pv = 1 위로 지름 방향 투영
+      const foot = Math.pow(bx ** 4 + bz ** 4, 0.25);
+      const k = Math.pow(foot ** pv + Math.abs(by) ** pv, -1 / pv);
+      const nx = bx * k;
+      const ny = by * k;
+      const nz = bz * k;
+      const end = 1 - B.endThin * nx ** 4;
+      const y = ny >= 0 ? B.hTop * Math.pow(ny, B.flatTop) : -B.hBot * Math.pow(-ny, B.flatBot);
+      pos.setXYZ(i, nx * hx, y * end, nz * hz * (1 - 0.05 * nx ** 6));
+      uv[i * 2] = 0.5 + 0.5 * nx;
+      uv[i * 2 + 1] = 0.5 + 0.32 * nz + 0.22 * ny;
     }
     g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     g.computeVertexNormals();
-    this._bagGeo = g;
     return g;
   }
 
@@ -3144,22 +3553,29 @@ export class StructureBuilder {
       return [x, t.heightAt(x, z), z];
     };
     const tag = 'CANAL_JUNK';
+    const TY = CONFIG.canal.tyre;
+    const outer = TY.radius + TY.section[0];
+    // 타이어 모양 변화·색은 따로 난수 (배치 난수 순서를 그대로 둬 잡동사니 자리가 바뀌지 않게)
+    const trng = new Random(CONFIG.world.seed + 233);
     for (let k = 0; k < J.tyres; k++) {
       const x0 = pick();
       if (x0 === null) continue;
       const [x, y, z] = floorPoint(x0);
       const yaw = rng.next() * Math.PI * 2;
-      const g = new THREE.TorusGeometry(0.31, 0.11, 6, 12);
+      const { g, inner } = this.tyreGeometry();
       if (rng.chance(0.7)) {
-        // 진흙에 반쯤 묻혀 누운 타이어
-        place(g, x, y + 0.06, z, [Math.PI / 2 + rng.range(-0.12, 0.12), yaw, 0, 'YXZ']);
-        this.col.addCylinder(x, y + 0.08, z, 0.42, 0.1, 'rubber', tag);
+        // 진흙에 반쯤 묻혀 누운 타이어 (한쪽이 조금 들림)
+        place(g, x, y + TY.lyingY, z, [Math.PI / 2 + rng.range(-0.1, 0.1), yaw, trng.range(-0.05, 0.05), 'YXZ']);
+        this.col.addCylinder(x, y + 0.03, z, outer, 0.065, 'rubber', tag);
       } else {
         // 바닥에 박혀 선 타이어
-        place(g, x, y + 0.26, z, [rng.range(-0.25, 0.25), yaw, 0, 'YXZ']);
-        this.col.addBox(x, y + 0.22, z, 0.42, 0.22, 0.12, yaw, 'rubber', tag);
+        const hh = outer - TY.sink / 2;
+        place(g, x, y + outer - TY.sink, z, [rng.range(-0.25, 0.25), yaw, 0, 'YXZ']);
+        this.col.addBox(x, y + hh, z, outer, hh, TY.section[1], yaw, 'rubber', tag);
       }
-      this.batch.add('rubber', g, 0xffffff);
+      this.tyreColors(g, inner, y, trng);
+      // 고무 = 정점색만 쓰는 무광 재질 (공용 'rubber' 재질은 색이 거의 검정이라 단면 음영이 보이지 않는다)
+      this.batch.add('plain', g);
     }
     for (let k = 0; k < J.buckets; k++) {
       const x0 = pick();
@@ -3204,6 +3620,60 @@ export class StructureBuilder {
     crate(bx, t.canalSurfaceY(bx, bz), bz, -Math.atan(t.canalDzDx(bx)) + 0.1, true);
   }
 
+  // 버려진 타이어 기하: 단면이 둥근 직사각형(초타원, 지수 sectionExp)인 고리, 축 = 로컬 z.
+  // inner[i] = 정점의 단면 방향 (지름 방향 성분, -1 = 안쪽 테두리 비드, 1 = 바깥 트레드), 트레드 홈 줄은 부호를 바꿔 표시 (+10) — 정점색용
+  tyreGeometry() {
+    const T = CONFIG.canal.tyre;
+    let g = new THREE.TorusGeometry(T.radius, T.section[0] * 0.5, T.seg[0], T.seg[1]);
+    g.deleteAttribute('uv');
+    g.deleteAttribute('normal');
+    g = mergeVertices(g);
+    const p = g.attributes.position;
+    const inner = new Float32Array(p.count);
+    const e = 2 / T.sectionExp;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i);
+      const y = p.getY(i);
+      const rho = Math.hypot(x, y);
+      const a = Math.atan2(p.getZ(i), rho - T.radius);
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      const r = T.radius + Math.sign(c) * Math.abs(c) ** e * T.section[0];
+      p.setXYZ(i, (x / rho) * r, (y / rho) * r, Math.sign(s) * Math.abs(s) ** e * T.section[1]);
+      const ring = Math.round(((Math.atan2(y, x) + Math.PI) / (Math.PI * 2)) * T.seg[1]);
+      inner[i] = c + (ring % 2 ? 10 : 0);
+    }
+    g.computeVertexNormals();
+    return { g, inner };
+  }
+
+  // 놓인 타이어 정점색: 바랜 고무(타이어마다 밝기 조금씩), 안쪽 테두리는 어둡게, 바닥(y0) 가까운 곳은 진흙이 얼룩덜룩 묻는다
+  tyreColors(g, inner, y0, rng) {
+    const T = CONFIG.canal.tyre;
+    const p = g.attributes.position;
+    const base = new THREE.Color(T.color).multiplyScalar(rng.range(0.85, 1.1));
+    const mud = new THREE.Color(T.mud);
+    const c = new THREE.Color();
+    const col = new Float32Array(p.count * 3);
+    const seed = rng.next() * 100;
+    for (let i = 0; i < p.count; i++) {
+      const groove = inner[i] > 5;
+      const ci = groove ? inner[i] - 10 : inner[i];
+      let k = 1 - T.innerDark * clamp((-ci - 0.25) / 0.6, 0, 1);
+      // 트레드 홈: 바깥 접지면에서 둘레 분할 하나 건너 어둡게 (정점 보간으로 가로 줄무늬가 된다)
+      if (groove && ci > 0.45) k *= T.treadDark;
+      const h = (p.getY(i) - y0 - T.mudHeight[0]) / (T.mudHeight[1] - T.mudHeight[0]);
+      const splash = hash1(i * 7.31 + seed);
+      const m = clamp(1 - h + (splash - 0.5) * 0.7, 0, 1) * (0.55 + 0.4 * splash);
+      c.copy(base).multiplyScalar(k).lerp(mud, m);
+      col[i * 3] = c.r;
+      col[i * 3 + 1] = c.g;
+      col[i * 3 + 2] = c.b;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return g;
+  }
+
   culvert() {
     const C = MAP.canal;
     const x = C.crossing.x;
@@ -3215,13 +3685,16 @@ export class StructureBuilder {
       place(g, px, floor + 0.5, zc, [0, 0, Math.PI / 2]);
       this.batch.add('concrete', g, 0x9a978f);
       this.batch.add('interior', place(new THREE.CircleGeometry(0.5, 12), px + side * 0.05, floor + 0.5, zc, [0, (side * Math.PI) / 2, 0]));
+      // 배수관 끝 (콘크리트, 관통 불가): 관 둘레 상자. 수로 바닥이라 발판 사격 위치의 사선과는 겹치지 않는다
+      this.col.addBox(px, floor + 0.5, zc, 0.7, 0.55, 0.55, 0, 'concrete', 'CULVERT');
     }
   }
 
   // 중간 지대 작은 잔해 (인스턴싱): 포탄 파편, 빈 탄약 상자(뚜껑 열림), 찢어진 위장망 조각, 버려진 헬멧·배낭.
   // 구역(MAP.debrisZones)의 종류별 가중치로 몰리게 흩뿌린다 (장갑차·차량 둘레, 농로 옆, 포탄 구덩이 둘레, 밭 전체).
   // 지면 기울기에 맞춰 눕히고, 물·콘크리트·차량 위·수로 쪽(z > maxZ)에는 놓지 않는다.
-  // 충돌: 탄약 상자만 나무 상자(관통 가능, 낮아서 밟고 넘음). 파편·헬멧·배낭·위장망 조각은 너무 작거나 얇아 충돌체가 없다.
+  // 충돌 (종류별 config types.*.collider·material, 모두 낮아서 밟고 넘음): 탄약 상자 = 나무(관통 가능), 헬멧 = 강철(관통 불가, 도탄),
+  // 배낭 = 천(fabric, 관통 가능·흙먼지 탄착). 포탄 파편과 위장망 조각은 땅에 붙은 얇은 조각이라 충돌체가 없다 (탄은 지면에 맞는다).
   // 적 사격 위치·이동 경유점 둘레(clearFp)에는 충돌체 있는 상자를 두지 않는다. 인스턴스 메시는 buildDebrisInstances.
   fieldDebris() {
     this.keepRngStream('field', 40);
@@ -3270,6 +3743,38 @@ export class StructureBuilder {
         return null;
       }
       return [rng.range(zone.x0, zone.x1), rng.range(zone.z0, zone.z1)];
+    };
+    // 앞쪽 구덩이 사격 위치(AI_MAP crater 노드: 테두리에 엎드려 눈이 마루 바로 위)에서 수로 발판(앉은 눈높이)으로 가는 낮은 사선들.
+    // 충돌체 있는 잔해가 이 사선 바로 아래(윗면 + lanes.clear 안, 옆으로 lanes.side 안)에 있으면 충돌체 없이 보이기만 한다
+    // (땅을 스치듯 지나는 엎드린 사선을 헬멧·상자·배낭이 막지 않게). 눈 높이는 실제보다 조금 낮게 잡는다 (보수적으로)
+    const LN = D.lanes;
+    const lanes = [];
+    for (const node of Object.values(AI_MAP.nodes)) {
+      if (node.kind !== 'crater') continue;
+      const c = t.craters.find((cr) => cr.tag === node.crater);
+      if (!c) continue;
+      for (const fd of node.fps || []) {
+        const a = Math.atan2(-c.x, LN.faceZ - c.z) + (fd.rim || 0);
+        const ex = c.x + Math.sin(a) * (c.r - (node.rimInset ?? 0.8));
+        const ez = c.z + Math.cos(a) * (c.r - (node.rimInset ?? 0.8));
+        const ey = Math.max(t.heightAt(ex, ez), t.heightAt(c.x + Math.sin(a) * c.r, c.z + Math.cos(a) * c.r)) + LN.eyeAboveCrest;
+        for (let tx = LN.x[0]; tx <= LN.x[1]; tx += LN.step) {
+          const tz = t.canalZ(tx) - LN.bench;
+          lanes.push([ex, ey, ez, tx, t.heightAt(tx, tz) + LN.targetEye, tz]);
+        }
+      }
+    }
+    const underLane = (x, z, top, rad) => {
+      const gy = t.heightAt(x, z) + top + LN.clear;
+      for (const [ax, ay, az, bx, by, bz] of lanes) {
+        const dx = bx - ax;
+        const dz = bz - az;
+        const u = ((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz);
+        if (u <= 0 || u >= 1) continue;
+        if (Math.hypot(x - ax - dx * u, z - az - dz * u) > rad + LN.side) continue;
+        if (ay + (by - ay) * u < gy) return true;
+      }
+      return false;
     };
     const onVehicle = (x, z) =>
       t.vehiclePads.some((v) => {
@@ -3331,9 +3836,13 @@ export class StructureBuilder {
         const m = new THREE.Matrix4().compose(pos, qa, scl);
         list.push({ m, color: T.colors[Math.floor(rng.next() * T.colors.length)] });
         if (T.collider) {
-          const [hx, hy, hz] = T.collider;
-          const h = rx ? [hx, hz, hy] : [hx, hy, hz];
-          this.col.addBox(x, y + h[1] * s, z, h[0] * s, h[1] * s, h[2] * s, yaw, 'wood', 'DEBRIS');
+          // 옆으로 눕힌 자세는 반크기 축을 바꾼다 (x 축 둘레 → 높이·깊이, z 축 둘레 → 폭·높이). 지면 기울기는 무시 (낮은 상자)
+          let [hx, hy, hz] = T.collider;
+          if (Math.abs(Math.sin(rx)) > 0.7) [hy, hz] = [hz, hy];
+          if (Math.abs(Math.sin(rz)) > 0.7) [hx, hy] = [hy, hx];
+          if (!underLane(x, z, hy * 2 * s, Math.max(hx, hz) * s)) {
+            this.col.addBox(x, y + hy * s, z, hx * s, hy * s, hz * s, yaw, T.material || 'wood', 'DEBRIS');
+          }
         }
       }
     }
@@ -3371,15 +3880,18 @@ export class StructureBuilder {
       chunk: new THREE.DodecahedronGeometry(0.5, 0),
       sandbag: this.sandbagGeometry(),
       crate: boxGeo(0.6, 0.24, 0.32, 0.6),
-      // 흉벽 흙덩이 (Structures.parapetClods): 각진 면으로 음영이 나뉘는 밝은 하층토 덩어리
-      clod: new THREE.DodecahedronGeometry(0.5, 0),
+      // 흉벽 흙덩이 (Structures.parapetClods): 각진 면으로 음영이 나뉘는 하층토 덩어리 (아래쪽 면은 젖은 흙처럼 어둡게)
+      clod: clodGeometry(CONFIG.enemyPosition.clods.underside),
+      // 흉벽 마루 흙무더기 (Structures.spoilLumps): 울퉁불퉁한 낮은 둔덕 (밑둥은 흉벽 표면 아래로 묻힘)
+      spoilLump: spoilLumpGeometry(CONFIG.enemyPosition.lumps.underside),
     };
     const mats = {
       brick: new THREE.MeshLambertMaterial({ color: 0xffffff }),
       chunk: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.concrete.map }),
       sandbag: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.sandbag.map }),
       crate: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.wood.map }),
-      clod: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+      clod: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true, vertexColors: true }),
+      spoilLump: new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true }),
     };
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
@@ -3415,10 +3927,10 @@ export class StructureBuilder {
     return group;
   }
 
+  // 인스턴스 모래주머니 (참호 흉벽·엄체호·바리케이드): 수로 더미와 같은 눌린 베개 모양, 분할만 적게.
+  // 높이 0.17m 라 단 간격 0.14~0.15m 로 쌓으면 위 자루가 아래 자루를 눌러 틈이 없다
   sandbagGeometry() {
-    const g = new THREE.SphereGeometry(0.5, 8, 5);
-    g.scale(0.56, 0.17, 0.34);
-    return g;
+    return this.bagGeometry(CONFIG.canal.bag.segInst);
   }
 
   buildWires() {
@@ -3481,6 +3993,90 @@ function taperBoxGeo(w0, d0, w1, d1, h, uvScale = 1) {
   return g;
 }
 
+// 얇은 판 기하를 바깥 면 / 안쪽 면(로컬 (0, cy, 0) 축을 향한 면)으로 나눈다 → [바깥, 안쪽] (없으면 null).
+// 속이 빈 차체에서 바깥은 차체 재질, 안쪽은 그을음 재질로 따로 넣을 때 (Structures.vanWreck)
+function splitShell(g, cy) {
+  const src = g.index ? g.toNonIndexed() : g;
+  const p = src.attributes.position;
+  const uv = src.attributes.uv;
+  const out = [[], []];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const e = new THREE.Vector3();
+  for (let i = 0; i < p.count; i += 3) {
+    a.fromBufferAttribute(p, i);
+    b.fromBufferAttribute(p, i + 1);
+    c.fromBufferAttribute(p, i + 2);
+    n.subVectors(b, a).cross(e.subVectors(c, a));
+    const mx = (a.x + b.x + c.x) / 3;
+    const my = (a.y + b.y + c.y) / 3;
+    const mz = (a.z + b.z + c.z) / 3;
+    const side = n.x * -mx + n.y * (cy - my) + n.z * -mz > 0 ? 1 : 0;
+    for (let k = 0; k < 3; k++) out[side].push(p.getX(i + k), p.getY(i + k), p.getZ(i + k), uv ? uv.getX(i + k) : 0, uv ? uv.getY(i + k) : 0);
+  }
+  return out.map((arr) => {
+    if (!arr.length) return null;
+    const cnt = arr.length / 5;
+    const pos = new Float32Array(cnt * 3);
+    const uvs = new Float32Array(cnt * 2);
+    for (let i = 0; i < cnt; i++) {
+      pos.set(arr.slice(i * 5, i * 5 + 3), i * 3);
+      uvs.set(arr.slice(i * 5 + 3, i * 5 + 5), i * 2);
+    }
+    const q = new THREE.BufferGeometry();
+    q.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    q.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    q.computeVertexNormals();
+    return q;
+  });
+}
+
+// 흉벽 흙덩이 기하 (반지름 0.5 십이면체, 각진 면): 아래쪽 정점일수록 어둡게 (젖은 밑면·그늘, underside = 맨 아래 배수)
+function clodGeometry(underside = 0.55) {
+  const g = new THREE.DodecahedronGeometry(0.5, 0);
+  const pos = g.attributes.position;
+  const arr = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = THREE.MathUtils.smoothstep(pos.getY(i), -0.35, 0.3);
+    const k = underside + (1 - underside) * t;
+    arr[i * 3] = k;
+    arr[i * 3 + 1] = k;
+    arr[i * 3 + 2] = k * 0.97;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return g;
+}
+
+// 흉벽 마루 흙무더기 기하: 밑면 지름 1(x·z), 높이 1 의 울퉁불퉁한 둔덕 + 땅속으로 0.6 내려가는 밑둥 (비탈에 놓여도 뜨지 않게).
+// 둘레 요철은 각도의 주기 함수라 이음매가 맞는다. 정점색: 밑둥·아래쪽 어둡게 (underside), 위는 밝은 하층토
+function spoilLumpGeometry(underside = 0.6) {
+  const g = new THREE.SphereGeometry(0.5, 12, 8);
+  const pos = g.attributes.position;
+  const arr = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const a = Math.atan2(z, x);
+    const top = y >= 0;
+    // 위쪽: 둥근 지붕 (꼭대기가 조금 납작), 아래쪽: 밑둥
+    const ny = top ? 1 - Math.pow(1 - y * 2, 1.25) : y * 1.2;
+    const bump = 1 + 0.13 * Math.sin(a * 3 + 0.7) + 0.07 * Math.sin(a * 5 + 2.1) + 0.05 * Math.sin(a * 2 - 1.3) * (top ? y * 2 : 0);
+    const lean = top ? 0.08 * Math.sin(a + 0.4) * y * 2 : 0;
+    pos.setXYZ(i, x * bump, Math.max(-0.6, ny + lean * 0.5), z * bump);
+    const t = THREE.MathUtils.smoothstep(ny, -0.2, 0.55);
+    const k = (underside + (1 - underside) * t) * (1 + 0.05 * Math.sin(a * 4 + 1.9));
+    arr[i * 3] = k;
+    arr[i * 3 + 1] = k;
+    arr[i * 3 + 2] = k * 0.96;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
 // 적 사격 위치·이동 경유점·전방 구덩이 (충돌체 있는 잔해를 두지 않을 곳). 차량 기준 사격 위치는 월드로 바꾼다
 function aiClearPoints() {
   const pts = [];
@@ -3522,25 +4118,27 @@ function debrisTemplates(materials) {
     g.computeVertexNormals();
     out.shard = { geo: g, mat: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }) };
   }
-  // 빈 탄약 상자 (나무, 바랜 국방색 도장): 바닥·네 벽 (안쪽이 보이는 열린 상자) + 뒤로 젖혀진 뚜껑 + 양 끝 손잡이 끈
+  // 빈 탄약 상자 (나무, 바랜 국방색 도장): 바닥·네 벽 (안쪽이 보이는 열린 상자) + 뒤로 젖혀진 뚜껑 + 양 끝 손잡이 끈.
+  // 색은 칠한 판자 텍스처(crateTexture)가 정하고, 정점색은 안쪽 바닥·벽 밑동을 조금 어둡게(접지 음영)만, 인스턴스 색은 밝은 무채색
+  // (나무 텍스처 × 올리브 인스턴스 색 × 어두운 정점색을 겹쳐 곱해 거의 검게 나오던 것을 고침)
   {
     const parts = [];
     const L = 0.56;
     const H = 0.19;
     const Wd = 0.34;
     const th = 0.018;
-    const push = (g, c) => parts.push(tint(g, c));
-    push(place(boxGeo(L, th, Wd, 0.6), 0, th / 2, 0), 0x6a6650);
-    push(place(boxGeo(L, H, th, 0.6), 0, H / 2, Wd / 2 - th / 2), 0xffffff);
-    push(place(boxGeo(L, H, th, 0.6), 0, H / 2, -Wd / 2 + th / 2), 0xffffff);
-    push(place(boxGeo(th, H, Wd - th * 2, 0.6), L / 2 - th / 2, H / 2, 0), 0xffffff);
-    push(place(boxGeo(th, H, Wd - th * 2, 0.6), -L / 2 + th / 2, H / 2, 0), 0xffffff);
+    const push = (g, c, dark = 0) => parts.push(tint(g, c, dark, [0, H]));
+    push(place(boxGeo(L, th, Wd, 0.6), 0, th / 2, 0), 0xc4c0b0);
+    push(place(boxGeo(L, H, th, 0.6), 0, H / 2, Wd / 2 - th / 2), 0xffffff, 0.3);
+    push(place(boxGeo(L, H, th, 0.6), 0, H / 2, -Wd / 2 + th / 2), 0xffffff, 0.3);
+    push(place(boxGeo(th, H, Wd - th * 2, 0.6), L / 2 - th / 2, H / 2, 0), 0xffffff, 0.3);
+    push(place(boxGeo(th, H, Wd - th * 2, 0.6), -L / 2 + th / 2, H / 2, 0), 0xffffff, 0.3);
     const lid = boxGeo(L, th, Wd, 0.6);
     lid.translate(0, th / 2, Wd / 2);
-    push(place(lid, 0, H, -Wd / 2, [-2.05, 0, 0]), 0xe8e4d8);
-    for (const s of [-1, 1]) push(place(boxGeo(0.02, 0.025, 0.12), s * (L / 2 + 0.01), H * 0.7, 0), 0x3a3428);
+    push(place(lid, 0, H, -Wd / 2, [-2.05, 0, 0]), 0xf2eee4);
+    for (const s of [-1, 1]) push(place(boxGeo(0.02, 0.025, 0.12), s * (L / 2 + 0.01), H * 0.7, 0), 0x4a4436);
     const g = mergeGeometries(parts.map((q) => q.toNonIndexed()));
-    out.crate = { geo: g, mat: new THREE.MeshLambertMaterial({ color: 0xffffff, map: materials.wood.map, vertexColors: true }) };
+    out.crate = { geo: g, mat: new THREE.MeshLambertMaterial({ color: 0xffffff, map: crateTexture(), vertexColors: true }) };
   }
   // 찢어진 위장망 조각: 땅에 걸쳐 주름진 그물 (가장자리가 뜯겨 불규칙 — 알파 텍스처)
   {

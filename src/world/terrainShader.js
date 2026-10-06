@@ -15,6 +15,7 @@ import { CONFIG } from '../config.js';
 export const ROAD_RANGE = 8; // 마스크에 저장하는 길 중심 거리 범위 (m)
 export const TRACK_RANGE = 4; // 가장 가까운 궤도 자국 띠 중심까지 거리 범위 (m)
 export const MAX_PARCELS = 16; // 밭 구획 수 상한 (0 = 구획 없음)
+export const MAX_TRACK_SEGS = 16; // 궤도 자국 선분 수 상한 (궤도판 무늬 방향용)
 
 const f = (v) => {
   const s = Number(v).toFixed(5);
@@ -55,6 +56,18 @@ ${variant === 'ridge' ? '#define T_RIDGE' : ''}
 #define T_WATER_F ${f(G.waterInFurrows)}
 #define T_FURROW_REF ${f(T.furrow.depth)}
 #define T_MAX_PARCELS ${MAX_PARCELS}
+#define T_STEEP0 ${f(G.steepBlend[0])}
+#define T_STEEP1 ${f(G.steepBlend[1])}
+#define T_ROUGH_MIN ${f(G.roughnessMin)}
+#define T_WATER_ROUGH ${f(G.waterRoughness)}
+#define T_SUN_SPEC ${f(G.sunSpecular)}
+#define T_SPEC_CAP ${f(G.sunSpecularCap)}
+#define T_WATER_SPEC ${f(G.waterSunSpecular)}
+#define T_WATER_REFL ${f(G.waterReflect)}
+#define T_TRACK_TREAD ${f(T.tracks.treadPitch)}
+#define T_TRACK_TREAD_STR ${f(T.tracks.treadStrength)}
+#define T_TRACK_MUD ${f(T.tracks.mud)}
+#define T_NTRACK ${MAX_TRACK_SEGS}
 `;
 
   // ---------------------------------------------------------------- 정점
@@ -115,6 +128,7 @@ uniform sampler2DArray tGAlbLo; // 같은 알베도의 낮은 이방성 사본 (
 uniform sampler2DArray tGNrm;
 uniform sampler2D tMacro;
 uniform vec4 uParcel[T_MAX_PARCELS];
+uniform vec4 uTrackSeg[T_NTRACK]; // 궤도 자국 중심선 선분 (ax, az, bx, bz), 빈 칸은 멀리
 uniform vec3 uSkyRefl;
 varying vec3 vTWPos;
 varying vec3 vTWNrm;
@@ -130,6 +144,12 @@ const float T_SHEEN[6] = ${farr(G.wetSheen)};
 float tHash(float n) {
   return fract(sin(n * 127.1 + 311.7) * 43758.5453);
 }
+
+// 가파른 면(수로 비탈 위쪽·둔덕 앞면·사격 홈 벽·구덩이 벽)의 수직 투영: terrainSurface 가 픽셀마다 채운다.
+// tVW = (수직 투영 몫, (x,y) 평면 몫, (z,y) 평면 몫, 0). 수평 투영(xz)만 쓰면 45° 넘는 면에서 텍스처가 세로로 늘어난다
+vec3 tVP;
+vec4 tVW;
+vec2 tVS;
 
 // 고랑 단면 (s = 고랑 간격 단위 좌표). 0 = 고랑 바닥, 1 안팎 = 이랑 마루.
 // 쟁기가 흙을 한쪽으로 넘겨 약간 비대칭, 이랑마다 높이가 조금씩 다르다 (바닥에서 이어지게).
@@ -174,17 +194,51 @@ void tLayer(sampler2DArray tAlb, int li, float anti, vec2 wp, vec2 fperp, vec2 f
   // 밭 재질의 탄젠트 공간(고랑 가로·세로) → 월드 x·z
   if (fr) nxy = nxy.x * fperp + nxy.y * fdir;
   n = vec4(nxy, n.b, 1.0);
+  // 가파른 면: 수직 투영(바이플래너)과 섞는다. 노멀 x·y 는 terrainSurface 의 탄젠트 축(Tg·Bg)에 맞춘 좌표라 그대로 더한다
+  // (Tg = 월드 X 를 면에 투영, Bg = Tg × N → (x,y) 평면은 v = -sign(N.z)·y, (z,y) 평면은 u = -sign(N.x)·y, v = z)
+  if (tVW.x > 0.004) {
+    vec4 av = vec4(0.0);
+    vec4 nv = vec4(0.0);
+    if (tVW.y > 0.02) {
+      vec3 c = vec3(vec2(tVP.x, tVS.y * tVP.y) * k, l);
+      av += texture(tAlb, c) * tVW.y;
+      nv += texture(tGNrm, c) * tVW.y;
+    }
+    if (tVW.z > 0.02) {
+      vec3 c = vec3(vec2(tVS.x * tVP.y, tVP.z) * k, l);
+      av += texture(tAlb, c) * tVW.z;
+      nv += texture(tGNrm, c) * tVW.z;
+    }
+    float ws = max(tVW.y + tVW.z, 1e-4);
+    av /= ws;
+    nv /= ws;
+    a = mix(a, av, tVW.x);
+    n = mix(n, vec4(nv.xy * 2.0 - 1.0, nv.b, 1.0), tVW.x);
+  }
 #else
   n = vec4(0.0, 0.0, 0.5, 1.0);
 #endif
 }
 
-void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis) {
+void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis, out float specK) {
   vec3 P = vTWPos;
   vec3 Nb = normalize(vTWNrm);
   vec3 V = normalize(P - cameraPosition);
   float dist = vTDist;
   vec2 wp = P.xz;
+  // 가파른 면의 수직 투영 몫 (tLayer·근거리 디테일이 쓴다)
+  tVP = P;
+  tVS = vec2(Nb.x >= 0.0 ? -1.0 : 1.0, Nb.z >= 0.0 ? -1.0 : 1.0);
+#ifndef T_FAR
+  {
+    float wx = Nb.z * Nb.z;
+    float wz = Nb.x * Nb.x;
+    float ws = max(wx + wz, 1e-5);
+    tVW = vec4(1.0 - smoothstep(T_STEEP1, T_STEEP0, Nb.y), wx / ws, wz / ws, 0.0);
+  }
+#else
+  tVW = vec4(0.0);
+#endif
 
   // ---- 혼합 마스크 (맵 밖은 큰 노이즈로 밭/풀밭 얼룩)
   vec2 suv = (wp + T_HALF) / (2.0 * T_HALF);
@@ -218,7 +272,7 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   float wetHollow = smoothstep(0.3, 0.6, wMud) * smoothstep(0.3, 0.6, wPl);
   wMud = max(wMud, rut * 0.95);
   wGrv *= 1.0 - rut * 0.9;
-  wMud = max(wMud, band * 0.55);
+  wMud = max(wMud, band * T_TRACK_MUD);
   float wGr = max(0.0, 1.0 - wPl - wSt - wMud - wSub - wGrv);
 
   // ---- 밭 구획: 고랑 방향·간격·깊이 → 해석적 고랑 (노멀 + 어둡기). 화면에서 고랑이 1~2px 로 좁아지면 평균으로
@@ -304,8 +358,39 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
     float dF = (1.0 - smoothstep(T_DETAIL_F0, T_DETAIL_F1, dist)) * T_DETAIL_STR;
     vec2 ud = wp / T_DETAIL_TILE;
     vec4 dn = texture(tGNrm, vec3(ud, 6.0));
+    if (tVW.x > 0.004) {
+      // 가파른 면: 면에 가까운 수직 평면으로 읽어 섞는다
+      vec2 uv2 = (tVW.y >= tVW.z ? vec2(P.x, tVS.y * P.y) : vec2(tVS.x * P.y, P.z)) / T_DETAIL_TILE;
+      dn = mix(dn, texture(tGNrm, vec3(uv2, 6.0)), tVW.x);
+    }
     alb *= 1.0 + (dn.b - 0.5) * 0.9 * dF;
     nxz += (dn.xy * 2.0 - 1.0) * dF;
+  }
+#endif
+
+#ifndef T_FAR
+  // ---- 궤도 자국 바닥의 궤도판 무늬: 가장 가까운 자국 선분을 따라가는 좌표로 가로 줄 (근거리만, 화면에서 좁아지면 사라짐)
+  if (band > 0.02 && dist < 45.0) {
+    float bd = 1e4;
+    vec2 tdir = vec2(1.0, 0.0);
+    float ts = 0.0;
+    for (int i = 0; i < T_NTRACK; i++) {
+      vec4 sg = uTrackSeg[i];
+      vec2 ab = sg.zw - sg.xy;
+      float l2 = max(dot(ab, ab), 1e-3);
+      float tt = clamp(dot(wp - sg.xy, ab) / l2, 0.0, 1.0);
+      float dd = length(wp - sg.xy - ab * tt);
+      if (dd < bd) {
+        bd = dd;
+        tdir = ab * inversesqrt(l2);
+        ts = dot(wp - sg.xy, tdir);
+      }
+    }
+    float ph = ts / T_TRACK_TREAD;
+    float taa = band * (1.0 - smoothstep(0.25, 0.6, fwidth(ph)));
+    float cs = cos(6.2831853 * ph);
+    alb *= 1.0 - 0.1 * taa * (0.5 + 0.5 * cs);
+    nxz += tdir * (sin(6.2831853 * ph) * T_TRACK_TREAD_STR * taa);
   }
 #endif
 
@@ -319,8 +404,11 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
   water = clamp(water, 0.0, 1.0);
   float fres = 0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0);
   col = mix(col, col * 0.3, water);
-  rough = mix(rough, 0.06, water);
-  emis = uSkyRefl * fres * (water * 0.9 + sheen * (1.0 - water));
+  // 흐린 날: 물·젖은 흙은 하늘 반사(프레넬, 자체 발광 — 지평선 색을 넘지 않는다)로만 밝아지고,
+  // 해(방향광) 반사는 거칠기 하한 + 배수로 넓고 약한 윤기만 남긴다 (좁고 하얀 번쩍임 방지)
+  rough = max(mix(rough, T_WATER_ROUGH, water), T_ROUGH_MIN);
+  specK = T_SUN_SPEC * mix(1.0, T_WATER_SPEC, water);
+  emis = uSkyRefl * fres * (water * T_WATER_REFL + sheen * (1.0 - water));
 
   // ---- 법선: 텍스처 + 고랑 요철 → 기하 법선 기준 탄젠트 공간 (x = 월드 X, y = 월드 Z)
   vec2 pxz = mix(nxz - fGrad, vec2(0.0), water);
@@ -336,7 +424,12 @@ void terrainSurface(inout vec3 col, out vec3 nW, out float rough, out vec3 emis)
 vec3 tN;
 float tRough;
 vec3 tEmis;
-terrainSurface(diffuseColor.rgb, tN, tRough, tEmis);
+float tSpecK;
+terrainSurface(diffuseColor.rgb, tN, tRough, tEmis, tSpecK);
 `;
-  return { vertPars, vertNormal, vertBegin, vertProject, fragPars, fragMain };
+  // 조명 계산 뒤: 해(방향광) 반사 배수 (물·젖은 흙이 하늘보다 밝게 번쩍이지 않게)
+  const fragLights = `
+reflectedLight.directSpecular = min(reflectedLight.directSpecular * tSpecK, uSkyRefl * T_SPEC_CAP);
+`;
+  return { vertPars, vertNormal, vertBegin, vertProject, fragPars, fragMain, fragLights };
 }

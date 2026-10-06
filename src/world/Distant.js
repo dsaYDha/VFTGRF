@@ -2,7 +2,8 @@
 // Distant — 원경 (맵 밖, 접근 불가): 먼 마을 지붕·교회·급수탑·곡물 창고·축사, 멀어지는 송전탑·전신주 행렬과 전선.
 // 병합 메시 하나(정점색, 램버트) + 전선 LineSegments 하나. 물체를 맵 중심에서 가까운 순으로 쌓아 두어
 // setRange(m) 는 drawRange 만 줄인다 (그래픽 품질 프리셋, 실행 중 바로 적용).
-// 모두 같은 안개를 받아 거의 실루엣만 보인다. 지면 높이는 Terrain.heightAt (맵 밖 = farHeight: 기복 + 먼 언덕 + 수로·농로).
+// 모두 같은 안개를 받아 거의 실루엣만 보인다 (지평선 위로 솟은 언덕 마루·마을·탑은 applySilhouetteFog 로 희미한 실루엣이 남는다).
+// 지면 높이는 Terrain.heightAt (맵 밖 = farHeight: 기복 + 먼 언덕·능선 + 수로·농로).
 // 맵 안 송전선(MAP.pylons)·전신주(MAP.poles) 끝 탑의 전선 걸이에서 전선이 그대로 이어진다.
 // 탄이 닿을 수 있는 거리(CONFIG.distant.colliderRange) 안의 물체만 충돌체(재질 태그: 벽돌·강철·콘크리트)를 둔다.
 // 배치: MAP.distant, 수치: CONFIG.distant
@@ -48,6 +49,61 @@ export function farRoadSegments() {
   }
   for (const v of D.villages || []) segs.push(...villageStreets(v));
   return segs;
+}
+
+// ---------------------------------------------------------------------------- 원경 실루엣 안개
+// 원경을 그리는 거리 (맵 중심에서 m, 그래픽 품질 프리셋 — Distant.setRange 가 갱신). 이 끝 rangeFade m 안에서 실루엣 몫을 줄여
+// 원경이 끊기는 자리(낮음 프리셋 2km 등)에서 언덕·마을이 툭 잘려 보이지 않게 한다
+const SIL_RANGE = { value: CONFIG.distant.range };
+
+// 맵 밖 지형(Terrain 원경 재질)·먼 물체·먼 전선 재질의 onBeforeCompile 에서 부른다 (CONFIG.distant.silhouette).
+// Atmosphere 가 바꿔 낀 안개 식(atmoFogFactor: 거리·높이 안개·먼 곳 몫)은 그대로 두고, 투과율에 '높이 솟은 먼 곳' 몫
+//  Ts = residual · e^(-dd/length) · smoothstep(rise) · smoothstep(out) · (원경 끝 rangeFade)
+// 을 p-노름(atmosphere.fog.blendPow)으로 더한다. dd = 높이 보정 거리 (대기 안개와 같은 식), rise = 카메라보다 높은 정도 (m),
+// out = 맵 가장자리 밖 거리 (m). 평평한 먼 지면(지평선)은 그대로 안개에 녹고, 맵 안·맵 가장자리 물체와는 이음매가 없다.
+// 0.7~1.5km 언덕 마루·비탈의 마을·교회·급수탑처럼 지평선 위로 솟은 것만 희미한 실루엣으로 읽힌다 (지면 연무 위로 솟은 모습).
+// 대기 셰이더 청크(atmoFogFactor)가 없으면 아무것도 바꾸지 않는다 (false 반환).
+export function applySilhouetteFog(shader) {
+  const SC = THREE.ShaderChunk;
+  if (!SC.fog_fragment.includes('float fogFactor = atmoFogFactor( vFogDepth, vFogDY );') || !SC.fog_pars_vertex.includes('vFogDY')) return false;
+  if (!shader.fragmentShader.includes('#include <fog_fragment>') || !shader.vertexShader.includes('#include <fog_vertex>')) return false;
+  const S = CONFIG.distant.silhouette;
+  const F = CONFIG.atmosphere.fog;
+  const f = (v) => {
+    const s = Number(v).toFixed(6);
+    return s.includes('.') ? s : s + '.0';
+  };
+  shader.uniforms.uSilRange = SIL_RANGE;
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <fog_pars_vertex>', '#include <fog_pars_vertex>\n#ifdef USE_FOG\n\tvarying float vSilOut;\n\tuniform float uSilRange;\n#endif')
+    .replace(
+      '#include <fog_vertex>',
+      `#include <fog_vertex>
+#ifdef USE_FOG
+	{
+		vec4 silW = modelMatrix * vec4( transformed, 1.0 );
+		vSilOut = smoothstep( ${f(S.out[0])}, ${f(S.out[1])}, max( abs( silW.x ), abs( silW.z ) ) - ${f(CONFIG.world.halfSize)} )
+			* ( 1.0 - smoothstep( uSilRange - ${f(S.rangeFade)}, uSilRange, length( silW.xz ) ) );
+	}
+#endif`,
+    );
+  // 대기 안개 조각 청크를 그대로 가져와 안개 비율을 구한 바로 뒤에 실루엣 몫을 끼운다
+  const anchor = 'float fogFactor = atmoFogFactor( vFogDepth, vFogDY );';
+  const frag = SC.fog_fragment.replace(
+    anchor,
+    `${anchor}
+		{
+			// 원경 실루엣 몫 (Distant.applySilhouetteFog)
+			float sk = clamp( vFogDY / ${f(F.hazeHeight)}, -1.5, 12.0 );
+			float shf = abs( sk ) < 1e-3 ? 1.0 : ( 1.0 - exp( -sk ) ) / sk;
+			float sts = ${f(S.residual)} * exp( -vFogDepth * shf / ${f(S.length)} ) * smoothstep( ${f(S.rise[0])}, ${f(S.rise[1])}, vFogDY ) * vSilOut;
+			fogFactor = 1.0 - pow( pow( 1.0 - fogFactor, ${f(F.blendPow)} ) + pow( max( sts, 1e-6 ), ${f(F.blendPow)} ), ${f(1 / F.blendPow)} );
+		}`,
+  );
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <fog_pars_fragment>', '#include <fog_pars_fragment>\n#ifdef USE_FOG\n\tvarying float vSilOut;\n#endif')
+    .replace('#include <fog_fragment>', frag);
+  return true;
 }
 
 // 맵 안 송전탑 틀 (Structures.pylonGeometry 와 같은 치수: 전선 걸이가 맞물리게)
@@ -276,7 +332,13 @@ export class Distant {
     }
   }
 
-  // 지면 높이 (발자국 네 모서리 중 가장 낮은 곳 — 비탈에서 벽 밑이 뜨지 않게)
+  // 원경 지형 메시는 멀수록 격자가 성겨 실제 높이(heightAt)보다 조금 낮게 그려질 수 있다 (언덕 마루·비탈).
+  // 먼 건물 벽·탑 받침을 이만큼 더 땅속으로 내려 떠 보이지 않게 한다 (CONFIG.distant.foundationPerM)
+  sink(x, z) {
+    return this.viewDist(x, z) * CONFIG.distant.foundationPerM;
+  }
+
+  // 지면 높이 (발자국 네 모서리 중 가장 낮은 곳 — 비탈에서 벽 밑이 뜨지 않게, 먼 곳은 sink 만큼 더 낮게)
   footY(x, z, yaw, hx, hz) {
     const t = this.terrain;
     const c = Math.cos(yaw);
@@ -294,7 +356,7 @@ export class Distant {
       lo = Math.min(lo, y);
       hi = Math.max(hi, y);
     }
-    return [lo, hi];
+    return [lo - this.sink(x, z), hi];
   }
 
   // 이동 가능 구역에서의 수평 거리 (먼 부재 굵기·충돌체 판정용)
@@ -479,7 +541,8 @@ export class Distant {
     this.begin(x, z);
     this.frame(x, y, z, 0);
     const shaft = 18;
-    this.cyl(0, 0, 0, 1.6, 1.1, 1.5, 8, 0x7a6c62, false);
+    const sk = this.sink(x, z);
+    this.cyl(0, -sk, 0, 1.6, 1.1, 1.5 + sk, 8, 0x7a6c62, false);
     this.cyl(0, 1.5, 0, 1.1, 1.1, shaft - 1.5, 8, C.rust, false);
     this.cyl(0, shaft, 0, 1.1, 3.2, 1.4, 10, C.rust, false);
     this.cyl(0, shaft + 1.4, 0, 3.2, 3.2, 5, 10, C.rust, false);
@@ -494,14 +557,15 @@ export class Distant {
   // 곡물 창고 (엘리베이터): 콘크리트 사일로 줄 + 높은 작업탑
   elevator(x, z, yaw) {
     const C = CONFIG.distant.colors;
+    const sk = this.sink(x, z);
     const [lo] = this.footY(x, z, yaw, 18, 6);
     this.begin(x, z);
-    const y0 = lo - 0.5;
+    const y0 = lo + sk - 0.5; // 높이는 실제 지면 기준, 사일로·작업탑 밑동만 sk 만큼 더 땅속으로
     this.frame(x, y0, z, yaw);
     for (let i = 0; i < 6; i++) {
-      for (const sz of [-3.1, 3.1]) this.cyl(-12 + i * 6.2, 0, sz, 3.1, 3.1, 26, 10, C.concrete, true);
+      for (const sz of [-3.1, 3.1]) this.cyl(-12 + i * 6.2, -sk, sz, 3.1, 3.1, 26 + sk, 10, C.concrete, true);
     }
-    this.box(-12 + 6 * 6.2 + 1.5, 21, 0, 9, 42, 12, 0x96928a);
+    this.box(-12 + 6 * 6.2 + 1.5, (42 - sk) / 2, 0, 9, 42 + sk, 12, 0x96928a);
     this.gable(-12 + 6 * 6.2 + 1.5, 42, 0, 9, 12, 2, 0x6a6c6c, 0x96928a);
     this.box(4, 27.5, 0, 34, 3, 4.5, 0x8c8880);
     const cs = Math.cos(yaw);
@@ -747,6 +811,9 @@ export class Distant {
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     mat.name = 'distantScenery';
     mat.userData.noShadow = true;
+    // 지평선 위로 솟은 먼 물체는 희미한 실루엣으로 남긴다 (applySilhouetteFog)
+    mat.onBeforeCompile = (shader) => applySilhouetteFog(shader);
+    mat.customProgramCacheKey = () => 'distantSilhouette';
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = 'distantScenery';
     mesh.matrixAutoUpdate = false;
@@ -767,7 +834,10 @@ export class Distant {
     const wgeo = new THREE.BufferGeometry();
     wgeo.setAttribute('position', new THREE.BufferAttribute(wp, 3));
     wgeo.computeBoundingSphere();
-    const wires = new THREE.LineSegments(wgeo, new THREE.LineBasicMaterial({ color: CONFIG.distant.colors.wire }));
+    const wmat = new THREE.LineBasicMaterial({ color: CONFIG.distant.colors.wire });
+    wmat.onBeforeCompile = (shader) => applySilhouetteFog(shader);
+    wmat.customProgramCacheKey = () => 'distantSilhouetteWire';
+    const wires = new THREE.LineSegments(wgeo, wmat);
     wires.name = 'distantWires';
     wires.matrixAutoUpdate = false;
     this.wires = wires;
@@ -782,8 +852,9 @@ export class Distant {
     return root;
   }
 
-  // 그리는 거리 (맵 중심에서 m): 그보다 먼 물체·전선은 그리지 않는다
+  // 그리는 거리 (맵 중심에서 m): 그보다 먼 물체·전선은 그리지 않는다 (원경 지형·실루엣 안개 끝도 같은 거리)
   setRange(r) {
+    SIL_RANGE.value = r;
     const count = (ends) => {
       let c = 0;
       for (const [d, e] of ends) {

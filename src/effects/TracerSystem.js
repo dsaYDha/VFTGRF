@@ -1,4 +1,5 @@
 // 예광탄 빛줄기: 탄 진행 방향으로 늘인 가산 혼합 사각형 (멀리서도 최소 굵기 유지)
+// 안개는 장면 안개(Three.js fog 청크, Atmosphere.js 의 식)를 그대로 받는다. 거리만 effects.tracerFogMul 배로 줄여 본다
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { streakTexture } from '../world/textures.js';
@@ -8,10 +9,10 @@ const VERT = `
   attribute vec3 iB;
   attribute vec4 iCol;
   attribute float iWidth;
-  uniform float uFogDensity;
+  uniform float uFogMul;
   varying vec2 vUv;
   varying vec4 vCol;
-  varying float vFog;
+  #include <fog_pars_vertex>
   void main() {
     vec3 p = mix(iA, iB, position.y);
     vec3 axis = iB - iA;
@@ -24,22 +25,28 @@ const VERT = `
     float dist = length(cameraPosition - p);
     float w = max(iWidth, dist * 0.0018);
     p += side * position.x * w;
-    vec4 mv = viewMatrix * vec4(p, 1.0);
-    gl_Position = projectionMatrix * mv;
+    vec4 mvPosition = viewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
     vUv = vec2(position.x + 0.5, position.y);
     vCol = iCol;
-    float fd = uFogDensity * 0.4;
-    vFog = 1.0 - exp(-fd * fd * dist * dist);
+    #include <fog_vertex>
+    #ifdef USE_FOG
+      vFogDepth *= uFogMul;
+    #endif
   }
 `;
 const FRAG = `
   uniform sampler2D uMap;
   varying vec2 vUv;
   varying vec4 vCol;
-  varying float vFog;
+  #include <fog_pars_fragment>
   void main() {
     vec4 t = texture2D(uMap, vUv);
-    float a = t.a * vCol.a * (1.0 - vFog);
+    float ff = 0.0;
+    #if defined( USE_FOG ) && defined( FOG_EXP2 )
+      ff = atmoFogFactor(vFogDepth, vFogDY);
+    #endif
+    float a = t.a * vCol.a * (1.0 - ff);
     gl_FragColor = vec4(vCol.rgb * a, 1.0);
     #include <colorspace_fragment>
   }
@@ -69,9 +76,11 @@ export class TracerSystem {
       vertexShader: VERT,
       fragmentShader: FRAG,
       uniforms: {
+        ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
         uMap: { value: streakTexture() },
-        uFogDensity: { value: CONFIG.atmosphere.fogDensity },
+        uFogMul: { value: CONFIG.effects.tracerFogMul },
       },
+      fog: true,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,

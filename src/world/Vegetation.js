@@ -1,9 +1,10 @@
 // =============================================================================
 // Vegetation — 말라 죽은 해바라기밭, 마른 풀 군락, 수로 바닥 갈대 (InstancedMesh)
-//  해바라기: 근거리(약 40m) = 저폴리 3D (줄기·고개 숙인 꽃판·처진 잎), 그 밖 = 교차 빌보드 (덮는 비율을 지키는 밉맵이라
-//            멀어져도 사라지지 않고 높이감 있는 어두운 띠로 남음), 원거리 = 빌보드 일부만 넓혀 그린 낮은 실루엣.
+//  해바라기: 근거리(약 40m) = 저폴리 3D (줄기·고개 숙인 꽃판·처진 잎), 그 밖 = 교차 빌보드 (덮는 비율을 지키는 밉맵),
+//            원거리(약 125m 밖) = 밭 띠: 3m 칸마다 카메라를 향하는 카드 1장 (포기 여럿이 겹친 덩어리 그림 — 낱개 꽃판이
+//            검은 점으로 깜박이지 않고 윗선이 들쭉날쭉한 높이감 있는 띠). 전환은 화면 디더 없이 포기·칸 단위로 통째로 바뀐다.
 //            줄 간격·방향은 지형 고랑과 같다 (이랑 마루에 심음). 차량이 밀고 간 띠·구덩이 둘레 쓰러진 줄기·빈 구간,
-//            가장자리는 노이즈로 들쭉날쭉하게 듬성듬성해진다.
+//            구역마다 다른 키·함께 기운 줄기, 가장자리는 노이즈로 들쭉날쭉하게 듬성듬성해지고 밖에 남은 줄기가 흩어진다.
 //  풀: 노이즈 군락 (일직선 띠 없음). 지면 종류·차량 바닥 마스크로 길·구조물·수로·참호 위는 비운다.
 //  LOD: 카메라 둘레 칸만 동적 인스턴스 버퍼에 모아 그리고 (종류마다 드로우콜 1개), 정점 셰이더가 거리로 디더 전환·축소한다.
 //       고르는 일은 렌더러가 THREE.LOD 처럼 부르는 update(camera) 에서 한다 (그 프레임 인스턴스 업로드 전에 불린다).
@@ -12,16 +13,16 @@
 import * as THREE from 'three';
 import { CONFIG, SURFACES } from '../config.js';
 import { MAP } from './mapData.js';
-import { sunflowerCardTexture, grassTuftTexture, reedTexture } from './textures.js';
+import { sunflowerCardTexture, sunflowerBandTexture, grassTuftTexture, reedTexture } from './textures.js';
 import { polylineDistance, smoothstep, clamp, lerp } from '../core/mathUtils.js';
 import { Random } from '../core/Random.js';
 
 // 바람 시간 (World.update 가 올린다)
 export const windUniforms = { uTime: { value: 0 } };
-// LOD 거리 (applyConfig 가 갱신): 해바라기 (near, nearBand, far, farBand), 원거리에 남기는 비율, 풀 (far, band), 바람 방향
+// LOD 거리 (applyConfig 가 갱신): 해바라기 (near, nearBand, far, farBand), 원거리 띠 (칸 크기, 그릴 밀도), 풀 (far, band), 바람 방향
 const vegUniforms = {
-  uSunLod: { value: new THREE.Vector4(40, 5, 170, 30) },
-  uSunFarKeep: { value: 0.5 },
+  uSunLod: { value: new THREE.Vector4(40, 8, 125, 30) },
+  uSunBand: { value: new THREE.Vector2(3, 1) },
   uGrassLod: { value: new THREE.Vector2(110, 25) },
   uWind: { value: new THREE.Vector3(1, 0, 0) },
 };
@@ -59,8 +60,13 @@ for (const k of ['road', 'wetMud', 'rubble', 'trench', 'crater', 'water', 'concr
 const GLSL_VERT = `
 uniform float uTime;
 uniform vec3 uWind;
-varying float vVegFade;
 float vegHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// 사인 없는 해시: 셰이더(근거리 3D·빌보드)마다 같은 위치에서 같은 값 → 포기마다 같은 전환 문턱
+float vegHash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
 // 바람: 월드 바람 방향 변위(높이² × 세기 m)를 인스턴스 로컬 좌표로 (회전·비균등 배율을 거꾸로). 쓰러진 줄기는 거의 안 흔들림
 vec3 vegWind(vec3 ip, float hk, float amp) {
   float ph = dot(ip.xz, vec2(0.37, 0.23));
@@ -73,15 +79,32 @@ vec3 vegWind(vec3 ip, float hk, float amp) {
   return vec3(dot(c0, D) / dot(c0, c0), dot(c1, D) / dot(c1, c1), dot(c2, D) / dot(c2, c2));
 }
 `;
-const GLSL_FRAG = `
-varying float vVegFade;
-float vegDither() { return fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))); }
+// 해바라기 원거리 띠 칸 (빌보드와 띠가 같은 식): 칸 번호 → 전환 문턱 거리 (far - farBand × 칸마다 고르게 흩어진 값), dc = 칸 중심까지 수평 거리
+const GLSL_SUN_BAND = `
+uniform vec4 uSunLod;
+uniform vec2 uSunBand;
+float sunBandSwitch(vec2 p, out float dc) {
+  vec2 ci = floor(p / uSunBand.x);
+  dc = length((ci + 0.5) * uSunBand.x - cameraPosition.xz);
+  return uSunLod.z - uSunLod.w * fract(dot(ci, vec2(0.7548776662, 0.5698402910)) + 0.5);
+}
 `;
 const glf = (v) => (Number.isInteger(v) ? v.toFixed(1) : String(v));
+// 알파 문턱 (빌보드·원거리 띠): MSAA 면 알파를 문턱 0.5 를 가운데로 한 화소 폭(fwidth)에 걸쳐 표본 덮개로 바꾼다.
+// three 기본(문턱 위쪽으로만 램프)은 덮는 비율이 문턱 언저리에서 절반쯤 줄어, 덮는 비율을 지키는 밉맵의 가는 줄기가 사라지고
+// 꽃판만 검은 점으로 남는다 → 가운데 맞춤으로 평균 덮는 비율을 지킨다. MSAA 가 없으면 그냥 문턱
+const ALPHA_CHUNK = `
+#ifdef ALPHA_TO_COVERAGE
+  diffuseColor.a = clamp((diffuseColor.a - alphaTest) / max(fwidth(diffuseColor.a), 1e-4) + 0.5, 0.0, 1.0);
+  if (diffuseColor.a < 0.01) discard;
+#else
+  if (diffuseColor.a < alphaTest) discard;
+#endif`;
+
 // 양면 카드: 뒷면 법선을 뒤집지 않아 양쪽이 같은 밝기
 const NORMAL_FIX = ['#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n  normal = normalize(vNormal);'];
 
-// 근거리 3D 해바라기: 꽃판 없는 줄기·잎 2장 처리, near 밖 축소, 전환 구간 디더 (빌보드와 서로 보완)
+// 근거리 3D 해바라기: 꽃판 없는 줄기·잎 2장 처리, 포기마다 near - nearBand × 해시 거리 밖이면 접는다 (빌보드가 같은 문턱으로 이어받음)
 function patchSunflower3D(mat) {
   const SH = SUNFLOWER_SHAPE;
   const top = SH.stem[SH.neckStart - 1];
@@ -102,54 +125,95 @@ function patchSunflower3D(mat) {
           if (noLeaf3 > 0.5 && abs(aPart - 2.0) < 0.5) transformed = vec3(0.0, 1.0, 0.0);
           float hk = transformed.y * ${glf(1 / SH.height)};
           transformed += vegWind(ip, hk * hk, ${glf(amp)});
-          vVegFade = 1.0 - smoothstep(uSunLod.x - uSunLod.y, uSunLod.x, distance(ip, cameraPosition));
-          if (vVegFade <= 0.0) transformed = vec3(0.0);
+          if (distance(ip, cameraPosition) >= uSunLod.x - uSunLod.y * vegHash12(ip.xz)) transformed = vec3(0.0);
         }`,
       );
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\n${GLSL_FRAG}`)
-      .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n  if (vegDither() >= vVegFade) discard;');
   };
   mat.customProgramCacheKey = () => 'vegSunflower3D';
 }
 
-// 해바라기 교차 빌보드: 변형 칸 고르기, near 안 축소·디더, far 밖에서 일부만 남겨 넓힘
+// 해바라기 교차 빌보드: 변형 칸 고르기. 근거리 3D 와 포기마다 같은 문턱, 원거리 띠와 칸마다 같은 문턱으로 통째로 접는다 (화면 디더 없음)
 function patchSunflowerCard(mat) {
   const SH = SUNFLOWER_SHAPE;
-  const amp = CONFIG.vegetation.sunflower.wind;
+  const S = CONFIG.vegetation.sunflower;
+  const amp = S.wind;
   const tiles = CARD.variants * 2;
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, {
       uTime: windUniforms.uTime,
       uWind: vegUniforms.uWind,
       uSunLod: vegUniforms.uSunLod,
-      uSunFarKeep: vegUniforms.uSunFarKeep,
+      uSunBand: vegUniforms.uSunBand,
     });
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>\n${GLSL_VERT}\nuniform vec4 uSunLod;\nuniform float uSunFarKeep;\nattribute float aInfo;`)
+      .replace('#include <common>', `#include <common>\n${GLSL_VERT}\n${GLSL_SUN_BAND}\nattribute float aInfo;`)
       .replace('#include <uv_vertex>', `#include <uv_vertex>\n  vMapUv.x = (uv.x + 2.0 * floor(aInfo * 0.25 + 0.01)) * ${glf(1 / tiles)};`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         {
           vec3 ip = instanceMatrix[3].xyz;
-          float d = distance(ip, cameraPosition);
-          float nearIn = smoothstep(uSunLod.x - uSunLod.y, uSunLod.x, d);
-          float farT = smoothstep(uSunLod.z - uSunLod.w, uSunLod.z, d);
-          float culled = step(uSunFarKeep, vegHash(ip.xz));
-          vVegFade = nearIn * (1.0 - culled * farT);
-          transformed.xz *= 1.0 + (1.0 - culled) * farT * (1.0 / max(uSunFarKeep, 0.05) - 1.0) * 0.6;
+          float dc;
+          float farT = sunBandSwitch(ip.xz, dc);
           float hk = transformed.y * ${glf(1 / SH.height)};
           transformed += vegWind(ip, hk * hk, ${glf(amp)});
-          if (vVegFade <= 0.0) transformed = vec3(0.0);
+          if (distance(ip, cameraPosition) < uSunLod.x - uSunLod.y * vegHash12(ip.xz) || dc >= farT) transformed = vec3(0.0);
         }`,
       );
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\n${GLSL_FRAG}`)
-      .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n  if (vegDither() < 1.0 - vVegFade) discard;')
-      .replace(NORMAL_FIX[0], NORMAL_FIX[1]);
+    sh.fragmentShader = sh.fragmentShader.replace('#include <alphatest_fragment>', ALPHA_CHUNK).replace(NORMAL_FIX[0], NORMAL_FIX[1]);
   };
   mat.customProgramCacheKey = () => 'vegSunflowerCard';
+}
+
+// 원거리 밭 띠: 세로축으로 카메라를 향하는 카드 (인스턴스 행렬 = 위치만). aBand = (키 배수, 칸의 선 줄기 수).
+// 그릴 줄기 수(수 × 밀도)에 가까운 그림 칸을 고르고 (같은 수의 칸이 여럿이면 해시로), 너무 적으면 접는다. 빌보드와 칸마다 같은 문턱
+function patchSunflowerBand(mat) {
+  const B = CONFIG.vegetation.sunflower.band;
+  const n = B.counts.length;
+  // 그림 칸 묶음 (같은 포기 수, 오름차순): 이웃 묶음 수의 가운데에서 다음 묶음으로
+  const groups = [];
+  B.counts.forEach((c, i) => {
+    const g = groups.find((e) => e.c === c);
+    if (g) g.n++;
+    else groups.push({ c, start: i, n: 1 });
+  });
+  let pick = `float tile = ${glf(groups[0].start)} + floor(h * ${glf(groups[0].n)});`;
+  for (let i = 1; i < groups.length; i++) {
+    pick += `\n          if (cnt >= ${glf((groups[i - 1].c + groups[i].c) / 2)}) tile = ${glf(groups[i].start)} + floor(h * ${glf(groups[i].n)});`;
+  }
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, { uSunLod: vegUniforms.uSunLod, uSunBand: vegUniforms.uSunBand });
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>\n${GLSL_VERT}\n${GLSL_SUN_BAND}\nattribute vec2 aBand;`)
+      .replace(
+        '#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+        {
+          vec2 tn = cameraPosition.xz - instanceMatrix[3].xz;
+          tn /= max(length(tn), 1e-3);
+          objectNormal = vec3(tn.x, 0.32, tn.y);
+        }`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        {
+          vec3 ip = instanceMatrix[3].xyz;
+          vec2 tc = cameraPosition.xz - ip.xz;
+          tc /= max(length(tc), 1e-3);
+          transformed = vec3(tc.y * position.x, position.y * aBand.x, -tc.x * position.x);
+          float cnt = aBand.y * uSunBand.y;
+          float h = vegHash12(ip.xz + 7.0) * 0.999;
+          ${pick}
+          vMapUv.x = (uv.x + tile) * ${glf(1 / n)};
+          float dc;
+          float farT = sunBandSwitch(ip.xz, dc);
+          if (dc < farT || cnt < ${glf(B.minPlants)}) transformed = vec3(0.0);
+        }`,
+      );
+    sh.fragmentShader = sh.fragmentShader.replace('#include <alphatest_fragment>', ALPHA_CHUNK);
+  };
+  mat.customProgramCacheKey = () => 'vegSunflowerBand';
 }
 
 // 풀·갈대 카드: 칸 2개 중 하나, 바람, (풀) far 에서 땅속으로 줄어 사라짐
@@ -166,7 +230,6 @@ function patchCards(mat, { amp, lod, key }) {
           vec3 ip = instanceMatrix[3].xyz;
           transformed += vegWind(ip, transformed.y * transformed.y, ${glf(amp)});
           ${lod ? 'transformed *= 1.0 - smoothstep(uGrassLod.x - uGrassLod.y, uGrassLod.x, distance(ip, cameraPosition));' : ''}
-          vVegFade = 1.0;
         }`,
       );
     sh.fragmentShader = sh.fragmentShader.replace(NORMAL_FIX[0], NORMAL_FIX[1]);
@@ -504,6 +567,7 @@ export class Vegetation {
     this.sunState = { x: 0, z: 0, fx: 0, fz: -1, wedge: 0, valid: false };
     this.grassState = { x: 0, z: 0, valid: false };
     this.stats = {};
+    this.uniforms = vegUniforms; // 점검용 (LOD 거리 등을 실행 중에 바꿔 볼 때)
   }
 
   build() {
@@ -530,7 +594,7 @@ export class Vegetation {
     this.sunLod = { near: SL.near * k, nearBand: SL.nearBand, far: SL.far * k, farBand: SL.farBand * k };
     this.grassFar = GL.far * k;
     vegUniforms.uSunLod.value.set(this.sunLod.near, this.sunLod.nearBand, this.sunLod.far, this.sunLod.farBand);
-    vegUniforms.uSunFarKeep.value = SL.farKeep;
+    vegUniforms.uSunBand.value.x = V.sunflower.band.cell;
     vegUniforms.uGrassLod.value.set(this.grassFar, GL.band * k);
     this.setDensity(V.density);
     this.sunState.valid = false;
@@ -541,6 +605,8 @@ export class Vegetation {
     const d = clamp(mul, 0.02, 1);
     if (d === this.density) return;
     this.density = d;
+    // 원거리 띠: 칸의 줄기 수 × 밀도로 그림 칸을 고른다 (셰이더)
+    vegUniforms.uSunBand.value.y = d;
     // 빌보드 (해바라기 전체): 정적 버퍼를 다시 채운다 (수로 쪽에서 가까운 칸부터: 앞에서 뒤로 그려 겹침 비용을 줄임)
     if (this.sunCards) {
       this.stats.sunflowerCards = 0;
@@ -691,6 +757,10 @@ export class Vegetation {
     const SH = SUNFLOWER_SHAPE;
     const cTmp = { count: new Map() };
     const conceal = S.conceal;
+    const LP = S.leanPatch;
+    const HP = S.heightPatch;
+    const BC = S.band;
+    const band = new Map();
     const bounds = { x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity };
     let fallenN = 0;
     for (const f of MAP.fields.sunflower) {
@@ -756,18 +826,31 @@ export class Vegetation {
           // 지형이 칠한 밭 구획 안 (가장자리 노이즈 포함). 밖은 머리땅에 드문드문 남은 줄기만
           const inRect = Math.min(x - f.x0, f.x1 - x, z - f.z0, f.z1 - z);
           const inParcel = P ? t.parcelAt(x, z) === P.index : inRect >= 0;
+          // 가장자리 노이즈 -1..1: 낮은 곳은 경계가 안쪽으로 파고들어 비고(bite), 빽빽해지는 폭도 곳마다 다르다
+          //  (노이즈 값은 대략 ±0.5 → 그 폭을 -1..1 로)
+          const eN = clamp((nz.noise(x / E.size + 41.3, z / E.size - 17.2) * E.amp + nz.noise(x / E.detailSize - 8.1, z / E.detailSize + 3.7) * E.detailAmp) / (0.5 * (E.amp + E.detailAmp)), -1, 1);
+          const bite = Math.max(0, -eN) * S.edgeBite;
+          let edgeK = 0;
           if (!inParcel) {
-            if (inRect < -S.straggle.dist || rng.next() > S.straggle.chance) continue;
+            const out = Math.max(0, -inRect);
+            if (out > S.straggle.dist) continue;
+            if (rng.next() > S.straggle.chance * (1 - out / S.straggle.dist) ** 1.5 * (1 - (0.7 * bite) / Math.max(1e-3, S.edgeBite))) continue;
             const pk = t.parcelAt(x, z);
             if (pk && (!P || pk !== P.index) && t.parcels[pk].kind !== 'stubble') continue;
             if (NO_GRASS[t.surfaceAt(x, z)]) continue;
+          } else {
+            // 경계(구획 노이즈 1.5m 바깥부터)에서 edgeMin 밀도로 시작해 폭 edgeWidth × (1 ± edgeVar) 에 걸쳐 빽빽해짐.
+            // 파고든 곳(bite) 안은 edgeMin 에서 0 으로 줄어든다 → 밭 끝이 일직선으로 끊기지 않고 성기게 풀어진다
+            const w = S.edgeWidth * (1 + S.edgeVar * eN);
+            const r = (inRect + 1.5 - bite) / w;
+            if (r < 0) {
+              if (rng.next() > S.edgeMin * clamp(1 + (r * w) / 2.5, 0, 1)) continue;
+            } else {
+              edgeK = smoothstep(0, 1, r);
+              if (rng.next() > S.edgeMin + (1 - S.edgeMin) * edgeK) continue;
+            }
           }
           const keepR = rng.next();
-          // 가장자리: 들쭉날쭉한 거리만큼 안쪽으로 듬성듬성 → 자연스럽게 끝남
-          const edgeN = nz.noise(x / E.size + 41.3, z / E.size - 17.2) * E.amp + nz.noise(x / E.detailSize - 8.1, z / E.detailSize + 3.7) * E.detailAmp;
-          const inside = inRect + edgeN;
-          const edgeK = inParcel ? smoothstep(-1.5, S.edgeWidth, inside) : 0.15;
-          if (inParcel && rng.next() > Math.pow(edgeK, 0.85)) continue;
           // 비어 있는 구간
           const gn = nz.noise(x / GN.size + 71.3, z / GN.size - 18.9) + 0.45 * nz.noise(x / GN.detail - 5.1, z / GN.detail + 9.7);
           if (gn < GN.threshold && rng.next() > smoothstep(GN.threshold - GN.soft, GN.threshold, gn)) continue;
@@ -775,8 +858,18 @@ export class Vegetation {
           let tilt = rng.next() * S.tilt;
           let fdx = rng.next() - 0.5;
           let fdz = rng.next() - 0.5;
+          // 구역마다 한쪽으로 함께 기운 줄기 (차량 띠·구덩이 둘레는 아래에서 덮어씀)
+          const lpn = nz.noise(x / LP.size + 33.3, z / LP.size - 61.7);
+          if (lpn > LP.threshold) {
+            const la = nz.noise(x / LP.dirSize - 5.5, z / LP.dirSize + 12.2) * Math.PI * 2;
+            tilt = Math.max(tilt, LP.max * smoothstep(LP.threshold, LP.threshold + 0.3, lpn) * rng.range(0.75, 1.1));
+            fdx = Math.cos(la) + rng.range(-0.3, 0.3);
+            fdz = Math.sin(la) + rng.range(-0.3, 0.3);
+          }
           let headless = rng.next() < S.headlessChance;
-          let hMul = (S.edgeHeight + (1 - S.edgeHeight) * edgeK) * (1 + S.heightPatch.amp * nz.noise(x / S.heightPatch.size - 13.7, z / S.heightPatch.size + 27.1));
+          // 구역마다 다른 키 (큰 얼룩 + 작은 얼룩) → 윗선이 높낮이를 갖는다. 가장자리는 조금 작다
+          const patchMul = 1 + HP.amp * nz.noise(x / HP.size - 13.7, z / HP.size + 27.1) + HP.detailAmp * nz.noise(x / HP.detailSize + 6.1, z / HP.detailSize - 2.3);
+          let hMul = S.edgeHeight + (1 - S.edgeHeight) * edgeK;
           let skip = false;
           // 차량이 밀고 간 띠: 진행 방향으로 납작하게 쓰러짐, 띠 가장자리는 바깥으로 기울어짐
           for (const sw of swaths) {
@@ -832,7 +925,7 @@ export class Vegetation {
             if (roll < S.fallenChance) tilt = rng.range(1.2, 1.5);
             else if (roll < S.fallenChance + S.leanChance) tilt = rng.range(S.leanAngle[0], S.leanAngle[1]);
           }
-          const h = rng.range(S.height[0], S.height[1]) * hMul;
+          const h = clamp(rng.range(S.height[0], S.height[1]) * patchMul, HP.clamp[0], HP.clamp[1]) * hMul;
           const ws = rng.range(S.widthScale[0], S.widthScale[1]);
           const bearing = ((S.headBearingDeg[0] + rng.range(-1, 1) * S.headBearingDeg[1]) * Math.PI) / 180;
           const yaw = Math.PI / 2 - bearing;
@@ -844,10 +937,19 @@ export class Vegetation {
           const variant = headless ? 3 : Math.floor(rng.next() * 3);
           const info = (headless ? 1 : 0) + (rng.next() < S.thirdLeafChance ? 0 : 2) + variant * 4;
           store.push(x, z, keepR, m, b, b * 0.97, b * 0.94, info);
-          // 은폐 볼륨용: 선 줄기 수
+          // 은폐 볼륨·원거리 띠용: 선 줄기 수
           if (tilt < 0.7) {
             const ck = `${Math.floor(x / conceal.cell)}_${Math.floor(z / conceal.cell)}`;
             cTmp.count.set(ck, (cTmp.count.get(ck) || 0) + 1);
+            const bk = (Math.floor(x / BC.cell) + 4096) * 8192 + (Math.floor(z / BC.cell) + 4096);
+            let e = band.get(bk);
+            if (!e) band.set(bk, (e = { n: 0, x: 0, z: 0, y: 0, h: 0, b: 0 }));
+            e.n++;
+            e.x += x;
+            e.z += z;
+            e.y += y;
+            e.h += h * Math.cos(tilt);
+            e.b += b;
           }
         }
       }
@@ -872,7 +974,8 @@ export class Vegetation {
       color: new THREE.Color(1, 1, 1).multiplyScalar(C.cardShade),
       map: sunflowerCardTexture(SH, { cardW: CARD.w, cardH: CARD.h, bottom: CARD.bottom, variants: CARD.variants }),
       alphaTest: 0.5,
-      alphaToCoverage: true,
+      // 알파 → 표본 덮개는 MSAA 문맥에서만 (없으면 셰이더가 그냥 문턱으로)
+      alphaToCoverage: !!CONFIG.render.antialias,
       side: THREE.DoubleSide,
     });
     patchSunflowerCard(cardMat);
@@ -892,7 +995,74 @@ export class Vegetation {
       this.sunCards.push(mesh);
       this.root.add(mesh);
     }
+    this.buildSunflowerBand(band, bounds);
     this.buildSunflowerConcealers(cTmp.count);
+  }
+
+  // 원거리 밭 띠: 선 줄기가 있는 칸마다 카드 1장 (칸 중심 = 줄기 평균 위치, 키 = 평균 키, 색 = 평균 밝기). 정적 버퍼, 드로우콜 1개
+  buildSunflowerBand(cells, bounds) {
+    const S = CONFIG.vegetation.sunflower;
+    const B = S.band;
+    const meanH = (S.height[0] + S.height[1]) / 2;
+    const sp = MAP.playerSpawn;
+    const list = [...cells.values()].filter((e) => e.n > 0);
+    // 시작 위치(수로)에서 가까운 칸부터 (앞에서 뒤로 그려 겹침 비용을 줄임)
+    for (const e of list) {
+      e.x /= e.n;
+      e.z /= e.n;
+      e.d = Math.hypot(e.x - sp.x, e.z - sp.z);
+    }
+    list.sort((a, b) => a.d - b.d);
+    this.stats.sunflowerBand = list.length;
+    if (!list.length) return;
+    // 카드: 폭 tileW, 높이 tileH (아래 끝 = 지면 아래 CARD.bottom), 앞면 +z (셰이더가 카메라 쪽으로 돌린다)
+    const gb = new GeoBuilder();
+    const W = B.tileW / 2;
+    const y0 = -CARD.bottom;
+    const y1 = B.tileH - CARD.bottom;
+    const n0 = new THREE.Vector3(0, 0.32, 1);
+    const a = gb.v(new THREE.Vector3(-W, y0, 0), n0, null, 0, [0, 0]);
+    const b = gb.v(new THREE.Vector3(W, y0, 0), n0, null, 0, [1, 0]);
+    const c = gb.v(new THREE.Vector3(W, y1, 0), n0, null, 0, [1, 1]);
+    const d = gb.v(new THREE.Vector3(-W, y1, 0), n0, null, 0, [0, 1]);
+    gb.tri(a, b, c);
+    gb.tri(a, c, d);
+    const geo = gb.build({ uv: true });
+    const aBand = new Float32Array(list.length * 2);
+    const mat = new THREE.MeshLambertMaterial({
+      color: new THREE.Color(1, 1, 1).multiplyScalar(S.cardShade * B.shade),
+      map: sunflowerBandTexture(
+        SUNFLOWER_SHAPE,
+        { cardW: CARD.w, cardH: CARD.h, bottom: CARD.bottom, variants: CARD.variants },
+        { tile: B.tilePx, w: B.tileW, h: B.tileH, bottom: CARD.bottom, counts: B.counts, spread: B.spread, height: S.height },
+      ),
+      alphaTest: 0.5,
+      alphaToCoverage: !!CONFIG.render.antialias,
+    });
+    patchSunflowerBand(mat);
+    const mesh = new THREE.InstancedMesh(geo, mat, list.length);
+    const col = new THREE.Color();
+    const rng = new Random(CONFIG.world.seed + 313);
+    list.forEach((e, i) => {
+      _m4.makeTranslation(e.x, e.y / e.n, e.z);
+      mesh.setMatrixAt(i, _m4);
+      const k = e.b / e.n;
+      mesh.setColorAt(i, col.setRGB(k, k * 0.97, k * 0.94));
+      aBand[i * 2] = (e.h / e.n / meanH) * (1 + B.heightJitter * rng.range(-1, 1));
+      aBand[i * 2 + 1] = e.n;
+    });
+    geo.setAttribute('aBand', new THREE.InstancedBufferAttribute(aBand, 2));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.boundingSphere = new THREE.Sphere(
+      new THREE.Vector3((bounds.x0 + bounds.x1) / 2, this.terrain.heightAt((bounds.x0 + bounds.x1) / 2, (bounds.z0 + bounds.z1) / 2) + 1, (bounds.z0 + bounds.z1) / 2),
+      Math.hypot(bounds.x1 - bounds.x0, bounds.z1 - bounds.z0) / 2 + 15,
+    );
+    mesh.name = 'sunflowerBand';
+    this.sunBand = mesh;
+    this.root.add(mesh);
   }
 
   // 선 줄기가 충분히 빽빽한 칸만 은폐 볼륨 (같은 줄 이웃 칸은 띠로 합침) — 빈 구간·쓰러진 띠·구덩이 둘레는 은폐가 없다

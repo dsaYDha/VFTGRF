@@ -41,7 +41,10 @@ export class DebugOverlay {
     this.matFpFree = noDepth(0x8a8a8a, { opacity: 0.6 });
     this.matFpUsed = noDepth(0xffa030);
     this.enemyGeo = new THREE.BoxGeometry(0.7, 1.8, 0.7);
-    this.estGeo = new THREE.SphereGeometry(0.45, 10, 8);
+    // 추정 위치: 가운데 작은 구 + 지면 고리 (반지름 = 오차). 예전처럼 오차만큼 큰 구를 그리면 추정이 맞을 때
+    // 구가 내 눈앞에 와서 화면을 덮으므로, 오차는 땅 위 고리 선으로만 보이고 가까운 구는 숨긴다
+    const E = CONFIG.debug.estimate;
+    this.estGeo = new THREE.SphereGeometry(E.marker, 10, 8);
     this.fpGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.06, 12);
     this.enemyMeshes = [];
     this.estMeshes = [];
@@ -78,6 +81,20 @@ export class DebugOverlay {
     this.estLineGeo.setAttribute('position', new THREE.BufferAttribute(this.estLinePos, 3));
     this.estLines = new THREE.LineSegments(this.estLineGeo, new THREE.LineBasicMaterial({ color: 0xff4040, depthTest: false, fog: false, transparent: true, opacity: 0.6 }));
     this.group.add(this.estLines);
+    // 추정 오차 고리 (적 16명분을 선분 하나로, 드로우콜 1)
+    this.ringCos = [];
+    this.ringSin = [];
+    for (let i = 0; i <= E.ringSegments; i++) {
+      this.ringCos.push(Math.cos((i / E.ringSegments) * Math.PI * 2));
+      this.ringSin.push(Math.sin((i / E.ringSegments) * Math.PI * 2));
+    }
+    this.ringGeo = new THREE.BufferGeometry();
+    this.ringPos = new Float32Array(16 * E.ringSegments * 6);
+    this.ringGeo.setAttribute('position', new THREE.BufferAttribute(this.ringPos, 3));
+    this.estRings = new THREE.LineSegments(this.ringGeo, new THREE.LineBasicMaterial({ color: 0xff3a30, depthTest: false, fog: false, transparent: true, opacity: 0.85 }));
+    this.estRings.frustumCulled = false;
+    this.estRings.renderOrder = 11;
+    this.group.add(this.estRings);
     // 탄도 궤적
     this.trails = [];
     const maxPts = 60000;
@@ -237,6 +254,10 @@ export class DebugOverlay {
       this.group.add(e);
       this.estMeshes.push(e);
     }
+    const E = CONFIG.debug.estimate;
+    const cam = g.camera.position;
+    const col = g.world.collision;
+    const seg = E.ringSegments;
     let li = 0;
     ais.forEach((ai, i) => {
       const m = this.enemyMeshes[i];
@@ -245,18 +266,37 @@ export class DebugOverlay {
       m.position.copy(_v);
       m.visible = true;
       m.material = this.matEnemy;
-      const alive = ai.s.alive;
-      e.visible = alive && ai.perception.has;
-      if (e.visible) {
-        e.position.copy(ai.perception.estimate);
-        const s = Math.max(0.6, Math.min(4, ai.perception.effectiveSigma() * 0.25));
-        e.scale.setScalar(s);
-        if (li < 16) {
-          ai.s.getEyePos(_w);
-          this.estLinePos.set([_w.x, _w.y, _w.z, e.position.x, e.position.y, e.position.z], li * 6);
-          li++;
-        }
+      const has = ai.s.alive && ai.perception.has;
+      e.visible = false;
+      if (!has || li >= 16) return;
+      const est = ai.perception.estimate;
+      e.position.copy(est);
+      // 카메라 바로 앞(추정이 내 위치와 거의 같을 때)이면 구를 숨긴다 — 고리와 연결선만 남는다
+      e.visible = est.distanceTo(cam) > E.hideNear;
+      ai.s.getEyePos(_w);
+      this.estLinePos.set([_w.x, _w.y, _w.z, est.x, est.y, est.z], li * 6);
+      // 지면 고리: 반지름 = 추정 오차 (1σ), 정점마다 지면(지형·밟을 수 있는 충돌체 윗면) 높이를 따라 휜다
+      const r = Math.max(E.ringRadius[0], Math.min(E.ringRadius[1], ai.perception.effectiveSigma()));
+      const P = this.ringPos;
+      let o = li * seg * 6;
+      let px = est.x + r;
+      let pz = est.z;
+      let py = col.groundHeight(px, pz, est.y + 0.3) + E.ringLift;
+      for (let k = 1; k <= seg; k++) {
+        const qx = est.x + this.ringCos[k] * r;
+        const qz = est.z + this.ringSin[k] * r;
+        const qy = col.groundHeight(qx, qz, est.y + 0.3) + E.ringLift;
+        P[o++] = px;
+        P[o++] = py;
+        P[o++] = pz;
+        P[o++] = qx;
+        P[o++] = qy;
+        P[o++] = qz;
+        px = qx;
+        py = qy;
+        pz = qz;
       }
+      li++;
     });
     for (let i = ais.length; i < this.enemyMeshes.length; i++) {
       this.enemyMeshes[i].visible = false;
@@ -264,6 +304,8 @@ export class DebugOverlay {
     }
     this.estLineGeo.setDrawRange(0, li * 2);
     this.estLineGeo.attributes.position.needsUpdate = true;
+    this.ringGeo.setDrawRange(0, li * seg * 2);
+    this.ringGeo.attributes.position.needsUpdate = true;
     for (const m of this.fpMeshes) m.material = m.userData.fp.occupiedBy ? this.matFpUsed : this.matFpFree;
     if (this.trailsDirty) this.rebuildTrails();
     this.updateLabels(ais);
@@ -275,6 +317,8 @@ export class DebugOverlay {
     const W = window.innerWidth;
     const H = window.innerHeight;
     const seen = new Set();
+    const shown = this.shownLabels || (this.shownLabels = []);
+    shown.length = 0;
     for (const ai of ais) {
       seen.add(ai);
       let el = this.labels.get(ai);
@@ -294,8 +338,6 @@ export class DebugOverlay {
         continue;
       }
       el.style.display = '';
-      el.style.left = `${((_v.x + 1) / 2) * W}px`;
-      el.style.top = `${((1 - _v.y) / 2) * H}px`;
       const sup = ai.s.suppression;
       const lvl = ai.s.alive ? sup.level : 0;
       const dist = Math.round(ai.pos.distanceTo(this.game.player.pos));
@@ -305,12 +347,45 @@ export class DebugOverlay {
       const fill = el.querySelector('.dbg-bar-fill');
       fill.style.width = `${sup.value}%`;
       fill.style.background = ai.s.alive ? LEVEL_COLORS[lvl] : '#555';
+      shown.push({ el, x: ((_v.x + 1) / 2) * W, y: ((1 - _v.y) / 2) * H, d: dist, w: 0, h: 0 });
     }
     for (const [ai, el] of this.labels) {
       if (!seen.has(ai)) {
         el.remove();
         this.labels.delete(ai);
       }
+    }
+    this.stackLabels(shown);
+  }
+
+  // 화면에서 겹치는 이름표를 위로 쌓는다 (가까운 적이 제자리, 먼 적이 위로). 밀려난 이름표는 머리까지 가는 가는 선을 단다.
+  // 크기는 글자를 다 바꾼 뒤 한 번에 읽고(레이아웃 1회) 위치는 그 뒤에 쓴다
+  stackLabels(items) {
+    const gap = CONFIG.debug.labelGap;
+    for (const it of items) {
+      it.w = it.el.offsetWidth;
+      it.h = it.el.offsetHeight;
+    }
+    items.sort((a, b) => a.d - b.d);
+    const placed = [];
+    for (const it of items) {
+      const x0 = it.x - it.w / 2;
+      const x1 = it.x + it.w / 2;
+      let y = it.y; // 이름표 아래 끝 (transform: translate(-50%, -100%))
+      for (let pass = 0; pass < items.length; pass++) {
+        let moved = false;
+        for (const p of placed) {
+          if (x0 < p.x1 && x1 > p.x0 && y - it.h < p.y1 && y > p.y0) {
+            y = p.y0 - gap;
+            moved = true;
+          }
+        }
+        if (!moved) break;
+      }
+      placed.push({ x0, x1, y0: y - it.h, y1: y });
+      it.el.style.left = `${it.x}px`;
+      it.el.style.top = `${y}px`;
+      it.el.style.setProperty('--lead', `${Math.max(0, it.y - y)}px`);
     }
   }
 

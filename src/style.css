@@ -207,6 +207,16 @@ body {
   white-space: nowrap;
   font-size: 11px;
 }
+/* 겹쳐서 위로 밀려난 이름표 → 원래 자리(적 머리 위)까지 가는 선 (--lead = 밀려난 높이, DebugOverlay.stackLabels) */
+.dbg-label::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: var(--lead, 0px);
+  background: rgba(255, 255, 255, 0.45);
+}
 .dbg-bar {
   position: relative;
   width: 90px;

@@ -5,6 +5,9 @@
 //  조준(우클릭) 시 눈이 가늠자 뒤에 오고 장면 카메라와 같은 시야각으로 그려
 //  가늠쇠 기둥이 실제 각크기(약 3mrad)로 보인다. 가늠쇠 끝 = 화면 중앙 = 설정 거리의 탄착점.
 //  가늠자 거리를 바꾸면 총이 가늠쇠 끝을 축으로 영점 앙각만큼 들리고 가늠자 판이 그만큼 올라간다.
+//  조준 시 총몸(가늠자 받침·기관부·총열 덮개·손·소매)은 정점 셰이더에서 눈을 축으로 아래로 돌려
+//  화면 아래 약 20% 안에만 남긴다. 가늠자 판·U홈·가늠쇠는 제자리(실제 치수·영점 그대로)이고,
+//  판 아래는 판보다 좁은 받침 기둥만 이어진다. 모든 재질은 불투명이다 (반투명 겹침·깊이 사전 패스 없음).
 //  부품은 재질별로 병합해 드로우콜을 줄이고, 깊이 버퍼를 비운 뒤 따로 그려 벽·비탈에 파묻히지 않게 한다.
 //  조명은 매 프레임 장면의 반구광·태양광·주변광을 카메라 기준으로 옮겨 와 장면과 같은 빛을 받는다 (안개 없음).
 // =============================================================================
@@ -37,11 +40,9 @@ const KEEP_ATTR = new Set(['position', 'normal', 'uv', 'color']);
 
 // ---------------------------------------------------------------------------
 // 부품을 재질 키별로 모았다가 하나의 메시로 병합 (부품 색은 정점 색)
-// renderOrder: 손·팔(0)을 먼저, 총(1)을 나중에 그려 조준 시 흐릿한 총몸 너머로 손이 비치게 한다
 class PartSet {
-  constructor(renderOrder = 1) {
+  constructor() {
     this.lists = new Map();
-    this.renderOrder = renderOrder;
   }
 
   add(key, geo, color, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) {
@@ -92,7 +93,6 @@ class PartSet {
       for (const g of list) g.dispose();
       const mesh = new THREE.Mesh(merged, materials[key]);
       mesh.frustumCulled = false;
-      mesh.renderOrder = this.renderOrder || 0;
       parent.add(mesh);
       meshes.push(mesh);
     }
@@ -101,9 +101,9 @@ class PartSet {
   }
 }
 
-// 축이 Z 인 원기둥 (rBack: +Z 쪽 반지름, rFront: -Z 쪽)
-function cylZ(rBack, len, seg = 12, rFront = rBack) {
-  return new THREE.CylinderGeometry(rBack, rFront, len, seg).rotateX(Math.PI / 2);
+// 축이 Z 인 원기둥 (rBack: +Z 쪽 반지름, rFront: -Z 쪽, hSeg: 길이 방향 마디 수 — 조준 시 휘어 내려가는 구간용)
+function cylZ(rBack, len, seg = 12, rFront = rBack, hSeg = 1) {
+  return new THREE.CylinderGeometry(rBack, rFront, len, seg, hSeg).rotateX(Math.PI / 2);
 }
 
 const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
@@ -235,29 +235,32 @@ function laminateTexture(hex) {
   return t;
 }
 
-// 가늠자 판 뒷면 실루엣 (U홈 포함). 가장자리를 blur 폭만큼 부드럽게 (가까워서 초점이 맞지 않는 느낌)
-// 판 영역: x ∈ [-W/2, W/2], y ∈ [-H, 0]. 텍스처는 여백 blur 를 더한 평면에 입힌다.
-function rearSightAlpha(W, H, nw, nd, blur, pxW = 256, pxH = 128) {
+// 가늠자 판 뒷면 실루엣 (U홈 포함). 네 가장자리와 U홈을 모두 blur 폭만큼 부드럽게 (가까워서 초점이 맞지 않는 느낌)
+// 판 영역: x ∈ [-W/2, W/2], y ∈ [-H, 0]. 텍스처는 사방에 blur 여백을 더한 평면에 입힌다.
+// 판 아래 가운데(받침 기둥이 이어지는 폭 Wc)는 아래 가장자리를 흐리지 않고 끝까지 불투명하게 둔다.
+function rearSightAlpha(W, H, nw, nd, blur, Wc, pxW = 256, pxH = 192) {
   const c = document.createElement('canvas');
   c.width = pxW;
   c.height = pxH;
   const g = c.getContext('2d');
   const img = g.createImageData(pxW, pxH);
   const PW = W + blur * 2;
-  const PH = H + blur;
+  const PH = H + blur * 2;
   const r = nw / 2;
   const cy = -nd + r;
   for (let j = 0; j < pxH; j++) {
     const y = blur - ((j + 0.5) / pxH) * PH;
     for (let i = 0; i < pxW; i++) {
       const x = -PW / 2 + ((i + 0.5) / pxW) * PW;
-      // 판(사각형) 바깥이 양수인 거리 (아래쪽은 받침에 이어지므로 불투명)
-      const sdRect = Math.max(Math.abs(x) - W / 2, y);
+      // 판(사각형) 바깥이 양수인 거리
+      const sdRect = Math.max(Math.abs(x) - W / 2, y, -H - y);
+      // 받침 기둥 띠 (판 아래로 이어짐)
+      const sdCol = Math.max(Math.abs(x) - Wc / 2, y + H * 0.5);
       // U홈: 위로 열린 홈 + 둥근 바닥
       const sdSlot = Math.max(Math.abs(x) - r, cy - y);
       const sdCirc = Math.hypot(x, y - cy) - r;
       const sdU = Math.min(sdSlot, sdCirc);
-      const sd = Math.max(sdRect, -sdU);
+      const sd = Math.max(Math.min(sdRect, sdCol), -sdU);
       const a = smoothstep(blur / 2, -blur / 2, sd);
       const v = Math.round(a * 255);
       const k = (j * pxW + i) * 4;
@@ -271,6 +274,31 @@ function rearSightAlpha(W, H, nw, nd, blur, pxW = 256, pxH = 128) {
   t.minFilter = THREE.LinearFilter;
   t.magFilter = THREE.LinearFilter;
   return { tex: t, PW, PH };
+}
+
+// 받침 기둥 뒷면: 폭 Wc, 양옆만 blur 폭만큼 부드럽다 (세로로 늘여 쓴다)
+function columnAlpha(Wc, blur, pxW = 128) {
+  const c = document.createElement('canvas');
+  c.width = pxW;
+  c.height = 4;
+  const g = c.getContext('2d');
+  const img = g.createImageData(pxW, 4);
+  const PW = Wc + blur * 2;
+  for (let i = 0; i < pxW; i++) {
+    const x = -PW / 2 + ((i + 0.5) / pxW) * PW;
+    const v = Math.round(smoothstep(blur / 2, -blur / 2, Math.abs(x) - Wc / 2) * 255);
+    for (let j = 0; j < 4; j++) {
+      const k = (j * pxW + i) * 4;
+      img.data[k] = img.data[k + 1] = img.data[k + 2] = v;
+      img.data[k + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.generateMipmaps = false;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  return { tex: t, PW };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +385,7 @@ export class ViewModel {
 
     this.blend = { ads: 0, sprint: 0, reload: 0, bolt: 0, down: 0 };
     this.boltPose = 0; // 재장전 애니메이션이 정하는 장전손잡이 자세 비율
-    this.pose = [0, 0, 0, 0, 0, 0];
+    this.pose = [0, 0, 0, 0, 0, 0, 0, 0, 0]; // 총 위치(3)·회전(3)·왼쪽 어깨 이동(3)
     this.kick = 0;
     this.kickRot = 0;
     this.kickVel = 0;
@@ -384,12 +412,11 @@ export class ViewModel {
 
   makeMaterials() {
     const C = this.V.colors;
-    // 조준 시 눈 바로 앞 부분을 흐릿하게 (x: 시작 거리, y: 완전히 보이는 거리, z: 남는 불투명도, w: 조준 정도)
-    this.nearFade = { value: new THREE.Vector4(this.V.adsNearFade[0], this.V.adsNearFade[1], this.V.adsGhostAlpha, 0) };
-    // 조준 시 가늠자 판 아래 ~ 화면 아래 20% 선 사이(조준선 아래 각의 tan): x→y 에서 흐려지고 z→w 에서 다시 또렷해진다
-    this.adsBand = { value: new THREE.Vector4(this.V.adsBandTop[0], this.V.adsBandTop[1], 0.3, 0.4) };
-    this.adsBandAlpha = { value: this.V.adsBandAlpha };
-    const std = (o) => this.withNearFade(new THREE.MeshStandardMaterial({ vertexColors: true, ...o }));
+    // 조준 시 총몸 내리기: x = 눈을 축으로 아래로 돌리는 각, y→z = 회전이 0 → 최대가 되는 깊이 (카메라 기준 z)
+    // 가늠쇠 블록(y 보다 앞)은 제자리에 남아 총열과 이어지고, 그 뒤 총몸 전체가 함께 내려간다
+    const T = this.V.adsTuck;
+    this.adsTuck = { value: new THREE.Vector3(0, this.zF + T.zFrom, this.zF + T.zTo) };
+    const std = (o) => this.withAdsTuck(new THREE.MeshStandardMaterial({ vertexColors: true, ...o }));
     this.mats = {
       // 무광 흑회색 금속 (부품 색은 정점 색)
       metal: std({ roughness: 0.55, metalness: 0.2 }),
@@ -398,32 +425,33 @@ export class ViewModel {
       glove: std({ roughness: 0.92, metalness: 0 }),
       // 탄창: 폴리머 (색은 재질, 정점 색은 밝기 배율)
       mag: std({ color: C.magazine, roughness: 0.72, metalness: 0 }),
+      // 가늠자 판·받침 기둥: 조준 시에도 제자리 (내리지 않는다)
+      sight: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.62, metalness: 0.15 }),
     };
-    this.depthOnly = new THREE.MeshBasicMaterial({ colorWrite: false });
-    this.sleeveMat = this.withNearFade(new THREE.MeshStandardMaterial({ map: camoAtlas(), roughness: 0.95, metalness: 0 }));
-    this.tapeMat = this.withNearFade(new THREE.MeshStandardMaterial({ color: CONFIG.factions.friendly.tapeColor, roughness: 0.8 }));
+    this.sleeveMat = this.withAdsTuck(new THREE.MeshStandardMaterial({ map: camoAtlas(), roughness: 0.95, metalness: 0 }));
+    this.tapeMat = this.withAdsTuck(new THREE.MeshStandardMaterial({ color: CONFIG.factions.friendly.tapeColor, roughness: 0.8 }));
   }
 
-  // 셰이더에 조준 시 흐림을 끼워 넣는다 (조준하지 않을 때는 불투명 그대로).
-  //  1) 눈 바로 앞(가까운 기관부 덮개)은 두 눈을 뜨고 볼 때처럼 반투명
-  //  2) 가늠자 판 아래 ~ 화면 아래 20% 선 사이의 총몸은 더 옅게 (가늠자·가늠쇠와 표적 주변을 가리지 않게)
-  withNearFade(mat) {
-    mat.transparent = true;
-    const uni = this.nearFade;
-    const band = this.adsBand;
-    const bandA = this.adsBandAlpha;
+  // 정점 셰이더에 조준 시 총몸 내리기를 끼워 넣는다 (조준하지 않을 때는 각이 0 → 그대로).
+  //  카메라 기준 좌표를 눈을 축으로 아래로 돌린다: 화면에서 총몸 전체가 원근 그대로 아래로 내려가고 빛(법선)도 같이 돈다.
+  //  회전각은 깊이에 따라 가늠쇠 블록 뒤에서 0 → 최대로 부드럽게 늘어 총열이 끊기지 않는다.
+  withAdsTuck(mat) {
+    const uni = this.adsTuck;
     mat.onBeforeCompile = (sh) => {
-      sh.uniforms.uNearFade = uni;
-      sh.uniforms.uAdsBand = band;
-      sh.uniforms.uAdsBandAlpha = bandA;
-      sh.fragmentShader = 'uniform vec4 uNearFade;\nuniform vec4 uAdsBand;\nuniform float uAdsBandAlpha;\n' + sh.fragmentShader.replace(
-        '#include <alphamap_fragment>',
-        `#include <alphamap_fragment>
-        float vmNear = mix(uNearFade.z, 1.0, smoothstep(uNearFade.x, uNearFade.y, length(vViewPosition)));
-        float vmTan = vViewPosition.y / max(vViewPosition.z, 1e-4);
-        float vmBand = smoothstep(uAdsBand.x, uAdsBand.y, vmTan) * (1.0 - smoothstep(uAdsBand.z, uAdsBand.w, vmTan));
-        vmNear = min(vmNear, mix(1.0, uAdsBandAlpha, vmBand));
-        diffuseColor.a *= mix(1.0, vmNear, uNearFade.w);`,
+      sh.uniforms.uAdsTuck = uni;
+      sh.vertexShader = 'uniform vec3 uAdsTuck;\n' + sh.vertexShader.replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+        float vmA = uAdsTuck.x * smoothstep( uAdsTuck.y, uAdsTuck.z, mvPosition.z );
+        if ( vmA > 0.0 ) {
+          float vmC = cos( vmA );
+          float vmS = sin( vmA );
+          mvPosition.yz = vec2( mvPosition.y * vmC + mvPosition.z * vmS, mvPosition.z * vmC - mvPosition.y * vmS );
+          gl_Position = projectionMatrix * mvPosition;
+          #ifndef FLAT_SHADED
+          vNormal = normalize( vec3( vNormal.x, vNormal.y * vmC + vNormal.z * vmS, vNormal.z * vmC - vNormal.y * vmS ) );
+          #endif
+        }`,
       );
     };
     return mat;
@@ -458,9 +486,9 @@ export class ViewModel {
     // 총구 (검은 구멍)
     ps.add('metal', new THREE.CircleGeometry(0.0045, 12).rotateY(Math.PI), 0x050505, 0, yB, zMz - 0.0851);
 
-    // ---- 총열·가스 피스톤 관·청소봉
-    ps.add('metal', cylZ(0.0088, 0.36, 12), M, 0, yB, -0.48);
-    ps.add('metal', cylZ(0.0028, 0.17, 6), MD, 0, yB - 0.0165, -0.565);
+    // ---- 총열·가스 피스톤 관·청소봉 (조준 시 가늠쇠 블록 뒤에서 휘어 내려가므로 길이 방향으로 잘게 나눈다)
+    ps.add('metal', cylZ(0.0088, 0.36, 12, 0.0088, 12), M, 0, yB, -0.48);
+    ps.add('metal', cylZ(0.0028, 0.17, 6, 0.0028, 6), MD, 0, yB - 0.0165, -0.565);
 
     // ---- 가늠쇠 블록 (총열 고리 + 탑 + 보호 귀 + 기둥)
     ps.add('metal', box(0.023, 0.026, 0.05), M, 0, yB, zF);
@@ -609,7 +637,9 @@ export class ViewModel {
     this.rifle.add(this.flash2);
   }
 
-  // 가늠자: 앞쪽 경첩을 축으로 도는 판 + 뒤 끝의 U홈 판 + 거리 조절 슬라이더
+  // 가늠자: 앞쪽 경첩을 축으로 도는 판 + 뒤 끝의 U홈 판 + 거리 조절 슬라이더 + 판 아래 받침 기둥.
+  //  눈에서 25cm 라 초점이 맞지 않으므로 판·기둥의 눈 쪽 실루엣 전체(위·옆·모서리·U홈)를 흐린 덮개 평면이 그리고,
+  //  밑의 상자들은 흐림 폭 안쪽으로 줄여 딱딱한 모서리가 드러나지 않게 한다. 슬라이더도 판 실루엣 안에 들어간다.
   buildRearSight() {
     const V = this.V;
     const C = V.colors;
@@ -626,44 +656,77 @@ export class ViewModel {
     const W = V.rearLeafWidth;
     const nw = V.rearNotchWidth;
     const nd = V.rearNotchDepth;
-    const b2 = V.rearSightBlur / 2;
+    const blur = V.rearSightBlur;
+    const b2 = blur / 2;
+    const Wc = V.rearColumn.width;
     const plateH = 0.0105;
     const t = 0.0028;
+    const SC = C.sight;
     // 판 (경첩에서 U홈 판까지)
-    ps.add('metal', box(W * 0.86, 0.0025, L - t), C.metal, 0, -0.0095 - hingeY, zN - (L - t) / 2 - t - hz);
-    // U홈 판: 흐림 가장자리 안쪽으로 b2 만큼 줄인 상자 (가장자리는 흐린 덮개 평면이 그린다)
+    ps.add('sight', box(W * 0.8, 0.0025, L - t), SC, 0, -0.0095 - hingeY, zN - (L - t) / 2 - t - hz);
+    // U홈 판: 흐림 가장자리 안쪽으로 b2 만큼 (위·옆·아래 모두) 줄인 상자 (가장자리는 흐린 덮개 평면이 그린다)
     const zPlate = zN - t / 2 - hz;
     const shW = W / 2 - nw / 2 - 2 * b2;
-    for (const s of [-1, 1]) ps.add('metal', box(shW, plateH - b2, t), C.metalDark, s * (nw / 2 + b2 + shW / 2), -(plateH + b2) / 2 - hingeY, zPlate);
-    ps.add('metal', box(nw + 2 * b2, plateH - nd - b2, t), C.metalDark, 0, -plateH + (plateH - nd - b2) / 2 - hingeY, zPlate);
+    const shH = plateH - 2 * b2;
+    for (const s of [-1, 1]) ps.add('sight', box(shW, shH, t), SC, s * (nw / 2 + b2 + shW / 2), -plateH / 2 - hingeY, zPlate);
+    const brH = plateH - nd - 2 * b2;
+    ps.add('sight', box(nw + 2 * b2, brH, t), SC, 0, -plateH + b2 + brH / 2 - hingeY, zPlate);
     // 경첩
-    ps.add('metal', new THREE.CylinderGeometry(0.0025, 0.0025, W * 0.9, 8).rotateZ(Math.PI / 2), C.metal, 0, 0, 0);
+    ps.add('sight', new THREE.CylinderGeometry(0.0025, 0.0025, W * 0.8, 8).rotateZ(Math.PI / 2), SC, 0, 0, 0);
     ps.build(this.leaf, this.mats);
 
-    // 흐린 가장자리 덮개 (판 뒷면, 눈 쪽)
-    const { tex, PW, PH } = rearSightAlpha(W, plateH, nw, nd, V.rearSightBlur);
+    // 흐린 가장자리 덮개 (판 뒷면, 눈 쪽): 판 실루엣 + 아래로 이어지는 받침 기둥 띠
+    const { tex, PW, PH } = rearSightAlpha(W, plateH, nw, nd, blur, Wc);
     const om = new THREE.MeshStandardMaterial({
-      color: C.metalDark,
-      roughness: 0.55,
-      metalness: 0.2,
+      color: SC,
+      roughness: 0.62,
+      metalness: 0.15,
       alphaMap: tex,
       transparent: true,
       depthWrite: false,
     });
+    this.overlayMat = om;
     const overlay = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), om);
-    overlay.position.set(0, V.rearSightBlur - PH / 2 - hingeY, zN + 0.0002 - hz);
+    overlay.position.set(0, blur - PH / 2 - hingeY, zN + 0.0002 - hz);
     overlay.renderOrder = 2;
     overlay.frustumCulled = false;
     this.leaf.add(overlay);
     this.notchOverlay = overlay;
 
-    // 거리 조절 슬라이더 (판 위를 앞뒤로 움직인다)
+    // 거리 조절 슬라이더 (판 위를 앞뒤로 움직인다). 날개 끝까지 판 실루엣의 불투명한 부분 안에 들어가는 폭
     const sp = new PartSet();
-    sp.add('metal', box(W * 1.05, 0.004, 0.011), C.metal, 0, 0, 0);
-    for (const s of [-1, 1]) sp.add('metal', box(0.003, 0.0035, 0.006), C.metalDark, s * (W * 0.525 + 0.0015), 0, 0);
+    const slW = W * 0.8;
+    sp.add('sight', box(slW, 0.004, 0.011), SC, 0, 0, 0);
+    for (const s of [-1, 1]) sp.add('sight', box(0.0012, 0.0035, 0.006), SC, s * (slW / 2 + 0.0006), 0, 0);
     this.sightSlider = new THREE.Group();
     sp.build(this.sightSlider, this.mats);
     this.leaf.add(this.sightSlider);
+
+    // ---- 받침 기둥 (판 아래, 판보다 좁다): 평소에는 가늠자 받침 블록 안에 묻혀 있고,
+    //  조준 시 총몸이 내려가면 그만큼 아래로 늘어나 가늠자 판과 화면 아래쪽 총몸을 잇는다 (세로 배율 = 길이)
+    const RC = V.rearColumn;
+    this.column = new THREE.Group();
+    this.column.position.set(0, RC.top, 0);
+    this.rifle.add(this.column);
+    const cp = new PartSet();
+    // 옆에서 볼 때의 몸체 (흐림 폭만큼 안쪽, 판 아래 경첩 높이부터)
+    cp.add('sight', box(Wc - blur, 1, 0.045).translate(0, -0.5, 0), SC, 0, 0, zN - 0.0245);
+    cp.build(this.column, this.mats);
+    const ca = columnAlpha(Wc, blur);
+    const cm = new THREE.MeshStandardMaterial({
+      color: SC,
+      roughness: 0.62,
+      metalness: 0.15,
+      alphaMap: ca.tex,
+      transparent: true,
+      depthWrite: false,
+    });
+    const colOverlay = new THREE.Mesh(new THREE.PlaneGeometry(ca.PW, 1).translate(0, -0.5, 0), cm);
+    colOverlay.position.set(0, 0, zN + 0.0002);
+    colOverlay.renderOrder = 2;
+    colOverlay.frustumCulled = false;
+    this.column.add(colOverlay);
+    this.column.scale.y = RC.hipLength;
   }
 
   // 노리쇠 뭉치의 장전손잡이 (오른쪽) + 조정간
@@ -746,7 +809,7 @@ export class ViewModel {
     this.rifle.add(this.leftHand);
     const zc = -0.4;
     this.leftPivot = new THREE.Vector3(0, yB - 0.01, zc);
-    const lp = new PartSet(0);
+    const lp = new PartSet();
     // 손바닥 (왼쪽 아래에서 비스듬히 받친다)
     lp.add('glove', box(0.058, 0.022, 0.082), G, -0.02, yB - 0.046, zc + 0.002, 0, 0, -0.45);
     lp.add('glove', box(0.05, 0.02, 0.05), GD, -0.034, yB - 0.058, zc + 0.04, 0.35, 0, -0.5); // 손바닥 아래·손목 쪽
@@ -779,7 +842,7 @@ export class ViewModel {
     // ---- 오른손: 권총 손잡이 (검지는 방아쇠, 엄지는 왼쪽으로 감아 쥔다)
     this.rightHand = new THREE.Group();
     this.rifle.add(this.rightHand);
-    const rp = new PartSet(0);
+    const rp = new PartSet();
     const sp = this.gripSpine;
     // 손잡이 좌표계: 위 중심에서 손잡이 축을 따라 v, 앞쪽(F)으로 w, 오른쪽 u
     const gp = (u, v, w) => {
@@ -908,11 +971,13 @@ export class ViewModel {
     for (let i = 0; i < 3; i++) {
       o[i] = P.hip.p[i];
       o[i + 3] = P.hip.r[i];
+      o[i + 6] = P.hip.ls ? P.hip.ls[i] : 0;
     }
     const blendIn = (pose, t) => {
       for (let i = 0; i < 3; i++) {
         o[i] += ((pose ? pose.p[i] : 0) - o[i]) * t;
         o[i + 3] += ((pose ? pose.r[i] : 0) - o[i + 3]) * t;
+        o[i + 6] += ((pose && pose.ls ? pose.ls[i] : 0) - o[i + 6]) * t;
       }
     };
     blendIn(null, b.ads * (1 - b.reload));
@@ -931,7 +996,12 @@ export class ViewModel {
     const bp = pl.bobPhase;
     const bx = Math.cos(bp) * V.bob.x * bob;
     const by = Math.abs(Math.sin(bp)) * V.bob.y * bob;
-    this.nearFade.value.w = b.ads * (1 - b.reload);
+    // 조준 시 총몸 내리기 (전환 끝무렵부터 서서히) + 가늠자 받침 기둥 늘이기
+    const T = V.adsTuck;
+    const tuck = smoothstep(T.blendFrom, 1, b.ads * (1 - b.reload));
+    this.adsTuck.value.x = T.angle * tuck;
+    const RC = V.rearColumn;
+    this.column.scale.y = RC.hipLength + (RC.adsLength - RC.hipLength) * tuck;
     this.root.position.set(o[0] + bx, o[1] - by, o[2] + this.kick);
     this.root.rotation.set(o[3] + this.kickRot + pl.swayPitch * hipW, o[4] + pl.swayYaw * hipW, o[5]);
 
@@ -973,10 +1043,6 @@ export class ViewModel {
       this.camera.fov = cam.fov;
       this.camera.updateProjectionMatrix();
     }
-    // 흐린 띠의 아래 경계는 화면 비율로 (화면 아래 20% 선 = 반높이의 0.6)
-    const tanHalf = Math.tan((this.camera.fov * Math.PI) / 360);
-    this.adsBand.value.z = tanHalf * V.adsBandBottom[0];
-    this.adsBand.value.w = tanHalf * V.adsBandBottom[1];
   }
 
   updateZero(w) {
@@ -1120,13 +1186,15 @@ export class ViewModel {
     for (const [side, hand, wristLocal] of sides) {
       const arm = this.arms[side];
       arm.S.fromArray(V.shoulders[side]);
+      // 자세별 왼쪽 어깨 이동 (엉덩이 자세: 몸을 비틀어 왼쪽 어깨가 앞으로 나와 총열 덮개에 손이 닿는다)
+      if (side === 'left') arm.S.add(_p.set(this.pose[6], this.pose[7], this.pose[8]));
       _w.copy(wristLocal).applyMatrix4(hand.matrixWorld);
       solveElbow(arm.S, _w, V.upperArm, V.foreArm, arm.pole, _el);
       placeLimb(arm.upper, arm.S, _el);
       placeLimb(arm.fore, _el, _w);
       if (side === 'left') {
-        // 테이프: 위팔의 팔꿈치 쪽
-        this.tape.position.copy(arm.S).lerp(_el, 0.78);
+        // 테이프: 위팔 가운데 (엉덩이 자세에서 팔꿈치가 화면 아래 끝에 걸려도 밝은 테이프가 화면에 들어오지 않게)
+        this.tape.position.copy(arm.S).lerp(_el, 0.55);
         this.tape.quaternion.copy(arm.upper.quaternion);
       }
     }
@@ -1134,19 +1202,6 @@ export class ViewModel {
 
   render(renderer) {
     renderer.clearDepth();
-    if (this.nearFade.value.w > 0.01) {
-      // 조준 중: 깊이만 먼저 그려 픽셀마다 가장 앞 면만 남긴다 → 흐릿한 부분이 겹쳐 얼룩지지 않는다.
-      // (총구 화염·가늠자 흐림 덮개는 제외: 덮개가 깊이를 쓰면 U홈 너머 가늠쇠가 가려진다)
-      const f1 = this.flash.visible;
-      const f2 = this.flash2.visible;
-      this.flash.visible = this.flash2.visible = this.notchOverlay.visible = false;
-      this.scene.overrideMaterial = this.depthOnly;
-      renderer.render(this.scene, this.camera);
-      this.scene.overrideMaterial = null;
-      this.flash.visible = f1;
-      this.flash2.visible = f2;
-      this.notchOverlay.visible = true;
-    }
     renderer.render(this.scene, this.camera);
   }
 }

@@ -14,8 +14,11 @@ import { createVisualMaterials } from './visualMaterials.js';
 import { ContactShadows } from './ContactShadows.js';
 import { Distant } from './Distant.js';
 
-// 물웅덩이 재질: 흐린 하늘(지평선~천정 색)을 프레넬로 비추는 평평한 수면 (낮은 각도일수록 밝은 회색).
-// 안개·톤매핑은 표준 경로. 하늘색은 CONFIG.atmosphere 에서 읽고, 바꾸려면 userData.puddleUniforms 를 갱신.
+// 물웅덩이 재질: 흐린 하늘(지평선~천정 색)을 프레넬로 비추는 평평한 수면 (낮은 각도일수록 밝은 회색, 지평선 색을 넘지 않는다).
+// 정점 속성 aDepth = 그 자리 수심(m, 수면 - 렌더 지면). 물가(수심 0 근처)는 노이즈로 흔든 선을 따라 투명해져
+// 얕은 물 아래 진흙이 비치고, 수면 윤곽이 다각형 판처럼 보이지 않는다. 가파른 각도에서도 하늘이 minReflect 만큼 비쳐
+// 검은 구멍이 아니라 어두운 회색 물로 보인다. 안개·톤매핑은 표준 경로. 하늘색은 Atmosphere.applyToWorld 가
+// 톤매핑 전 값으로 바꿔 넣는다 (userData.puddleUniforms).
 function createPuddleMaterial() {
   const A = CONFIG.atmosphere;
   const P = CONFIG.ground.puddle;
@@ -32,6 +35,8 @@ function createPuddleMaterial() {
     uHorizon: { value: new THREE.Color(A.skyHorizon) },
     uZenith: { value: new THREE.Color(A.skyZenith) },
     uReflect: { value: P.reflect },
+    uMinRefl: { value: P.minReflect },
+    uEdge: { value: new THREE.Vector2(P.edgeSoft, P.edgeNoise) },
   };
   mat.name = 'puddle';
   mat.userData.puddleUniforms = uniforms;
@@ -39,10 +44,13 @@ function createPuddleMaterial() {
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, uniforms);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vPWPos;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      .replace('#include <common>', '#include <common>\nattribute float aDepth;\nvarying vec3 vPWPos;\nvarying float vPDepth;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvPDepth = aDepth;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform vec3 uHorizon;\nuniform vec3 uZenith;\nuniform float uReflect;\nvarying vec3 vPWPos;')
+      .replace(
+        '#include <common>',
+        '#include <common>\nuniform vec3 uHorizon;\nuniform vec3 uZenith;\nuniform float uReflect;\nuniform float uMinRefl;\nuniform vec2 uEdge;\nvarying vec3 vPWPos;\nvarying float vPDepth;',
+      )
       .replace(
         '#include <opaque_fragment>',
         `{
@@ -52,14 +60,19 @@ function createPuddleMaterial() {
           vec3 N = normalize(vec3(0.012 * sin(q.x + 1.7 * sin(q.y)), 1.0, 0.012 * sin(q.y * 1.3 + 1.1 * sin(q.x))));
           vec3 R = reflect(V, N);
           vec3 sky = mix(uHorizon, uZenith, pow(clamp(R.y, 0.0, 1.0), 0.55));
-          float fres = clamp(0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0), 0.0, 1.0);
+          float fres = max(uMinRefl, clamp(0.02 + 0.98 * pow(1.0 - clamp(-V.y, 0.0, 1.0), 5.0), 0.0, 1.0));
           outgoingLight = mix(outgoingLight, sky * uReflect, fres);
-          diffuseColor.a = mix(diffuseColor.a, 1.0, fres);
+          // 물가: 수심이 얕아지면 투명 (노이즈로 흔든 불규칙한 물가 선)
+          vec2 e = vPWPos.xz;
+          float en = sin(e.x * 3.7 + 1.9 * sin(e.y * 2.3)) * sin(e.y * 3.1 + 2.1 * sin(e.x * 1.7)) * 0.7
+            + sin(e.x * 9.3 - e.y * 7.1) * 0.3;
+          float edge = smoothstep(0.0, uEdge.x, vPDepth + en * uEdge.y);
+          diffuseColor.a = mix(diffuseColor.a, 1.0, fres) * edge;
         }
         #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'puddleSky';
+  mat.customProgramCacheKey = () => 'puddleSky2';
   return mat;
 }
 
@@ -126,71 +139,116 @@ export class World {
     return r;
   }
 
-  // 물웅덩이: 수로 물 구간, 깊은 구덩이 바닥, 바퀴 자국. 모두 평평한 수면이고 가장자리는 지형이 가린다.
-  // 흐린 하늘을 프레넬로 비춰 어두운 땅 위에 밝은 선·점으로 보인다 (원근감 단서).
+  // 물웅덩이: 수로 물 구간, 구덩이 물, 빗물 웅덩이, 바퀴·궤도 자국. 모두 평평한 수면이고 정점마다 수심(aDepth)을 넣는다
+  // (렌더 지면 기준 — 밭은 고랑 바닥만큼 내린 면). 물가 바깥으로 지형 속에 묻히는 여유 테를 둬서 지형이 윤곽을 자르고,
+  // 수심 0 근처는 재질이 투명하게 녹인다. 흐린 하늘을 프레넬로 비춰 어두운 땅 위에 밝은 선·점으로 보인다 (원근감 단서).
   buildPuddles() {
     const t = this.terrain;
     const pos = [];
+    const dep = [];
     const idx = [];
-    const pushQuadStrip = (pts) => {
-      // pts: [[xl,y,zl,xr,y,zr], ...]
+    const ground = (x, z) => t.heightAt(x, z) - t.renderDrop(x, z);
+    const depthAt = (x, y, z) => Math.max(-0.3, Math.min(0.6, y - ground(x, z)));
+    // 띠 (rows: [[x, z, nx, nz], ...], 가로 오프셋 offs, 행마다 수심 보정 fn(i, j))
+    const pushStrip = (rows, y, offs, depthFn) => {
       const base = pos.length / 3;
-      for (const p of pts) pos.push(p[0], p[1], p[2], p[3], p[4], p[5]);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = base + i * 2;
-        idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+      const nc = offs.length;
+      for (let i = 0; i < rows.length; i++) {
+        const [x, z, nx, nz, w] = rows[i];
+        for (let j = 0; j < nc; j++) {
+          const px = x + nx * offs[j] * w;
+          const pz = z + nz * offs[j] * w;
+          pos.push(px, y, pz);
+          dep.push(depthFn(i, j, px, pz));
+        }
+      }
+      for (let i = 0; i < rows.length - 1; i++) {
+        for (let j = 0; j < nc - 1; j++) {
+          const a = base + i * nc + j;
+          idx.push(a, a + 1, a + nc, a + 1, a + nc + 1, a + nc);
+        }
       }
     };
     for (const p of t.puddles) {
       if (p.type === 'canal') {
-        const pts = [];
+        // 수로 바닥 물: 바닥이 평평해 지형이 가장자리를 자르지 않으므로 가장자리 정점의 수심을 0 으로 둬 녹인다
+        const rows = [];
         const hw = MAP.canal.floorHalf * 0.92;
+        const ys = [];
         for (let x = p.x0; x <= p.x1; x += 2) {
           const zc = t.canalZ(x);
-          const y = t.heightAt(x, zc) + 0.07;
-          const w = hw * (0.75 + 0.25 * Math.sin(x * 0.3));
-          pts.push([x, y, zc - w, x, y, zc + w]);
+          ys.push(t.heightAt(x, zc) + 0.07);
+          rows.push([x, zc, 0, 1, hw * (0.75 + 0.25 * Math.sin(x * 0.3))]);
         }
-        pushQuadStrip(pts);
+        const base = pos.length / 3;
+        const offs = [-1, -0.62, 0, 0.62, 1];
+        for (let i = 0; i < rows.length; i++) {
+          const [x, zc, , , w] = rows[i];
+          for (let j = 0; j < offs.length; j++) {
+            const pz = zc + offs[j] * w;
+            pos.push(x, ys[i], pz);
+            dep.push(Math.abs(offs[j]) > 0.99 ? -0.01 : depthAt(x, ys[i], pz));
+          }
+        }
+        for (let i = 0; i < rows.length - 1; i++) {
+          for (let j = 0; j < offs.length - 1; j++) {
+            const a = base + i * offs.length + j;
+            idx.push(a, a + 1, a + offs.length, a + 1, a + offs.length + 1, a + offs.length);
+          }
+        }
       } else if (p.type === 'strip') {
-        // 바퀴 자국을 따라 길쭉한 수면
-        const pts = [];
+        // 바퀴·궤도 자국을 따라 길쭉한 수면: 자국 벽이 옆을 자르고, 양 끝은 수심을 줄여 둥글게 녹인다
         const L = p.pts;
+        const rows = [];
+        let total = 0;
+        const along = [0];
+        for (let i = 1; i < L.length; i++) along.push((total += Math.hypot(L[i][0] - L[i - 1][0], L[i][1] - L[i - 1][1])));
         for (let i = 0; i < L.length; i++) {
           const a = L[Math.max(0, i - 1)];
           const b = L[Math.min(L.length - 1, i + 1)];
           const dl = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-          const nx = -(b[1] - a[1]) / dl;
-          const nz = (b[0] - a[0]) / dl;
-          const w = p.hw * (0.85 + 0.15 * Math.sin(i * 1.7 + L[0][0]));
-          pts.push([L[i][0] - nx * w, p.level, L[i][1] - nz * w, L[i][0] + nx * w, p.level, L[i][1] + nz * w]);
+          rows.push([L[i][0], L[i][1], -(b[1] - a[1]) / dl, (b[0] - a[0]) / dl, p.hw]);
         }
-        pushQuadStrip(pts);
-      } else {
-        const seg = 16;
+        pushStrip(rows, p.level, [-1.6, -0.55, 0, 0.55, 1.6], (i, j, px, pz) => {
+          const sEnd = Math.min(along[i], total - along[i]);
+          return depthAt(px, p.level, pz) - 0.07 * (1 - Math.min(1, sEnd / 1.1)) ** 2;
+        });
+      } else if (p.rays) {
+        // 원판형 (구덩이·빗물 웅덩이): 방사선 윤곽 × 고리 비율 + 지형 속 여유 테
+        const n = p.rays.length;
+        const rings = [0.45, 0.72, 0.88, 0.96, 1.0];
+        const y = p.level;
         const base = pos.length / 3;
-        const y = p.level ?? (p.crater ? t.heightAt(p.x, p.z) + p.crater.d * 0.16 : t.heightAt(p.x, p.z) + 0.03);
         pos.push(p.x, y, p.z);
-        const st = p.stretch;
-        for (let i = 0; i <= seg; i++) {
-          const a = (i / seg) * Math.PI * 2;
-          const wob = 0.82 + 0.18 * Math.sin(a * 3 + p.x);
-          let dx = Math.cos(a) * p.r * wob;
-          let dz = Math.sin(a) * p.r * wob;
-          if (st) {
-            // 바퀴 자국 방향으로 길쭉하게
-            const along = dx * st[2];
-            const across = dz * 0.45;
-            dx = st[0] * along - st[1] * across;
-            dz = st[1] * along + st[0] * across;
+        dep.push(depthAt(p.x, y, p.z));
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          const ca = Math.cos(a);
+          const sa = Math.sin(a);
+          const R = p.rays[i];
+          for (const f of rings) {
+            const x = p.x + ca * R * f;
+            const z = p.z + sa * R * f;
+            pos.push(x, y, z);
+            dep.push(depthAt(x, y, z));
           }
-          pos.push(p.x + dx, y, p.z + dz);
+          const x = p.x + ca * (R + 0.3);
+          const z = p.z + sa * (R + 0.3);
+          pos.push(x, y, z);
+          dep.push(Math.min(-0.02, depthAt(x, y, z)));
         }
-        for (let i = 0; i < seg; i++) idx.push(base, base + 1 + i + 1, base + 1 + i);
+        const nr = rings.length + 1;
+        for (let i = 0; i < n; i++) {
+          const a = base + 1 + i * nr;
+          const b = base + 1 + ((i + 1) % n) * nr;
+          idx.push(base, b, a);
+          for (let r = 0; r < nr - 1; r++) idx.push(a + r, b + r, a + r + 1, b + r, b + r + 1, a + r + 1);
+        }
       }
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(dep, 1));
     const nor = new Float32Array(pos.length);
     for (let i = 1; i < nor.length; i += 3) nor[i] = 1;
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
@@ -199,6 +257,7 @@ export class World {
     const mesh = new THREE.Mesh(geo, createPuddleMaterial());
     mesh.name = 'puddles';
     mesh.renderOrder = 1;
+    this.puddleTriangleCount = idx.length / 3;
     return mesh;
   }
 

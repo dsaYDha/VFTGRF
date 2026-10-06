@@ -468,23 +468,26 @@ function gStubble(L) {
   }
 }
 
-// 2 마른 풀밭: 바랜 짚색(채도 낮게) + 회녹색 + 갈색 풀잎이 엉킨 바닥, 군데군데 풀 포기
+// 2 마른 풀밭: 바랜 짚색(채도 낮게) + 회녹색 + 갈색 풀잎이 비·바람에 눕혀져 엉킨 바닥.
+// 한 점에서 사방으로 뻗는 풀잎(별 모양)은 인공 무늬로 읽히므로, 포기마다 한 방향으로 누운 풀잎 다발 + 흩어진 지푸라기로 그린다
 function gGrass(L) {
   const { rng, S, k } = L;
   const n1 = rectFbm(L.seed + 1, 8, 8, 4);
+  const n2 = rectFbm(L.seed + 4, 20, 20, 2);
   L.base((u, v, o) => {
     const n = n1(u, v);
-    const c = mix3([52, 48, 38], [76, 70, 55], n);
-    o[0] = c[0];
-    o[1] = c[1];
-    o[2] = c[2];
+    const c = mix3([54, 50, 40], [76, 70, 55], n);
+    const m = 0.92 + 0.16 * n2(u, v);
+    o[0] = c[0] * m;
+    o[1] = c[1] * m;
+    o[2] = c[2] * m;
     o[3] = 0.25 + n * 0.25;
   });
   const pal = [
-    [[124, 114, 90], 0.35],
-    [[140, 131, 107], 0.13],
-    [[92, 96, 80], 0.27],
-    [[86, 76, 60], 0.25],
+    [[110, 102, 82], 0.36],
+    [[120, 112, 92], 0.12],
+    [[86, 90, 76], 0.27],
+    [[82, 73, 59], 0.25],
   ];
   const pick = () => {
     let r = rng.next();
@@ -494,25 +497,43 @@ function gGrass(L) {
     }
     return pal[0][0];
   };
-  const N = 7000;
-  for (let i = 0; i < N; i++) {
+  // 살짝 휜 풀잎 한 가닥 (밑동 → 끝)
+  const blade = (x, y, a, len, w, col, h, alpha) => {
+    const bend = (rng.next() - 0.5) * 0.5;
+    const mx = x + Math.cos(a) * len * 0.5;
+    const my = y + Math.sin(a) * len * 0.5;
+    const a2 = a + bend;
+    L.path([[x, y], [mx, my], [mx + Math.cos(a2) * len * 0.5, my + Math.sin(a2) * len * 0.5]], w, col, h, 1, alpha);
+  };
+  // 아래층: 눌려 엉킨 묵은 풀 (어둡고 짧게, 방향은 칸마다 조금씩 다른 흐름)
+  const flow = rectFbm(L.seed + 5, 3, 3, 2);
+  const N0 = 3200;
+  for (let i = 0; i < N0; i++) {
     const x = rng.next() * S;
     const y = rng.next() * S;
-    const a = rng.next() * Math.PI * 2;
-    const len = rng.range(10, 40) * k;
-    L.line(x, y, x + Math.cos(a) * len, y + Math.sin(a) * len, rng.range(0.8, 2.1) * k, L.jit(pick(), 0.15), 0.35 + (0.55 * i) / N, 1, 0.92);
+    const a = flow(x / S, y / S) * Math.PI * 4 + (rng.next() - 0.5) * 1.1;
+    blade(x, y, a, rng.range(10, 30) * k, rng.range(0.8, 1.7) * k, L.jit(mix3(pick(), [60, 55, 44], 0.35), 0.12), 0.3 + (0.25 * i) / N0, 0.9);
   }
-  for (let t = 0; t < 30; t++) {
+  // 풀 포기: 밑동이 좁은 띠에 모여 한 방향(포기마다 다름)으로 누운 풀잎 다발
+  for (let t = 0; t < 110; t++) {
     const cx = rng.next() * S;
     const cy = rng.next() * S;
-    for (let i = 0; i < 50; i++) {
-      const a = rng.next() * Math.PI * 2;
-      const r0 = rng.range(0, 6) * k;
-      const len = rng.range(12, 45) * k;
-      const x = cx + Math.cos(a) * r0;
-      const y = cy + Math.sin(a) * r0;
-      L.line(x, y, x + Math.cos(a) * len, y + Math.sin(a) * len, rng.range(0.9, 2) * k, L.jit(pick(), 0.15), rng.range(0.75, 1.0), 1, 0.95);
+    const dir = rng.next() * Math.PI * 2;
+    const spread = rng.range(0.25, 0.5);
+    const n = rng.int(14, 34);
+    const base = pick();
+    for (let i = 0; i < n; i++) {
+      const off = rng.range(-6, 6) * k;
+      const x = cx + Math.cos(dir + Math.PI / 2) * off + rng.range(-2, 2) * k;
+      const y = cy + Math.sin(dir + Math.PI / 2) * off + rng.range(-2, 2) * k;
+      blade(x, y, dir + (rng.next() - 0.5) * spread * 2, rng.range(16, 44) * k, rng.range(0.9, 1.8) * k, L.jit(rng.chance(0.7) ? base : pick(), 0.12), rng.range(0.6, 0.9), 0.93);
     }
+  }
+  // 위층: 흩어진 마른 지푸라기·풀잎 (길고 가늘게, 아무 방향)
+  for (let i = 0; i < 1500; i++) {
+    const x = rng.next() * S;
+    const y = rng.next() * S;
+    blade(x, y, rng.next() * Math.PI * 2, rng.range(14, 40) * k, rng.range(0.7, 1.4) * k, L.jit(pick(), 0.15), rng.range(0.7, 1.0), 0.85);
   }
 }
 
@@ -553,61 +574,75 @@ function gMud(L) {
   }
 }
 
-// 4 밝은 하층토: 파낸 황갈색 흙 (구덩이 분출물·참호 흉벽). 덩어리·마른 금·섞인 흑토 부스러기
+// 4 밝은 하층토: 파낸 황갈색 흙 (구덩이 분출물·참호 흉벽·수로 둔덕). 부스러진 작은 흙덩이, 가는 마른 금(실금),
+// 군데군데 축축하게 짙어진 얼룩, 섞인 흑토 부스러기. 큰 둥근 덩어리 + 굵은 검은 금은 돌담·자갈처럼 읽혀서 쓰지 않는다
 function gSubsoil(L) {
   const { rng, S, k } = L;
   const n1 = rectFbm(L.seed + 1, 10, 10, 4);
   const f1 = rectFbm(L.seed + 2, 36, 36, 2);
+  const damp = rectFbm(L.seed + 3, 4, 4, 3);
   L.base((u, v, o) => {
     const f = f1(u, v);
-    const h = sat(0.45 + (n1(u, v) - 0.5) * 1.1 + (f - 0.5) * 0.4);
-    const c = mix3([120, 104, 82], [150, 131, 103], smooth(0.25, 0.7, h));
-    const m = 0.95 + 0.1 * f;
+    const h = sat(0.45 + (n1(u, v) - 0.5) * 1.0 + (f - 0.5) * 0.4);
+    const c = mix3([122, 106, 83], [148, 129, 101], smooth(0.25, 0.7, h));
+    // 축축한 얼룩: 넓고 부드럽게 조금 짙게
+    const m = (0.95 + 0.1 * f) * (1 - 0.13 * smooth(0.5, 0.75, damp(u, v)));
     o[0] = c[0] * m;
     o[1] = c[1] * m;
     o[2] = c[2] * m;
     o[3] = h;
+    o[4] = 0.85 + 0.15 * smooth(0.3, 0.7, damp(u, v));
   });
-  for (let i = 0; i < 260; i++) {
-    const r = rng.range(5, 19) * k;
-    L.clod(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([152, 133, 104], 0.08), [106, 92, 72], rng.range(0.7, 0.95));
+  // 부스러진 흙덩이: 작고 많이, 그림자는 옅게
+  for (let i = 0; i < 520; i++) {
+    const r = rng.range(2.2, 8) * k;
+    L.clod(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([146, 128, 100], 0.07), [118, 102, 80], rng.range(0.62, 0.85));
   }
-  for (let i = 0; i < 45; i++) {
+  for (let i = 0; i < 380; i++) {
+    const r = rng.range(1, 2.4) * k;
+    L.clod(rng.next() * S, rng.next() * S, r, r * rng.range(0.7, 1), rng.next() * 3, L.jit([154, 136, 108], 0.08), [120, 104, 82], rng.range(0.6, 0.8));
+  }
+  // 가는 마른 금: 짧고 옅게 (실금)
+  for (let i = 0; i < 40; i++) {
     let x = rng.next() * S;
     let y = rng.next() * S;
     let a = rng.next() * Math.PI * 2;
     const pts = [[x, y]];
-    const n = rng.int(6, 18);
-    for (let s = 0; s < n; s++) {
-      a += rng.range(-0.7, 0.7);
-      const len = rng.range(4, 9) * k;
+    const n = rng.int(3, 8);
+    for (let st = 0; st < n; st++) {
+      a += rng.range(-0.8, 0.8);
+      const len = rng.range(3, 7) * k;
       x += Math.cos(a) * len;
       y += Math.sin(a) * len;
       pts.push([x, y]);
     }
-    L.path(pts, rng.range(0.8, 1.5) * k, [94, 78, 57], 0.18, 1, 0.9);
+    L.path(pts, rng.range(0.45, 0.8) * k, [108, 92, 70], 0.32, 1, 0.5);
   }
   // 섞여 든 흑토 부스러기: 작고 성기게 (큰 검은 반점 무늬가 되지 않게)
   for (let i = 0; i < 90; i++) {
     const r = rng.range(1.2, 3) * k;
-    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([88, 76, 62]), [70, 60, 50], 0.75);
+    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit([92, 80, 65]), [78, 67, 55], 0.72);
   }
-  for (let i = 0; i < 70; i++) {
-    const r = rng.range(1, 2.5) * k;
-    L.blob(rng.next() * S, rng.next() * S, r, r, 0, [188, 176, 150], 0.8);
+  for (let i = 0; i < 30; i++) {
+    const r = rng.range(0.7, 1.6) * k;
+    L.blob(rng.next() * S, rng.next() * S, r, r, 0, [164, 150, 124], 0.75);
   }
 }
 
-// 5 자갈 섞인 흙길: 다져진 흙에 박힌 자갈 (돌은 조금 매끈)
+// 5 자갈 섞인 흙길: 다져진 흙과 진흙 사이에 박힌 작은 회갈색 자갈. 돌은 작고 모양이 불규칙하며 밝기 차이가 작다
+// (크고 하얀 둥근 돌은 동전·물방울 무늬로 읽힘). 자갈이 많은 곳·적은 곳, 그 사이 고운 모래알·진흙 얼룩
 function gGravel(L) {
   const { rng, S, k } = L;
   const n1 = rectFbm(L.seed + 1, 8, 8, 4);
   const f1 = rectFbm(L.seed + 2, 48, 48, 2);
+  const dens = rectFbm(L.seed + 3, 5, 5, 3);
   L.base((u, v, o) => {
     const n = n1(u, v);
     const f = f1(u, v);
     const h = sat(0.28 + (n - 0.5) * 0.4 + (f - 0.5) * 0.3);
-    const c = mix3([78, 71, 62], [104, 96, 84], smooth(0.2, 0.75, n * 0.7 + f * 0.3));
+    let c = mix3([74, 67, 58], [98, 90, 78], smooth(0.2, 0.75, n * 0.7 + f * 0.3));
+    // 진흙 얼룩 (자갈이 적은 곳)
+    c = mix3(c, [62, 55, 47], smooth(0.55, 0.3, dens(u, v)) * 0.6);
     o[0] = c[0];
     o[1] = c[1];
     o[2] = c[2];
@@ -615,15 +650,26 @@ function gGravel(L) {
     o[4] = 0.8 + 0.2 * n;
   });
   const stones = [
-    [124, 120, 112],
-    [146, 142, 134],
-    [84, 80, 74],
-    [118, 102, 82],
-    [160, 150, 132],
+    [104, 98, 88],
+    [116, 108, 96],
+    [88, 82, 74],
+    [110, 98, 82],
+    [124, 116, 102],
   ];
-  for (let i = 0; i < 2600; i++) {
-    const r = (1.5 + 5 * Math.pow(rng.next(), 2)) * k;
-    L.lump(rng.next() * S, rng.next() * S, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit(rng.pick(stones), 0.1), [58, 53, 46], rng.range(0.55, 1.0), rng.range(0.6, 0.8));
+  // 고운 모래알
+  for (let i = 0; i < 3200; i++) {
+    const r = rng.range(0.5, 1.1) * k;
+    L.blob(rng.next() * S, rng.next() * S, r, r, 0, L.jit(rng.pick(stones), 0.12), rng.range(0.4, 0.6), 1, 0.7);
+  }
+  // 자갈: 밀도 노이즈가 높은 곳에 몰리게 (불규칙한 모양, 그림자 옅게)
+  let placed = 0;
+  for (let i = 0; i < 9000 && placed < 2400; i++) {
+    const x = rng.next() * S;
+    const y = rng.next() * S;
+    if (rng.next() > smooth(0.3, 0.7, dens(x / S, y / S)) * 0.9 + 0.1) continue;
+    placed++;
+    const r = (1.1 + 3.2 * Math.pow(rng.next(), 2.2)) * k;
+    L.clod(x, y, r, r * rng.range(0.6, 1), rng.next() * 3, L.jit(rng.pick(stones), 0.08), [62, 56, 48], rng.range(0.55, 0.9), rng.range(0.6, 0.8));
   }
 }
 
@@ -726,13 +772,14 @@ export function brickTexture(kind = 'red') {
         ctx.fillRect(x + 2, y + 2, colW - 4, rowH - 4);
       }
     }
-    // 얼룩·그을음
+    // 얼룩·그을음: 타일(벽 2m) 안의 얼룩은 옅게만 (진하면 긴 벽에서 같은 얼룩이 2m 마다 되풀이되어 보인다).
+    // 큰 규모 얼룩·습기 띠는 축사 벽 정점색(Structures.shadeWall)이 월드 좌표로 맡는다. 벽돌 표면 잔알갱이는 1px 해시
     const img = ctx.getImageData(0, 0, size, size);
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const i = (y * size + x) * 4;
         const n = f(x / size, y / size, 0.55);
-        const grime = (n - 0.5) * 70 - (y / size) * 0; // 위아래 같은 정도
+        const grime = (n - 0.5) * 26 + (hashPx(x, y, kind === 'red' ? 5 : 6) - 0.5) * 10;
         img.data[i] = clamp255(img.data[i] + grime);
         img.data[i + 1] = clamp255(img.data[i + 1] + grime);
         img.data[i + 2] = clamp255(img.data[i + 2] + grime);
@@ -1024,6 +1071,44 @@ export function trackTexture() {
   });
 }
 
+// 빈 탄약 상자 (중간 지대 작은 잔해, Structures.debrisTemplates): 바랜 국방색 도장 판자.
+// 한 장 = 0.6m (boxGeo uvScale), 판자 6장이 v 방향으로 쌓이고 (판자 폭 10cm) 결은 u 방향.
+// 판자 사이 어두운 틈, 먼지로 바랜 칠 얼룩, 판자 모서리부터 벗겨져 드러난 회갈색 나무, 1px 반점.
+// 인스턴스 색(밝은 무채색)과 곱해지므로 이 텍스처가 상자의 최종 색을 정한다
+// (예전처럼 나무 텍스처 × 올리브 인스턴스 색 × 정점색을 겹쳐 곱하면 알베도가 3% 쯤으로 거의 검게 나온다).
+export function crateTexture() {
+  return cached('crate', () => {
+    const boards = 6;
+    const grain = rectFbm(331, 2, 48, 3);
+    const fade = makeFbm(332, 4, 4);
+    const chip = makeFbm(333, 28, 3);
+    const paint = [100, 104, 72];
+    const dust = [124, 122, 102];
+    const wood = [128, 118, 100];
+    return pixelTexture(256, (u, v, col, x, y) => {
+      const bv = v * boards;
+      const board = Math.floor(bv);
+      const lv = bv - board;
+      const edge = Math.min(lv, 1 - lv); // 판자 가장자리까지 (판자 폭 비율)
+      const g = grain((u + board * 0.37) % 1, v, 0.5);
+      const n = fade(u, v, 0.55);
+      // 칠 벗겨짐: 작은 조각, 판자 가장자리(모서리 닳음)에 몰린다
+      const ch = chip(u, v, 0.5) + Math.max(0, 0.16 - edge) * 1.9 + ((board * 7) % 3) * 0.015;
+      const bare = smooth(0.7, 0.74, ch);
+      let c = mix3(paint, dust, smooth(0.25, 0.85, n) * 0.38);
+      c = mix3(c, wood, bare);
+      // 판자마다 조금 다른 바램 + 결 (드러난 나무에서 더 뚜렷하게)
+      const k = 0.94 + (g - 0.5) * (0.14 + bare * 0.3) + (((board * 13) % 5) - 2) * 0.018;
+      const gap = edge < 0.035 ? 0.42 : edge < 0.07 ? 0.85 : 1; // 판자 틈 (어두운 선)
+      const h = hashPx(x, y, 334);
+      const sp = h < 0.05 ? (h / 0.05 - 0.5) * 16 : 0;
+      col[0] = clamp255(c[0] * k * gap + sp);
+      col[1] = clamp255(c[1] * k * gap + sp);
+      col[2] = clamp255(c[2] * k * gap + sp * 0.9);
+    });
+  });
+}
+
 export function woodTexture() {
   return cached('wood', () => {
     const f = makeFbm(91, 4, 4);
@@ -1055,17 +1140,28 @@ export function barkTexture() {
   });
 }
 
+// 모래주머니 천 (마대): 고운 올 무늬, 부드러운 흙 얼룩 (문턱 없이 smoothstep — 경계가 칼 같은 검은 반점 무늬가 되지 않게),
+// 양끝을 접어 꿰맨 솔기 (어두운 가는 선 + 밝은 바늘땀). UV 는 Structures.bagGeometry: u = 자루 길이 방향(솔기 u ≈ 0.07·0.93), v = 단면 둘레
 export function sandbagTexture() {
   return cached('sandbag', () => {
-    const f = makeFbm(111, 4, 5);
-    return pixelTexture(256, (u, v, col) => {
-      const n = f(u, v, 0.55);
-      const weave = (Math.sin(u * 256 * 1.2) * Math.sin(v * 256 * 1.2)) * 6;
-      const dirt = n < 0.4 ? -30 : 0;
-      const s = 120 + (n - 0.5) * 40 + weave + dirt;
+    const f = makeFbm(111, 4, 4);
+    const g = makeFbm(117, 10, 3);
+    return pixelTexture(256, (u, v, col, x, y) => {
+      const n = f(u, v, 0.5);
+      const m = g(u, v, 0.5);
+      // 올 무늬: 씨실·날실이 엇갈린 잔무늬 (밝기 차 작게)
+      const weave = ((x >> 1) + (y >> 1)) & 1 ? 2.5 : -2.5;
+      // 흙 얼룩: 넓고 옅은 것 + 작고 조금 짙은 것 (부드러운 경계)
+      const dirt = smooth(0.52, 0.3, n) * 16 + smooth(0.44, 0.26, m) * 12;
+      // 접어 꿰맨 양끝: 끝으로 갈수록 조금 어둡고(접힌 천 + 흙), 옅은 바늘땀 한 줄 (자루 둘레를 도는 선이라 진하면 테두리처럼 보인다)
+      const ue = Math.min(u, 1 - u);
+      const fold = smooth(0.1, 0.02, ue) * 10;
+      const du = Math.abs(ue - 0.07) * 256;
+      const stitch = du < 1.2 && y % 6 < 3 ? 6 : 0;
+      const s = 126 + (n - 0.5) * 18 + (m - 0.5) * 8 + weave - dirt - fold + stitch;
       col[0] = clamp255(s * 1.05);
       col[1] = clamp255(s * 0.97);
-      col[2] = clamp255(s * 0.78);
+      col[2] = clamp255(s * 0.8);
     });
   });
 }
@@ -1285,8 +1381,66 @@ function taperedBlade(ctx, x0, y0, cx, cy, x1, y1, w0, w1) {
 //  옆모습 = 모형의 x-y 평면 (머리가 +x 쪽으로 숙임), 앞모습 = z-y 평면 (숙인 꽃판 얼굴이 보임).
 //  변형 0: 기본, 1: 목이 더 꺾여 꽃판이 낮게, 2: 줄기가 조금 휘고 꽃판이 작음, 3: 꽃판이 떨어져 나간 줄기
 // 색은 sRGB 의 진한 회갈색~검정 (인스턴스 색·조명이 곱해진다)
-export function sunflowerCardTexture(shape, { tile = 128, cardW = 0.925, cardH = 1.85, bottom = 0.05, variants = 4 } = {}) {
-  return cached('sunflowerCard', () => {
+export function sunflowerCardTexture(shape, opts = {}) {
+  return cached('sunflowerCard', () => coverageTexture(sunflowerCardCanvas(shape, opts)));
+}
+
+// 원거리 해바라기밭 띠 아틀라스: 밭 칸 하나를 옆에서 본 모습 (포기 여럿이 겹친 덩어리). 가로로 칸 counts.length 개 (성김 → 빽빽함).
+// 한 칸 = 폭 w × 높이 h (m), 칸 아래 끝 = 지면 아래 bottom. 포기는 근거리 빌보드 그림(같은 모양·색, card = sunflowerCardTexture 옵션)을
+// 줄여 찍는다: 가운데 spread(m) 폭 안에 무작위로, 키 height(m)·폭 배수, 좌우 반전, 약한 기울기 + 일부는 많이 기울거나 꽃판이 없음.
+// 칸 평균 키 = shape.height 가 되게 (인스턴스 세로 배수 = 실제 평균 키 / shape.height). 덮는 비율을 지키는 밉맵 → 멀어져도 띠가 이어짐
+export function sunflowerBandTexture(shape, card = {}, { tile = 256, w = 3.9, h = 2.4, bottom = 0.05, counts = [7, 7, 15, 15, 24, 24, 34, 34], spread = 3.4, height = [1.4, 2.0], leanChance = 0.14 } = {}) {
+  return cached('sunflowerBand', () => {
+    const src = sunflowerCardCanvas(shape, card);
+    const cTile = card.tile ?? 128;
+    const cardW = card.cardW ?? 0.925;
+    const cardH = card.cardH ?? 1.85;
+    const cBottom = card.bottom ?? 0.05;
+    const cVariants = card.variants ?? 4;
+    const cK = cTile / cardW;
+    const k = tile / w;
+    const th = Math.round(h * k);
+    const c = canvas(tile * counts.length, th);
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    const rng = new Random(173);
+    for (let v = 0; v < counts.length; v++) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(v * tile, 0, tile, th);
+      ctx.clip();
+      // 가로 위치는 층화 (칸마다 고르게 — 덩어리져 나무 한 그루처럼 보이지 않게), 그리는 순서는 무작위 깊이
+      const plants = [];
+      for (let i = 0; i < counts[v]; i++) plants.push({ x: ((i + rng.next()) / counts[v] - 0.5) * spread, d: rng.next() });
+      plants.sort((a, b) => a.d - b.d);
+      for (const p of plants) {
+        const headless = rng.next() < 0.07;
+        const variant = headless ? cVariants - 1 : Math.floor(rng.next() * (cVariants - 1));
+        const view = rng.next() < 0.5 ? 0 : 1;
+        const hs = rng.range(height[0], height[1]) / shape.height;
+        const ws = rng.range(0.9, 1.15);
+        const lean = rng.next() < leanChance ? rng.range(0.2, 0.5) * (rng.next() < 0.5 ? -1 : 1) : rng.range(-0.08, 0.08);
+        const flip = rng.next() < 0.5 ? -1 : 1;
+        const s = k / cK;
+        ctx.save();
+        // 밑동(지면) 기준으로 기울이고 줄인다
+        ctx.translate(v * tile + tile / 2 + p.x * k, (h - bottom) * k);
+        ctx.rotate(lean);
+        ctx.scale(flip * s * ws, s * hs);
+        ctx.drawImage(src, (variant * 2 + view) * cTile, 0, cTile, src.height, -cTile / 2, -(cardH - cBottom) * cK, cTile, src.height);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+    return coverageTexture(c);
+  });
+}
+
+// 해바라기 빌보드 그림 (캔버스, 위 두 아틀라스가 같이 쓴다)
+function sunflowerCardCanvas(shape, { tile = 128, cardW = 0.925, cardH = 1.85, bottom = 0.05, variants = 4 } = {}) {
+  return cached('sunflowerCardCanvas', () => {
     const th = Math.round((tile * cardH) / cardW);
     const c = canvas(tile * 2 * variants, th);
     const ctx = c.getContext('2d');
@@ -1440,7 +1594,7 @@ export function sunflowerCardTexture(shape, { tile = 128, cardW = 0.925, cardH =
         }
       }
     }
-    return coverageTexture(c);
+    return c;
   });
 }
 

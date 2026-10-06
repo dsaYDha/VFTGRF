@@ -13,8 +13,8 @@ import { Random } from '../core/Random.js';
 import { Noise2D } from './noise.js';
 import { clamp, smoothstep, polylineDistance } from '../core/mathUtils.js';
 import { groundTextures, groundMacroTexture } from './textures.js';
-import { terrainShaderParts, ROAD_RANGE, TRACK_RANGE, MAX_PARCELS } from './terrainShader.js';
-import { farRoadSegments } from './Distant.js';
+import { terrainShaderParts, ROAD_RANGE, TRACK_RANGE, MAX_PARCELS, MAX_TRACK_SEGS } from './terrainShader.js';
+import { farRoadSegments, applySilhouetteFog } from './Distant.js';
 
 const SID = Object.fromEntries(Object.entries(SURFACES).map(([k, v]) => [k, v.id]));
 
@@ -162,7 +162,7 @@ export class Terrain {
   baseHeight(x, z) {
     const W = CONFIG.world;
     const slope = clamp((MAP.canal.z - z) * W.northRiseSlope, -1.6, 3.2);
-    return slope + this.undulation(x, z);
+    return slope + this.undulation(x, z) + this.trenchGlacis(x, z);
   }
 
   // 완만한 기복: 파장 50~150m, 높이차 0.5~1.5m. 수로~적 진지 사이(사격 회랑)에서는 솟은 곳을 눌러
@@ -217,8 +217,17 @@ export class Terrain {
     if (v < 0) v *= H.valley;
     let h = H.amp * v;
     for (const b of (MAP.distant && MAP.distant.hills) || []) {
-      const d = Math.hypot(x - b.x, z - b.z);
-      if (d < b.r) h += b.h * 0.5 * (1 + Math.cos((Math.PI * d) / b.r));
+      // 둥근 둔덕 (중심점까지 거리) 또는 능선 (len: 방위각 angle 방향 마루 선분까지 거리, 마루 높이는 노이즈로 들쭉날쭉)
+      let d;
+      let k = 1;
+      if (b.len) {
+        const ux = Math.sin((b.angle * Math.PI) / 180);
+        const uz = -Math.cos((b.angle * Math.PI) / 180);
+        const t = clamp((x - b.x) * ux + (z - b.z) * uz, -b.len / 2, b.len / 2);
+        d = Math.hypot(x - b.x - ux * t, z - b.z - uz * t);
+        k = 1 + H.crestWobble * nz.noise(t / H.crestSize + b.x * 0.013, b.z * 0.013 - 4.1);
+      } else d = Math.hypot(x - b.x, z - b.z);
+      if (d < b.r) h += b.h * k * 0.5 * (1 + Math.cos((Math.PI * d) / b.r));
     }
     const cv = H.canalValley;
     return h * smoothstep(H.start, H.full, out) * smoothstep(cv[0], cv[1], Math.abs(z - this.canalZ(x)));
@@ -393,8 +402,9 @@ export class Terrain {
       for (const [a, b] of C.linedSections) gap = Math.min(gap, Math.abs(x - a), Math.abs(x - b));
       rough = 0.035 * nz.noise(x / 2.3 + 4.1, d * 1.4 + 0.7) * smoothstep(0.3, 2.0, gap);
     }
-    // 라이닝 판 위쪽 끝에 흙이 조금 쌓여 판 끝과 맞닿는다 (판 끝 단면이 드러나 떠 보이지 않게)
-    if (lined && this.slabBand) h += C.slabSoil * bump((d - this.slabBand[1] + 0.15) / 1.0, 0.3);
+    // 라이닝 판 위쪽 끝 너머 비탈 마루에 흙이 조금 쌓였다. 판 끝에서 조금 떨어져 시작한다 — 판 끝을 덮으면 흙과 판 윗면이
+    // 만나는 선이 렌더 격자를 따라 판마다 톱니처럼 들쭉날쭉해진다 (판 끝 곧은 모서리가 경계가 되게)
+    if (lined && this.slabBand) h += C.slabSoil * bump((d - this.slabBand[1] - 0.1) / 0.9, 0.3);
     if (dn <= 0) {
       if (d > C.floorHalf) h += rough * (1 - smoothstep(C.topHalf, C.topHalf + 1, d));
       return h + C.southBank.height * bump((d - C.topHalf) / C.southBank.width, 0.4);
@@ -507,7 +517,8 @@ export class Terrain {
   //  1) 0.5m 높이 격자의 쌍선형 보간 대신 해석적 단면을 따른다 — 둥근 위 모서리에서 흙이 판 끝보다 들쭉날쭉 낮아져
   //     판 끝 단면이 톱니처럼 드러나지 않게 (충돌·heightAt 은 격자 그대로)
   //  2) 판 아래는 내린다: 바닥 모서리 근처(정점 사이 직선이 비탈 평면보다 높아지는 곳)만 깊게, 판 가운데는 얕게(겹침 깜빡임 방지),
-  //     위쪽 끝은 내리지 않아 흙과 판 윗면이 맞닿는다. 빠진 판 자리는 얕은 홈
+  //     위쪽 끝까지 내려 판 윗면의 곧은 위쪽 모서리가 흙과의 경계가 되게 한다 (판 끝 너머 흙은 비탈 평면 높이 — 판이 proud 만큼
+  //     올라와 있어 흙에 묻힌 선이 격자 따라 톱니가 되지 않는다). 기울거나 금 가 내려앉은 판 아래는 깊게, 빠진 판 자리는 얕은 홈
   canalSlabDrop(x, z) {
     if (!this.slabBand || Math.abs(z - MAP.canal.z) > 4.2 || !this.isCanalLined(x)) return 0;
     const C = MAP.canal;
@@ -521,7 +532,7 @@ export class Terrain {
     if (!s) return fit;
     const K = CONFIG.canal;
     if (s.kind === 'missing') return fit + K.holeDrop;
-    if (d > this.slabBand[1] - 0.08) return fit;
+    if (s.kind === 'tilted' || s.kind === 'cracked') return fit + K.renderDrop;
     const w = smoothstep(this.slabBand[0] + 0.3, this.slabBand[0] + 0.5, d);
     return fit + K.renderDrop * (1 - w) + K.renderDropMid * w;
   }
@@ -674,6 +685,7 @@ export class Terrain {
     this.applyMounds();
     this.applyRoads();
     this.applyTracks();
+    this.applyRainPuddles();
     this.buildPuddleList();
     this.buildSurfaces();
   }
@@ -958,6 +970,50 @@ export class Terrain {
     });
   }
 
+  // 흉벽 앞 완만한 내리막 (CONFIG.enemyPosition.glacis, baseHeight 에 더함): 참호선 앞쪽(남쪽, 플레이어 쪽)만 자연 지면을 조금 낮춰
+  // 참호가 낮은 둔덕 마루에 있는 꼴로 만든다 → 수로에서 낮은 시선으로 보아도 흉벽 앞면이 앞쪽 구덩이 테두리·기복 위로 드러난다.
+  // 흉벽(참호 앞 3.3m 안)·뒤쪽은 그대로. 경계 상자로 먼저 거른다 (높이 격자 생성 때 모든 점에서 불림)
+  trenchGlacis(x, z) {
+    const G = CONFIG.enemyPosition.glacis;
+    if (!G || !(G.depth > 0)) return 0;
+    if (!this.glacisLines) {
+      this.glacisLines = MAP.trench.lines.map((line) => ({ line, ...bbox(line) }));
+      this._gTmp = {};
+    }
+    let g = 0;
+    for (const b of this.glacisLines) {
+      if (x < b.x0 - G.endFade || x > b.x1 + G.endFade || z < b.z0 || z > b.z1 + G.rise[1]) continue;
+      const d = polylineDistance(b.line, x, z, this._gTmp);
+      if (d >= G.rise[1] || d <= G.fall[0] || this._gTmp.side * this._gTmp.nz <= 0) continue;
+      const ends = 1 - smoothstep(0, G.endFade, Math.max(b.x0 - x, x - b.x1, 0));
+      const v = -G.depth * smoothstep(G.fall[0], G.fall[1], d) * (1 - smoothstep(G.rise[0], G.rise[1], d)) * ends;
+      if (v < g) g = v;
+    }
+    return g;
+  }
+
+  // 흉벽 앞면·마루 정점색 몫 (0..1, vertexColor 가 CONFIG.enemyPosition.crestTint 로 곱한다): 참호 가장자리 ~ 앞면 끝
+  trenchCrestWeight(x, z) {
+    const T = MAP.trench;
+    if (!this.crestLines) {
+      const ext = T.topHalf + T.parapet.width;
+      this.crestLines = T.lines.map((line) => {
+        const b = bbox(line);
+        return { line, x0: b.x0 - ext, x1: b.x1 + ext, z0: b.z0 - ext, z1: b.z1 + ext };
+      });
+      this._cTmp = {};
+    }
+    const toe = T.topHalf * 0.85 + T.parapet.width;
+    let w = 0;
+    for (const b of this.crestLines) {
+      if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1) continue;
+      const d = polylineDistance(b.line, x, z, this._cTmp);
+      if (d > toe || d < T.topHalf - 0.15 || this._cTmp.side * this._cTmp.nz <= 0) continue;
+      w = Math.max(w, smoothstep(T.topHalf - 0.15, T.topHalf + 0.1, d) * (1 - smoothstep(toe - 1.0, toe, d)));
+    }
+    return w;
+  }
+
   applyTrenches() {
     const T = MAP.trench;
     for (const line of T.lines) this.trenchProfile(line, T, true);
@@ -1061,15 +1117,120 @@ export class Terrain {
     }
   }
 
-  // 물웅덩이: 깊은 구덩이 바닥, 바퀴 자국 (모두 평평한 수면, 가장자리는 지형이 가린다)
+  // ------------------------------------------------------------------ 빗물 웅덩이 (개활지의 얕은 우묵한 곳)
+  // 사격 회랑(zone)에 무작위로, 수로 앞 띠(focus)에 더 모아 판다. 밭에서는 고랑 방향으로 길쭉하다.
+  // 깊이 5~9cm 의 평평한 바닥 + 노이즈로 흔든 타원 윤곽. 지형을 낮추기만 하므로 사선은 그대로다.
+  // 무작위 구덩이 배치(this.rng)와 다른 난수열을 써서 다른 배치가 바뀌지 않게 한다.
+  applyRainPuddles() {
+    const RP = CONFIG.terrain.rainPuddles;
+    const R = CONFIG.terrain.road;
+    const TB = CONFIG.terrain.tracks;
+    const rng = new Random(CONFIG.world.seed + 57);
+    const nz = this.noise;
+    const list = (this.rainPuddles = []);
+    if (!RP) return;
+    const solids = [MAP.apc, MAP.tractor, ...MAP.cars, ...MAP.dugouts, ...MAP.pylons, ...MAP.trees].filter(Boolean);
+    // 구덩이 금지 구역 중 수로 띠(테두리가 시야를 가릴까 봐 비운 곳)는 우묵한 웅덩이와 무관 → 적 사격 위치 앞만 피한다
+    const excl = (MAP.craterExclusions || []).filter((e) => !(e.z0 < MAP.canal.z && e.z1 > MAP.canal.z));
+    const fieldDir = (x, z) => {
+      for (let p = 1; p < this.parcels.length; p++) {
+        const P = this.parcels[p];
+        if (P.kind !== 'stubble' && x > P.x0 + 2 && x < P.x1 - 2 && z > P.z0 + 2 && z < P.z1 - 2) return P;
+      }
+      return null;
+    };
+    const place = (zone, n) => {
+      let made = 0;
+      for (let tries = 0; made < n && tries < n * 80; tries++) {
+        const x = rng.range(zone.x0, zone.x1);
+        const z = rng.range(zone.z0, zone.z1);
+        const r = rng.range(RP.radius[0], RP.radius[1]);
+        const depth = rng.range(RP.depth[0], RP.depth[1]);
+        const P = fieldDir(x, z);
+        let len = r * rng.range(RP.stretch[0], RP.stretch[1]);
+        const a = rng.next() * Math.PI;
+        let ux = Math.cos(a);
+        let uz = Math.sin(a);
+        if (P) {
+          // 밭: 고랑을 따라 길쭉한 물 고인 고랑 묶음
+          len = Math.min(len * 1.6, 4.6);
+          ux = P.dirX;
+          uz = P.dirZ;
+        }
+        const ext = len + 1;
+        if (Math.abs(x) > this.half - ext - 4 || Math.abs(z) > this.half - ext - 4) continue;
+        if (z > this.canalZ(x) - RP.canalClear - ext) continue;
+        let ok = true;
+        for (const e of excl) if (x > e.x0 - ext && x < e.x1 + ext && z > e.z0 - ext && z < e.z1 + ext) ok = false;
+        for (const f of this.footprints) if (Math.abs(x - f.x) < f.hx + ext + 3 && Math.abs(z - f.z) < f.hz + ext + 3) ok = false;
+        for (const o of solids) if (Math.hypot(x - o.x, z - o.z) < ext + 5) ok = false;
+        for (const c of this.craters) if (Math.hypot(x - c.x, z - c.z) < c.r * 1.6 + ext + RP.gap * 0.5) ok = false;
+        for (const q of list) if (Math.hypot(x - q.x, z - q.z) < q.len + ext + RP.gap) ok = false;
+        if (ok) {
+          for (const rd of MAP.roads) if (polylineDistance(rd.points, x, z) < rd.width / 2 + R.ditchOffset + R.ditchHalf + ext + 0.5) ok = false;
+          for (const tr of MAP.vehicleTracks || []) if (polylineDistance(tr.points, x, z) < tr.gauge / 2 + TB.bandHalf + ext + 0.5) ok = false;
+          for (const line of MAP.trench.lines) if (polylineDistance(line, x, z) < ext + 14) ok = false;
+        }
+        if (!ok) continue;
+        const seed = rng.next() * 100;
+        // 둘레(가장 낮은 가장자리) 높이 → 물 높이는 그 바로 아래, 바닥은 수평 (비탈진 곳에선 높은 쪽을 조금 더 파고,
+        // 그래도 남는 높은 쪽 바닥은 물 밖으로 드러난다)
+        let rim = Infinity;
+        for (let i = 0; i < 24; i++) {
+          const aa = (i / 24) * Math.PI * 2;
+          const lu = Math.cos(aa) * len * 1.2;
+          const lv = Math.sin(aa) * r * 1.2;
+          rim = Math.min(rim, this.heightAt(x + lu * ux - lv * uz, z + lu * uz + lv * ux));
+        }
+        const floorY = rim - depth;
+        this.addDetail(x - ext, z - ext, x + ext, z + ext, 0.5, 0.5, 1.25, 1.25);
+        this.stamp(x - ext, z - ext, x + ext, z + ext, (px, pz, k) => {
+          const dx = px - x;
+          const dz = pz - z;
+          const u = (dx * ux + dz * uz) / len;
+          const v = (-dx * uz + dz * ux) / r;
+          const rho = Math.hypot(u, v) * (1 + 0.2 * nz.noise(px / 1.3 + seed, pz / 1.3 - seed));
+          if (rho >= 1.12) return;
+          const w = 1 - smoothstep(0.5, 1.12, rho);
+          this.h[k] += Math.max(-depth * 2.2, Math.min(0, w * (floorY - this.h[k])));
+        });
+        list.push({ x, z, r, len, ux, uz, depth, seed, level: rim - RP.brim });
+        made++;
+      }
+    };
+    for (const f of RP.focus || []) place(f, f.count);
+    place(RP.zone, RP.count);
+  }
+
+  // 물웅덩이: 수로 물 구간, 구덩이 바닥, 빗물 웅덩이, 바퀴 자국·궤도 자국 (모두 평평한 수면).
+  // 원판형(구덩이·빗물)은 중심에서 방사선마다 지형이 수면보다 높아지는 거리(rays)를 재 두고, 렌더 메시는
+  // 그 윤곽 + 지형 속으로 들어가는 여유 테로 만든다 (물가 선 = 지형과 수면이 만나는 곳, 얕은 곳은 셰이더가 투명하게)
   buildPuddleList() {
     const C = CONFIG.terrain.craters;
     for (const c of this.craters) {
+      const bottom = this.heightAt(c.x, c.z);
+      // 수로 앞(적이 뛰어들지 않는 곳)의 오래된 구덩이: 물이 테두리 마루 바로 아래까지
+      if (!c.fresh && !c.legacy && c.z > C.frontWaterZ && c.d >= C.frontWaterMinDepth) {
+        let crest = Infinity;
+        for (let i = 0; i < 24; i++) {
+          const a = (i / 24) * Math.PI * 2;
+          let best = -Infinity;
+          for (let f = 0.85; f <= 1.6; f += 0.05) best = Math.max(best, this.heightAt(c.x + Math.cos(a) * c.r * f, c.z + Math.sin(a) * c.r * f));
+          crest = Math.min(crest, best);
+        }
+        const level = Math.max(bottom + 0.12, crest - C.frontWaterBelowRim);
+        c.water = true;
+        this.puddles.push({ type: 'disc', x: c.x, z: c.z, level, rmax: c.r * 1.5, rays: null, crater: c });
+        continue;
+      }
       if (c.d < (c.fresh ? 1.25 : C.waterMinDepth)) continue;
       c.water = true;
-      const bottom = this.heightAt(c.x, c.z);
-      this.puddles.push({ type: 'disc', x: c.x, z: c.z, r: c.r * 0.5, level: bottom + c.d * (c.fresh ? 0.12 : 0.2), crater: c });
+      this.puddles.push({ type: 'disc', x: c.x, z: c.z, level: bottom + c.d * (c.fresh ? 0.12 : 0.2), rmax: c.r * 1.2, rays: null, crater: c });
     }
+    for (const q of this.rainPuddles || []) {
+      this.puddles.push({ type: 'disc', x: q.x, z: q.z, level: q.level, rmax: q.len * 1.6, rays: null, rain: q });
+    }
+    for (const p of this.puddles) if (p.type === 'disc') this.puddleRays(p, p.rain ? 20 : C.waterRays);
     const R = CONFIG.terrain.road;
     const rng = new Random(CONFIG.world.seed + 31);
     for (const rd of MAP.roads) {
@@ -1102,6 +1263,63 @@ export class Terrain {
         }
       }
     }
+    // 궤도 차량 자국: 눌린 띠 바닥에 군데군데 고인 물 (자국이 개활지를 가로지르는 선으로 읽히게)
+    const TB = CONFIG.terrain.tracks;
+    const trng = new Random(CONFIG.world.seed + 43);
+    for (const tr of MAP.vehicleTracks || []) {
+      const pts = tr.points;
+      const half = tr.gauge / 2;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, az] = pts[i];
+        const [bx, bz] = pts[i + 1];
+        const len = Math.hypot(bx - ax, bz - az);
+        const ux = (bx - ax) / len;
+        const uz = (bz - az) / len;
+        for (let s = 1; s < len - 1; s += TB.puddleEvery * trng.range(0.6, 1.4)) {
+          if (!trng.chance(TB.puddleChance)) continue;
+          const L = trng.range(2, 7);
+          const sides = trng.chance(0.3) ? [-1, 1] : [trng.chance(0.5) ? 1 : -1];
+          for (const sd of sides) {
+            const line = [];
+            let minB = Infinity;
+            let bad = false;
+            for (let q = 0; q <= L; q += 0.5) {
+              const px = ax + ux * Math.min(len, s + q) - uz * sd * half;
+              const pz = az + uz * Math.min(len, s + q) + ux * sd * half;
+              if (this.nearCanal(px, pz, 8) || Math.abs(px) > this.half - 2 || Math.abs(pz) > this.half - 2) bad = true;
+              minB = Math.min(minB, this.heightAt(px, pz));
+              line.push([px, pz]);
+            }
+            if (bad || line.length < 3) continue;
+            this.puddles.push({ type: 'strip', pts: line, hw: TB.bandHalf * 0.7, level: minB + trng.range(0.03, 0.06) });
+          }
+        }
+      }
+    }
+  }
+
+  // 원판형 물웅덩이 윤곽: 방사선 n 개마다 중심에서 지형이 수면보다 높아지는 거리 (m)
+  puddleRays(p, n) {
+    const rays = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      let r = 0.1;
+      while (r < p.rmax && this.heightAt(p.x + ca * r, p.z + sa * r) < p.level + 0.01) r += 0.1;
+      rays[i] = r;
+    }
+    p.rays = rays;
+  }
+
+  // 원판형 물웅덩이 윤곽 반지름 (각도 a 에서 보간)
+  puddleRadiusAt(p, a) {
+    const n = p.rays.length;
+    let f = ((a / (Math.PI * 2)) % 1) * n;
+    if (f < 0) f += n;
+    const i = Math.floor(f) % n;
+    const t = f - Math.floor(f);
+    return p.rays[i] * (1 - t) + p.rays[(i + 1) % n] * t;
   }
 
   // ------------------------------------------------------------------ 지면 종류 (발소리·탄착·이동)
@@ -1183,7 +1401,15 @@ export class Terrain {
         const r = Math.hypot(x - c.x, z - c.z);
         if (r < c.r * (1.08 + nz.noise(x, z) * 0.12)) this.surf[k] = SID.crater;
         else if (c.fresh && r < c.r * 1.6 && this.craterRay(c, Math.atan2(z - c.z, x - c.x)) > 0.35) this.surf[k] = SID.subsoil;
-        if (c.water && r < c.r * 0.42) this.surf[k] = SID.water;
+      });
+    }
+    // 고인 물 (구덩이·빗물 웅덩이): 수심 4cm 넘는 곳 = 물 (발소리·탄착 물보라, 풀·잔해가 나지 않는다)
+    for (const p of this.puddles) {
+      if (p.type !== 'disc' || !p.rays) continue;
+      const e = p.rmax;
+      this.stampSurf(p.x - e, p.z - e, p.x + e, p.z + e, (x, z, k) => {
+        const r = Math.hypot(x - p.x, z - p.z);
+        if (r < this.puddleRadiusAt(p, Math.atan2(z - p.z, x - p.x)) - 0.15 && this.heightAt(x, z) < p.level - 0.04) this.surf[k] = SID.water;
       });
     }
     for (const m of this.rubbleMounds) {
@@ -1234,6 +1460,7 @@ export class Terrain {
     this.paintCanal(m);
     this.paintTrenches(m);
     this.paintCraters(m);
+    this.paintPuddles(m);
     this.paintObjects(m);
     // 8비트로 묶기
     const A = new Uint8Array(N * N * 4);
@@ -1381,7 +1608,9 @@ export class Terrain {
         const d = polylineDistance(tr.points, x, z);
         const bd = Math.abs(d - half);
         if (bd < m.track[k]) m.track[k] = bd;
-        this.paint(m, k, GM.mud, (1 - smoothstep(T.bandHalf * 0.4, T.bandHalf * 1.6, bd)) * 0.3);
+        // 눌린 띠 = 젖은 진흙 (셰이더가 띠 거리장으로 날카롭게 더 칠한다), 띠 사이·바깥으로 밀려난 흙은 옅게
+        this.paint(m, k, GM.mud, (1 - smoothstep(T.bandHalf * 0.5, T.bandHalf * 1.7, bd)) * T.mud * 0.6);
+        this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 1.0, d / half)) * 0.18);
       });
     }
   }
@@ -1426,14 +1655,21 @@ export class Terrain {
         this.paint(m, k, GM.mud, 0.45 + 0.2 * n);
         return;
       }
-      // 둔덕 (발판 바깥 끝 → 뒤쪽 끝 t = 0..1)
+      // 둔덕 (발판 바깥 끝 → 뒤쪽 끝 t = 0..1). 파낸 흙 = 흑토 흙덩이와 하층토가 섞인 것: 두 재질을 비슷한 비율로 칠해
+      // 셰이더의 높이 기반 혼합이 흙덩이 사이사이로 섞이게 한다 (하층토만 칠하면 밝은 얼룩 무늬가 시작 화면 아래쪽을 채운다).
+      // 마루와 뒤쪽은 마른 풀이 군데군데 덮는다 (BP = CONFIG.canal.bermPaint). 가파른 앞면 중간에 재질 경계(예: 아래쪽 진흙 띠)를
+      // 두지 않는다 — 0.5m 마스크 격자의 보간 경계가 가파른 면에서 세로로 늘어나 물결무늬 띠가 된다 (진흙은 발판에서 칠한다)
+      const BP = CONFIG.canal.bermPaint;
       const t = (d - C.bench.outer) / (C.berm.face + C.berm.back);
       if (t > 1.15) return;
+      const tc = C.berm.face / (C.berm.face + C.berm.back); // 마루
       const spoil = 1 - smoothstep(0.4, 1.0, t + n * 0.15);
-      this.paint(m, k, GM.mud, spoil * 0.55);
-      this.paint(m, k, GM.subsoil, spoil * (0.35 + 0.4 * smoothstep(-0.2, 0.5, nz.noise(x / 2.1 + 7, z / 2.1))));
-      this.paint(m, k, GM.plowed, spoil * smoothstep(0.25, 0.7, nz.noise(x / 1.3 - 5, z / 1.3)) * 0.4);
-      this.paint(m, k, GM.grass, smoothstep(0.3, 0.75, t + 0.25 * nz.noise(x / 3.3, z / 3.3 + 4)) * 0.75);
+      // 흙덩이·하층토 비율: 잘게(1m 안팎) 섞는다 — 큰 얼룩이면 둔덕 앞면에 그림자 같은 어두운 덩어리가 생긴다
+      const nc = 0.65 * nz.noise(x / 0.85 + 7, z / 0.85) + 0.35 * nz.noise(x / 2.4 - 2, z / 2.4 + 5);
+      this.paint(m, k, GM.plowed, spoil * BP.clods);
+      this.paint(m, k, GM.subsoil, spoil * (BP.subsoil[0] + (BP.subsoil[1] - BP.subsoil[0]) * smoothstep(-0.35, 0.45, nc)));
+      const ng = nz.noise(x / 2.6, z / 2.6 + 4) + 0.5 * nz.noise(x / 0.9 - 3, z / 0.9);
+      this.paint(m, k, GM.grass, smoothstep(tc * 0.75, tc + 0.3, t + 0.12 * ng) * (BP.grass[0] + (BP.grass[1] - BP.grass[0]) * smoothstep(-0.3, 0.4, ng)));
       // 사격 홈: 새로 파낸 하층토
       const wN = this.canalNotchWeight(x);
       if (wN > 0 && t < 0.75) this.paint(m, k, GM.subsoil, wN * 0.65);
@@ -1526,11 +1762,40 @@ export class Terrain {
           // 바깥 젖은 흙 튄 자국
           this.paint(m, k, GM.mud, smoothstep(0.55, 0.9, n) * (1 - smoothstep(1.1, 1.8, t)) * 0.4);
         } else {
-          this.paint(m, k, GM.grass, (1 - smoothstep(0.85, 1.45, t)) * 0.7);
-          this.paint(m, k, GM.subsoil, (1 - smoothstep(0.1, 0.35, Math.abs(t - 1.02))) * 0.15);
-          this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 0.6, t)) * 0.8);
+          // 오래된 구덩이: 테두리 마루는 풀이 성기고 마른 흙이 드러난 밝은 띠, 안쪽 벽은 어두운 흙·진흙
+          // → 낮은 시선에서 밝은 마루 선 + 그 너머 어두운 안쪽 벽으로 윤곽이 읽힌다
+          this.paint(m, k, GM.grass, (1 - smoothstep(1.1, 1.55, t)) * 0.6);
+          const crest = 1 - smoothstep(0.07, 0.24, Math.abs(t - 1.03 - n * 0.06));
+          this.paint(m, k, GM.subsoil, crest * (0.5 + 0.25 * n));
+          const wall = smoothstep(0.3, 0.55, t) * (1 - smoothstep(0.84, 0.97, t));
+          this.paint(m, k, GM.plowed, wall * (0.6 + 0.2 * n));
+          this.paint(m, k, GM.mud, (1 - smoothstep(0.3, 0.65, t)) * 0.85);
         }
       });
+    }
+  }
+
+  // 물웅덩이 둘레: 젖은 진흙 테 (물가가 칼같이 끊기지 않고 젖은 흙으로 번진다, 얕은 물 아래도 진흙)
+  paintPuddles(m) {
+    const nz = this.noise;
+    const W = CONFIG.ground.puddle.wetRing;
+    for (const p of this.puddles) {
+      if (p.type === 'disc' && p.rays) {
+        const e = p.rmax + 1.2;
+        this.maskStamp(m, p.x - e, p.z - e, p.x + e, p.z + e, (x, z, k) => {
+          const r = Math.hypot(x - p.x, z - p.z);
+          const d = r - this.puddleRadiusAt(p, Math.atan2(z - p.z, x - p.x));
+          const n = nz.noise(x / 0.9 + 3.1, z / 0.9 - 7.7);
+          this.paint(m, k, GM.mud, (1 - smoothstep(-0.25, 0.75 + 0.45 * n, d)) * W);
+        });
+      } else if (p.type === 'strip') {
+        const { x0, x1, z0, z1 } = bbox(p.pts);
+        const e = p.hw + 1;
+        this.maskStamp(m, x0 - e, z0 - e, x1 + e, z1 + e, (x, z, k) => {
+          const d = polylineDistance(p.pts, x, z) - p.hw;
+          this.paint(m, k, GM.mud, (1 - smoothstep(0, 0.55 + 0.3 * nz.noise(x / 0.8, z / 0.8), d)) * W * 0.8);
+        });
+      }
     }
   }
 
@@ -1609,6 +1874,13 @@ export class Terrain {
     const tint = p ? this.parcels[p].tint : WHITE;
     const v = 1 + V.amp[0] * nz.noise(x / V.size[0] + 17, z / V.size[0] - 4) + V.amp[1] * nz.noise(x / V.size[1] - 21, z / V.size[1] + 9);
     const k = v * this.aoAt(x, z, h, fine);
+    // 적 참호 흉벽 앞면·마루: 밝은 하층토 띠를 조금 더 밝게 (CONFIG.enemyPosition.crestTint)
+    const cw = this.trenchCrestWeight(x, z);
+    if (cw > 0) {
+      const ct = CONFIG.enemyPosition.crestTint;
+      out.push(tint[0] * k * (1 + (ct[0] - 1) * cw), tint[1] * k * (1 + (ct[1] - 1) * cw), tint[2] * k * (1 + (ct[2] - 1) * cw));
+      return;
+    }
     out.push(tint[0] * k, tint[1] * k, tint[2] * k);
   }
 
@@ -2314,6 +2586,8 @@ void tFarGround(vec2 wp, out vec4 A, out vec4 B) {
       console.warn('[Terrain] 원경 지형 셰이더 끼워 넣기 실패 — 지형 셰이더가 바뀌었습니다 (맵 밖 지면은 기본 얼룩으로 그립니다)');
     }
     shader.fragmentShader = out;
+    // 지평선 위로 솟은 먼 언덕 마루·비탈은 희미한 실루엣으로 남긴다 (먼 마을·탑과 같은 식, Distant.applySilhouetteFog)
+    applySilhouetteFog(shader);
   };
   mat.customProgramCacheKey = () => 'terrainSplat_ring_' + variant;
   return mat;
@@ -2332,6 +2606,14 @@ export function createTerrainMaterial(terrain) {
     const p = terrain.parcels[i];
     parcels.push(p ? new THREE.Vector4(p.dirX, p.dirZ, p.spacing, p.depth) : new THREE.Vector4(0, 1, 1, 0));
   }
+  // 궤도 자국 선분: 좌우 궤도 띠는 중심선과 평행하므로 중심선 방향·좌표로 궤도판 무늬를 그린다
+  const trackSegs = [];
+  for (const tr of MAP.vehicleTracks || []) {
+    for (let i = 0; i < tr.points.length - 1 && trackSegs.length < MAX_TRACK_SEGS; i++) {
+      trackSegs.push(new THREE.Vector4(tr.points[i][0], tr.points[i][1], tr.points[i + 1][0], tr.points[i + 1][1]));
+    }
+  }
+  while (trackSegs.length < MAX_TRACK_SEGS) trackSegs.push(new THREE.Vector4(1e5, 1e5, 1e5 + 1, 1e5));
   const uniforms = {
     tSplatA: { value: mask.a },
     tSplatB: { value: mask.b },
@@ -2340,26 +2622,31 @@ export function createTerrainMaterial(terrain) {
     tGNrm: { value: tex.normal },
     tMacro: { value: macro },
     uParcel: { value: parcels },
+    uTrackSeg: { value: trackSegs },
     // 물·젖은 흙에 비치는 흐린 하늘 (지평선 색). 대기 쪽에서 바꾸면 여기 값을 갱신하면 된다
     uSkyRefl: { value: new THREE.Color(CONFIG.atmosphere.skyHorizon) },
     // 화면 높이의 절반 (px) — 고랑 형상이 화면 간격에 맞춰 납작해지는 계산용, 매 프레임 갱신
     uHalfH: { value: 360 },
   };
-  // 첫 렌더 직전에 이방성 필터 설정: 알베도는 GPU 최대값 (밉맵 + 이방성: 먼 바닥이 길게 번지지 않게),
-  // 노멀·혼합 마스크는 낮게(비용 절약, 낮은 각도에선 어차피 평평해짐), 큰 규모 노이즈는 1
-  let anisoDone = false;
+  // 렌더 직전에 이방성 필터 설정: 알베도는 항상 GPU 최대값 (밉맵 + 이방성: 먼 바닥이 길게 번지지 않게).
+  // 노멀·두 번째 층·혼합 마스크는 그래픽 품질 '높음'(지형 LOD 거리 >= ground.fullAnisotropyLod)이면 GPU 최대값,
+  // 보통·낮음은 normalAnisotropy·maskAnisotropy (비용 절약, 낮은 각도에선 어차피 평평해짐). 큰 규모 노이즈는 1.
+  // 품질 프리셋을 바꾸면(지형 LOD 거리가 바뀌면) 다음 렌더에서 다시 맞춘다
+  let anisoKey = -1;
   const size = new THREE.Vector2();
   const onTerrainRender = (renderer) => {
     uniforms.uHalfH.value = renderer.getDrawingBufferSize(size).y * 0.5;
-    if (anisoDone) return;
-    anisoDone = true;
+    const lod = CONFIG.terrain.mesh.lodDistance;
+    if (anisoKey === lod) return;
+    anisoKey = lod;
     const a = renderer.capabilities.getMaxAnisotropy();
+    const full = lod >= G.fullAnisotropyLod;
     const want = [
       [tex.albedo, a],
-      [tex.albedoLow, Math.min(a, G.normalAnisotropy)],
-      [tex.normal, Math.min(a, G.normalAnisotropy)],
-      [mask.a, Math.min(a, G.maskAnisotropy)],
-      [mask.b, Math.min(a, G.maskAnisotropy)],
+      [tex.albedoLow, full ? a : Math.min(a, G.normalAnisotropy)],
+      [tex.normal, full ? a : Math.min(a, G.normalAnisotropy)],
+      [mask.a, full ? a : Math.min(a, G.maskAnisotropy)],
+      [mask.b, full ? a : Math.min(a, G.maskAnisotropy)],
       [macro, 1],
     ];
     for (const [t, v] of want) {
@@ -2387,7 +2674,8 @@ export function createTerrainMaterial(terrain) {
         .replace('#include <color_fragment>', `#include <color_fragment>\n${parts.fragMain}`)
         .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = tRough;')
         .replace('#include <normal_fragment_maps>', 'normal = normalize((viewMatrix * vec4(tN, 0.0)).xyz);')
-        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += tEmis;');
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += tEmis;')
+        .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${parts.fragLights}`);
     };
     mat.customProgramCacheKey = () => 'terrainSplat_' + variant;
     return mat;

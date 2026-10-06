@@ -2,6 +2,7 @@
 // 점검용 고정 시점 (디버그 모드에서 F4 로 순환). 화면 품질을 같은 자리에서 비교하기 위한 도구.
 // 위치는 맵 데이터와 현재 지형에서 매번 계산한다 (지형·수로 형상이 바뀌어도 따라간다).
 // =============================================================================
+import { CONFIG } from '../config.js';
 import { MAP } from '../world/mapData.js';
 import { EV } from '../core/events.js';
 
@@ -41,6 +42,36 @@ export class ViewPoints {
     return best;
   }
 
+  // 기준점 (bx, bz) + 후보 오프셋 중, 선 눈높이·총 높이에서 북쪽으로 clearAhead m 와 좌우 sideDeg 비스듬히 clearSide m 가
+  // 지형·충돌체에 막히지 않는 첫 자리 (모두 막히면 첫 후보)
+  clearSpot(bx, bz, offsets) {
+    const V = CONFIG.debug.viewPoints;
+    const t = this.game.world.terrain;
+    const col = this.game.world.collision;
+    const eye = CONFIG.player.eyeHeights.stand;
+    const sx = Math.sin((V.sideDeg * Math.PI) / 180) * V.clearSide;
+    const sz = Math.cos((V.sideDeg * Math.PI) / 180) * V.clearSide;
+    for (const [ox, oz] of offsets) {
+      const x = bx + ox;
+      const z = bz + oz;
+      const y0 = col.groundHeight(x, z, t.heightAt(x, z) + 0.6);
+      let open = true;
+      for (const h of [eye, eye - 0.25]) {
+        const y = y0 + h;
+        if (
+          col.lineBlocked(x, y, z, x, y, z - V.clearAhead) ||
+          col.lineBlocked(x, y, z, x - sx, y, z - sz) ||
+          col.lineBlocked(x, y, z, x + sx, y, z - sz)
+        ) {
+          open = false;
+          break;
+        }
+      }
+      if (open) return [x, z];
+    }
+    return [bx + offsets[0][0], bz + offsets[0][1]];
+  }
+
   apply(i) {
     const g = this.game;
     const p = g.player;
@@ -71,9 +102,9 @@ export class ViewPoints {
         posture = 'stand';
         break;
       case 3: {
+        // 장갑차 옆(트인 옆구리). 날아간 포탑·잔해가 눈앞을 막지 않는 첫 후보 자리를 고른다
         const a = MAP.apc;
-        x = a.x + 3;
-        z = a.z + 6;
+        [x, z] = this.clearSpot(a.x, a.z, CONFIG.debug.viewPoints.apcOffsets);
         posture = 'stand';
         break;
       }
@@ -105,6 +136,9 @@ export class ViewPoints {
     p.ads = ads ? 1 : 0;
     p.updateCamera(0);
     p.updateBody(0);
+    // 총 거치 표시('거치')를 새 자리 기준으로 (정지 상태에서는 Player.update 가 돌지 않아 이전 자리 값이 남는다)
+    p.speedClass = 'still';
+    p.updateRest();
     g.events.emit(EV.PLAYER_POSTURE, { posture });
     g.events.emit(EV.MESSAGE, { text: `점검 시점 ${VIEWPOINT_NAMES[i]}`, kind: 'info' });
   }

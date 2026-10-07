@@ -57,7 +57,9 @@ export class SuppressionSystem {
     const consider2 = S.considerDist * S.considerDist;
     for (let i = 0; i < units.length; i++) {
       const u = units[i];
-      if (u.team === b.team || !u.alive) continue;
+      if (u === b.shooter || !u.alive) continue;
+      // 같은 편 탄은 제압하지 않는다. 단, 플레이어 탄은 아군 분대원도 제압한다 (2단계)
+      if (u.team === b.team && !(b.shooter && b.shooter.isPlayer && CONFIG.squad.playerFriendlyFire)) continue;
       let rec = b.records.get(u);
       if (rec && rec.finalized) continue;
       u.getChestPos(_chest);

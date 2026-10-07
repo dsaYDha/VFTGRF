@@ -1013,6 +1013,15 @@ export const CONFIG = {
       reactionTime: [0.35, 0.8],
       colors: { uniform: 0x5c5a45, uniform2: 0x48463a, vest: 0x4a4a3a, helmet: 0x3f4234, skin: 0x8a6e5a, boots: 0x1c1a17, gear: 0x2d2b25 },
     },
+    // 2단계 아군 분대원: 같은 몸 모델·같은 명중률, 탄창 8개 (장전 1 + 예비 7)
+    squadRifleman: {
+      weapon: 'ak545',
+      spareMags: 7,
+      aimDispersionMrad: 4.8,
+      blindFireDispersionMrad: 45,
+      reactionTime: [0.35, 0.8],
+      colors: { uniform: 0x5c5a45, uniform2: 0x48463a, vest: 0x4a4a3a, helmet: 0x3f4234, skin: 0x8a6e5a, boots: 0x1c1a17, gear: 0x2d2b25 },
+    },
   },
 
   // ---------------------------------------------------------------- 적 AI
@@ -1050,6 +1059,15 @@ export const CONFIG = {
     perceptionInterval: 0.2,
     detectBaseRate: 0.22, // 100m, 완전 노출·정지 상태일 때 초당 발견률
     detectRangeExp: 1.5,
+    // 2단계: 여러 대상(플레이어·아군) 중 노릴 대상 고르기 점수
+    targeting: {
+      visibleBonus: 100, // 지금 보이는 대상
+      motionBonus: { still: 0, walk: 10, sprint: 25 }, // 보이는 대상이 움직이면 추가 (약진 중인 아군에 사격이 몰린다)
+      recentBonus: 30, // 최근 화염·직접 확인 (초가 지날수록 감소)
+      soundBonus: 8, // 총성·공유 정보만
+      distancePenalty: 0.06, // m 당 감점 (가까운 대상 우선)
+      stickiness: 6, // 지금 대상 유지 가산 (자주 바꾸지 않게)
+    },
     detectPostureMul: { stand: 1.0, crouch: 0.6, prone: 0.35 },
     detectMotionMul: { still: 1.0, walk: 2.0, sprint: 3.5 },
     flashDetectChance: 0.75, // 관측 중 플레이어 총구 화염을 볼 확률
@@ -1088,6 +1106,68 @@ export const CONFIG = {
     abandonAfter: 14, // 이 시간 안에 출발 못 하면 저지(포기)
     reinforcementDelay: [30, 60],
     nodeWeights: { line: 0, crater: 3, trench: 2, building: 1, rubble: 1, open: 4 },
+  },
+
+  // ---------------------------------------------------------------- 2단계 임무: 약진 엄호
+  advanceMission: {
+    timeLimit: 720, // 12분
+    assaultHoldTime: 30, // 돌격 대기 위치에서 버틸 시간
+    assaultRadius: 9, // 돌격 대기 위치 판정 반경
+    minAtAssault: 2, // 기동조 중 이만큼이 돌격 대기 위치에 있어야
+    maxMobileLosses: 3, // 기동조 전투 불능이 이만큼이면 실패
+    reinforcementMax: 2, // 적 증원 최대 횟수
+    endDelay: 2.0,
+  },
+
+  // ---------------------------------------------------------------- 2단계: 아군 분대 (사격과 기동)
+  squad: {
+    // 이동·자세
+    sprintSpeed: 4.6, // 장비를 메고 밭을 가로지르는 질주 (적 질주 5.4보다 느림)
+    runTime: [3, 5], // 한 번에 뛰는 시간 (넘으면 엎드림)
+    dropTime: [0.9, 1.8], // 긴 구간 중간에 엎드려 숨 고르는 시간
+    upTime: [2.5, 5.0], // 엄호 위치에서 고개를 들고 관측·사격하는 시간
+    downTime: [1.2, 3.0], // 고개를 숙이고 있는 시간
+    resumeQuiet: 2.0, // 멈춘 뒤 다시 뛰려면 근접탄 없이 이만큼
+    diveCraterRadius: 6, // 근접탄을 받으면 이 거리 안의 구덩이로 뛰어든다
+    nearRoundDist: 3, // '근접탄' 거리 (통과·탄착)
+    craterSnap: 6, // 경로 지점을 이 거리 안의 실제 구덩이 중심에 맞춤
+    slotCount: 4, // 구덩이마다 엎드릴 자리 (1조 0·1, 2조 2·3)
+    slotSpacing: 1.0, // 자리 사이 좌우 간격 (m)
+    slotRimBelow: 0.3, // 구덩이 테두리보다 이만큼 낮은 경사면에 엎드린다 (눈만 테두리 위로)
+    slotBodyBack: 0.7, // 몸 중심은 그 지점에서 이만큼 뒤
+    canalBench: 2.42, // 수로 중심에서 북쪽 사격 턱까지 (플레이어 시작 위치와 같은 줄)
+    facePoint: [-5, -112], // 기본으로 바라보는 곳 (적 진지 가운데)
+    // 사격 (1단계 적과 같은 명중률 규칙)
+    fireInterval: [2, 5], // 단발 간격
+    fireRange: 420,
+    estimateMaxAge: 40, // 이보다 오래된 추정에는 쏘지 않는다
+    lowAmmoRounds: 60,
+    lineClearance: 2.0, // 사선에서 다른 아군까지 이 거리 안이면 쏘지 않는다
+    lineClearanceDeg: 2.5, // 또는 이 각도 안
+    // 약진 판단 (분대장)
+    checkInterval: 1.0, // 출발 조건 검사 간격
+    threatMinSuppression: 25, // 사선이 닿는 적은 모두 이 이상(압박)이거나 쓰러져야
+    departMaxSuppression: 25, // 뛸 분대원의 제압 값이 이보다 낮아야
+    departQuietTime: 2.0, // 최근 이 시간 동안 뛸 분대원 근처(3m)에 적 탄이 없어야
+    minBoundGap: 8, // 지난 약진 도착 뒤 최소 대기 (G 요청이면 생략)
+    blockedRepeat: 20, // 이 시간 이상 막히면 엄호 사격을 다시 요청
+    losStep: 2.5, // 구간 사선 검사 간격 (m)
+    losRunnerHeight: 1.2, // 뛰는 사람 가슴 높이
+    enemyEyeHeights: { stand: 1.55, kneel: 1.05, prone: 0.35 },
+    // 표적 지시 (X)
+    designateTime: 15,
+    designateSpread: 1.4, // 지시 지점 주변 조준 분산 (m)
+    designateRange: 600,
+    designateMatch: 18, // 지시 지점에서 이 거리 안의 적 추정을 지시 지점으로 갱신
+    designateSigma: 4,
+    // 사격 전환 (플레이어 사선과 아군)
+    shiftFire: { angleDeg: 5, lineDist: 3, targetDist: 30, recentShot: 1.5, minRange: 8 },
+    friendlyNearDist: 3, // 플레이어 탄이 아군 이 거리 안을 지나면 '아군이다! 사격 중지!'
+    playerFriendlyFire: true, // 플레이어 탄은 아군에게 피해·제압
+    // 콜아웃
+    calloutGap: 6, // 같은 콜아웃은 이 시간 안에 반복하지 않는다
+    markerTime: 2.0, // Tab 을 떼도 표지가 남는 시간
+    contactRange: 450,
   },
 
   // ---------------------------------------------------------------- 이펙트
@@ -1145,6 +1225,58 @@ export const CONFIG = {
     shakeNearMiss: 0.010,
     shakeImpact: 0.006,
     shakeDecay: 7,
+  },
+
+  // ---------------------------------------------------------------- 2단계: 소리 버스·볼륨·무전 스켈치·음성 합성 (AudioSystem)
+  // 출력: 효과음 버스(모든 게임 효과음) + 음성 버스(무전 스켈치) → 전체(master, audio.master × 볼륨) → 먹먹함 → 압축 → 리미터.
+  // 일시정지 메뉴 슬라이더 3개(전체·효과음·음성)와 '음성 콜아웃 읽기'는 브라우저(localStorage)에 기억된다 (전체 기본값 = audio.defaultVolume)
+  audioMix: {
+    defaultSfx: 1.0, // 효과음 볼륨 기본값 (0~1)
+    defaultVoice: 0.85, // 음성 볼륨 기본값 (0~1: 무전 스켈치 + 음성 합성)
+    storageKeys: { master: 'vftgrf.volume', sfx: 'vftgrf.volume.sfx', voice: 'vftgrf.volume.voice', speech: 'vftgrf.speech' },
+    squelchGain: 0.3, // 무전 스켈치 (송신 시작·끝 '지직')
+    squelchMinInterval: 0.12, // 이보다 짧은 간격으로 연달아 오면 스켈치는 한 번만 (s)
+    refillGain: 0.5, // 탄창 채우기 소리 (클립 꽂기·탄 눌러 넣기·빈 클립·파우치)
+    // 음성 합성 (브라우저 speechSynthesis, 한국어 음성): 기본 끔. 음량 = 전체 × 음성.
+    // 대기는 최대 1개 (새 콜아웃이 대기 중인 것을 바꿈), maxAge 초가 지난 대기 문장은 버림, 'alert' 는 읽던 것을 끊고 바로 읽음.
+    // stuckTimeout: 끝 알림(onend)이 오지 않는 브라우저용 — 이 시간이 지나면 다음 문장으로 넘어감 (s)
+    speech: { lang: 'ko-KR', rate: 1.15, pitch: 0.95, maxAge: 4, stuckTimeout: 10, alertInterrupts: true },
+  },
+
+  // ---------------------------------------------------------------- 2단계: 분대 콜아웃 자막 (HUD, EV.CALLOUT)
+  // 화면 아래 가운데 "[분대장] 2조 이동!" — 새 줄이 아래, 가장 오래된 줄을 밀어낸다. 같은 줄이 연달아 오면 합쳐 시간만 늘린다
+  callouts: {
+    time: 3.5, // 한 줄이 보이는 시간 (s, 게임 시간 — 일시정지 중에는 멈춤)
+    fade: 0.45, // 사라지는 시간 (s)
+    maxLines: 2, // 동시에 보이는 줄 수
+  },
+
+  // ---------------------------------------------------------------- 2단계: 탄약 상자 (2단계 임무에서만, world/AmmoCrate.js + Player 의 F 탄창 채우기)
+  ammoCrate: {
+    totalRounds: 300,
+    // 놓을 자리 후보 [dx, d]: 시작 위치(MAP.playerSpawn)에서 수로를 따라 동쪽(+)으로 dx m, 수로 중심에서 북쪽 d m (null = 사격 발판 가운데).
+    // 앞쪽부터 발자국 지면 높이 차가 flatTol 이하이고 다른 충돌체와 clear m 안에서 겹치지 않는 첫 자리 (시작 위치 동쪽 2.3m 에는 잡동사니 빈 상자가 있다)
+    spots: [[-1.75, null], [-2.2, null], [-1.4, null], [1.6, null], [-2.8, null]],
+    flatTol: 0.08,
+    clear: 0.12,
+    size: [0.56, 0.22, 0.34], // 바깥 치수 (길이 · 높이 · 폭, m) — 높이가 player.stepHeight 보다 낮아 넘어 다닐 수 있다
+    yawJitter: 0.12, // 수로 방향에서 살짝 틀어 놓음 (rad)
+    packetRounds: 30, // 상자 안 종이 탄포 하나 (남은 탄에 맞춰 보이는 탄포 수가 줄어듦, 최대 10개)
+    useRadius: 2.2, // 이 수평 거리 안에서 F 로 시작 (m)
+    leaveRadius: 2.5, // 이보다 멀어지면 중단 (m)
+    maxDy: 1.2, // 높이 차가 이보다 크면 손이 닿지 않음 (m)
+    // 탄창 하나 (30발 = 10발 클립 3개 ≈ 8초): 파우치에서 꺼내 장전 가이드 끼우기(takeTime) → 클립마다
+    // (꽂기 clipInTime → 엄지로 눌러 넣기 pressTime → 빈 클립 빼기 clipOutTime, 이때 탄이 옮겨짐) → 파우치에 넣기(stowTime)
+    clipRounds: 10,
+    takeTime: 0.9,
+    clipInTime: 0.35,
+    pressTime: 1.25,
+    clipOutTime: 0.5,
+    stowTime: 0.8,
+    raiseTime: 0.35, // 멈춘 뒤 총을 다시 들어 쏠 수 있을 때까지 (s)
+    // 채우는 동안 1인칭 총 자세 (viewModel.poses 와 같은 형식, 카메라 기준 p[x,y,z]·r[pitch,yaw,roll]):
+    // 달릴 때처럼 몸 앞에 비스듬히, 그보다 조금 더 낮게 (총구가 아래로) 들어 화면 아래쪽에 걸친다
+    viewPose: { p: [0.14, -0.22, -0.13], r: [-0.3, 0.6, 0.45] },
   },
 
   // ---------------------------------------------------------------- 1인칭 뷰모델 (AK-74, 실제 치수 m)

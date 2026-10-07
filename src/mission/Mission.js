@@ -11,6 +11,8 @@ import { LEVEL } from '../suppression/Suppressible.js';
 export class Mission {
   constructor(game) {
     this.game = game;
+    this.id = 'hold';
+    this.title = '이동 저지';
     this.state = 'idle';
     this.reset();
     const ev = game.events;
@@ -80,6 +82,11 @@ export class Mission {
 
   get remaining() {
     return Math.max(0, CONFIG.mission.duration - this.time);
+  }
+
+  // HUD 오른쪽 위 한 줄 상태
+  get statusText() {
+    return `적 진출 ${this.advances} / ${CONFIG.mission.maxAdvances}`;
   }
 
   update(dt) {

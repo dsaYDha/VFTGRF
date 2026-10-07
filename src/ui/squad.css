@@ -1,0 +1,89 @@
+/* 2단계: Tab 분대 상태 패널 + 반투명 아군 표지 */
+#squad-panel {
+  position: fixed;
+  left: 50%;
+  top: 14%;
+  transform: translateX(-50%);
+  min-width: min(520px, 92vw);
+  max-width: 92vw;
+  padding: 12px 16px 10px;
+  background: rgba(14, 18, 16, 0.78);
+  border: 1px solid rgba(79, 216, 200, 0.35);
+  border-radius: 6px;
+  color: #dfe8e0;
+  font: 14px/1.5 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+  pointer-events: none;
+  z-index: 12;
+  text-shadow: 0 1px 2px #000;
+}
+#squad-panel.hidden {
+  display: none;
+}
+#squad-panel h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: #8ff0e6;
+  font-weight: 600;
+}
+#squad-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+#squad-panel th {
+  text-align: left;
+  font-weight: 500;
+  color: #9aa89c;
+  font-size: 12px;
+  padding: 0 8px 2px 0;
+}
+#squad-panel td {
+  padding: 1px 8px 1px 0;
+  white-space: nowrap;
+}
+#squad-panel td.st-bad {
+  color: #f08a6a;
+}
+#squad-panel td.st-move {
+  color: #8fd0ff;
+}
+#squad-panel td.st-dead {
+  color: #777;
+}
+#squad-panel .sq-note {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #c8d2c0;
+}
+#squad-markers {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 11;
+}
+.sq-marker {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  text-align: center;
+  color: rgba(143, 240, 230, 0.85);
+  font: 12px/1.2 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+  text-shadow: 0 1px 2px #000;
+  transition: opacity 0.4s;
+  white-space: nowrap;
+}
+.sq-marker::after {
+  content: '';
+  display: block;
+  margin: 2px auto 0;
+  width: 0;
+  height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-top: 9px solid rgba(79, 216, 200, 0.55);
+}
+.sq-marker.down {
+  color: rgba(240, 138, 106, 0.85);
+}
+.sq-marker.down::after {
+  border-top-color: rgba(240, 138, 106, 0.55);
+}

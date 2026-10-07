@@ -1,6 +1,8 @@
 // =============================================================================
 // DebugOverlay (F3) — 적 위치와 제압 막대·상태, 적이 기억하는 플레이어 추정 위치,
 // 사격 위치 후보, 탄도 궤적 선, 성능 측정. 기본 꺼짐.
+// 2단계(약진 엄호): 아군 상태·제압 막대(청록 계열), 약진 경로·다음 구간(초록 = 출발 가능, 노랑 = 대기, 빨강 = 막힘),
+// 막고 있는 적에서 구간까지 빨간 선과 이유, 플레이어 사선 위험 범위(5°·3m·탄착점 30m), 아군 근처를 지난 플레이어 탄 위치.
 // F3 을 누를 때마다 끔 → 전체 → 성능만 → 끔. '성능만' 은 디버그 표시(마커·이름표·궤적 선)를 그리지 않아
 // 실제 게임 화면 그대로의 FPS·프레임 시간·draw call·삼각형 수를 잰다 (사용자 PC 에서 측정·보고용).
 // =============================================================================
@@ -9,8 +11,13 @@ import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
 import { MAP } from '../world/mapData.js';
 import { STATE_NAMES } from '../ai/EnemyAI.js';
+import { FRIENDLY_STATE_NAMES } from '../ai/FriendlyAI.js';
+import { TEAM_NAMES } from '../ai/SquadLeader.js';
 
 const LEVEL_COLORS = ['#7fd06a', '#e8d250', '#f09a40', '#f05a4a'];
+// 아군 제압 막대 (적과 구별되는 청록 → 파랑 → 보라 → 자홍)
+const FRIEND_COLORS = ['#4fd8c8', '#46a8f0', '#8a78f0', '#d058d8'];
+const REASON_NAMES = { threat: '사선이 닿는 적 미제압', suppressed: '뛸 조원 제압됨', near: '조원 3m 안 근접탄', gap: '도착 뒤 대기' };
 const MODES = ['off', 'full', 'perf'];
 const MODE_NAMES = { full: '전체', perf: '성능만' };
 const _v = new THREE.Vector3();
@@ -106,6 +113,7 @@ export class DebugOverlay {
     this.trailLines = new THREE.LineSegments(this.trailGeo, new THREE.LineBasicMaterial({ vertexColors: true, fog: false, transparent: true, opacity: 0.85, depthTest: false }));
     this.trailLines.frustumCulled = false;
     this.group.add(this.trailLines);
+    this.buildSquadDebug();
     game.events.on(EV.BULLET_EXPIRED, (e) => {
       if (this.mode !== 'full' || e.bullet.trail.length < 6) return;
       this.trails.push({ pts: e.bullet.trail.slice(), player: e.bullet.shooter === game.player.body });
@@ -310,8 +318,168 @@ export class DebugOverlay {
     this.ringGeo.attributes.position.needsUpdate = true;
     for (const m of this.fpMeshes) m.material = m.userData.fp.occupiedBy ? this.matFpUsed : this.matFpFree;
     if (this.trailsDirty) this.rebuildTrails();
+    this.updateSquad();
     this.updateLabels(ais);
     this.updatePanel(ais);
+  }
+
+  // ------------------------------------------------------------------ 2단계 분대
+  buildSquadDebug() {
+    const sq = this.game.squad;
+    this.sqGroup = new THREE.Group();
+    this.group.add(this.sqGroup);
+    if (!sq) return;
+    // 경로 그래프 (흐린 청록) + 지점 표시
+    const pts = [];
+    for (const n of Object.values(sq.nodes)) {
+      for (const id of n.next) {
+        const b = sq.nodes[id];
+        pts.push(n.x, n.y + 0.35, n.z, b.x, b.y + 0.35, b.z);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    this.sqGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x3fb8b0, depthTest: false, fog: false, transparent: true, opacity: 0.55 })));
+    const nodeGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.08, 14);
+    const nodeMat = new THREE.MeshBasicMaterial({ color: 0x3fd0c0, depthTest: false, transparent: true, opacity: 0.6, fog: false });
+    for (const n of Object.values(sq.nodes)) {
+      const m = new THREE.Mesh(nodeGeo, nodeMat);
+      m.position.set(n.x, n.y + 0.3, n.z);
+      m.renderOrder = 10;
+      this.sqGroup.add(m);
+    }
+    // 움직이는 선 (다음 구간·막는 적·사선 위험 범위·아군 근처 탄): 정점 색
+    this.sqMax = 400;
+    this.sqPos = new Float32Array(this.sqMax * 6);
+    this.sqCol = new Float32Array(this.sqMax * 6);
+    this.sqGeo = new THREE.BufferGeometry();
+    this.sqGeo.setAttribute('position', new THREE.BufferAttribute(this.sqPos, 3));
+    this.sqGeo.setAttribute('color', new THREE.BufferAttribute(this.sqCol, 3));
+    this.sqLines = new THREE.LineSegments(this.sqGeo, new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, fog: false, transparent: true, opacity: 0.95 }));
+    this.sqLines.frustumCulled = false;
+    this.sqLines.renderOrder = 12;
+    this.sqGroup.add(this.sqLines);
+  }
+
+  sqLine(ax, ay, az, bx, by, bz, c) {
+    if (this.sqN >= this.sqMax) return;
+    const o = this.sqN * 6;
+    this.sqPos[o] = ax;
+    this.sqPos[o + 1] = ay;
+    this.sqPos[o + 2] = az;
+    this.sqPos[o + 3] = bx;
+    this.sqPos[o + 4] = by;
+    this.sqPos[o + 5] = bz;
+    for (let k = 0; k < 6; k += 3) {
+      this.sqCol[o + k] = c[0];
+      this.sqCol[o + k + 1] = c[1];
+      this.sqCol[o + k + 2] = c[2];
+    }
+    this.sqN++;
+  }
+
+  updateSquad() {
+    const g = this.game;
+    const sq = g.squad;
+    const on = !!(sq && sq.active);
+    this.sqGroup.visible = on;
+    this.squadInfo = null;
+    if (!on) return;
+    this.sqN = 0;
+    const col = g.world.collision;
+    // 다음 구간 (진행 중 약진이면 그 구간)
+    const b = sq.bound;
+    const ev = sq.block;
+    const seg = b ? { fromId: b.fromId, toId: b.toId } : ev ? ev.plan : null;
+    let segState = 'none';
+    if (seg) {
+      const A = sq.nodes[seg.fromId];
+      const B = sq.nodes[seg.toId];
+      segState = b ? 'moving' : !ev.reasons.length ? 'ok' : ev.reasons.every((r) => r.type === 'gap') ? 'gap' : 'blocked';
+      const c = segState === 'moving' ? [0.3, 0.8, 1] : segState === 'ok' ? [0.3, 1, 0.3] : segState === 'gap' ? [1, 0.9, 0.2] : [1, 0.25, 0.2];
+      for (const dy of [0.5, 0.6, 0.7]) this.sqLine(A.x, A.y + dy, A.z, B.x, B.y + dy, B.z, c);
+      // 막는 적 → 구간 가운데
+      const mx = (A.x + B.x) / 2;
+      const mz = (A.z + B.z) / 2;
+      const my = g.world.terrain.heightAt(mx, mz) + 1.2;
+      const blockers = b ? sq.segmentThreats(b.fromId, b.toId).filter((ai) => ai.s.suppression.value < CONFIG.squad.threatMinSuppression) : sq.threats;
+      for (const ai of blockers) {
+        sq.enemyEye(ai, _v);
+        this.sqLine(_v.x, _v.y, _v.z, mx, my, mz, [1, 0.2, 0.15]);
+      }
+      this.squadInfo = { seg, segState, blockers };
+    }
+    // 플레이어 사선 위험 범위: 시선 방향으로 탄착점까지, 좌우 5° 선과 탄착점 둘레 30m 원
+    const pl = g.player;
+    const S = CONFIG.squad.shiftFire;
+    const R = CONFIG.squad.designateRange;
+    g.camera.getWorldDirection(_w);
+    const e = pl.eye;
+    const hit = this.sqHit || (this.sqHit = {});
+    let dist = R;
+    if (col.segmentCast(e.x, e.y, e.z, e.x + _w.x * R, e.y + _w.y * R, e.z + _w.z * R, hit)) dist = hit.t * R;
+    const inLine = this.membersInLine(e, _w, dist);
+    const c = inLine.length ? [1, 0.2, 0.6] : [1, 0.6, 0.2];
+    const hx = e.x + _w.x * dist;
+    const hy = e.y + _w.y * dist;
+    const hz = e.z + _w.z * dist;
+    const yaw = Math.atan2(_w.x, _w.z);
+    const a = (S.angleDeg * Math.PI) / 180;
+    const sx = e.x + _w.x * S.minRange;
+    const sz = e.z + _w.z * S.minRange;
+    const sy = e.y + _w.y * S.minRange;
+    for (const sgn of [-1, 1]) {
+      const ex = e.x + Math.sin(yaw + sgn * a) * dist;
+      const ez = e.z + Math.cos(yaw + sgn * a) * dist;
+      this.sqLine(sx, sy, sz, ex, hy, ez, c);
+    }
+    this.sqLine(sx, sy, sz, hx, hy, hz, c);
+    const terrain = g.world.terrain;
+    let px = hx + S.targetDist;
+    let pz = hz;
+    for (let k = 1; k <= 32; k++) {
+      const t = (k / 32) * Math.PI * 2;
+      const qx = hx + Math.cos(t) * S.targetDist;
+      const qz = hz + Math.sin(t) * S.targetDist;
+      this.sqLine(px, terrain.heightAt(px, pz) + 0.4, pz, qx, terrain.heightAt(qx, qz) + 0.4, qz, c);
+      px = qx;
+      pz = qz;
+    }
+    this.lineInfo = { dist, inLine };
+    // 아군 근처(3m)를 지난 플레이어 탄 (최근 12초): 자홍 별표
+    for (const mk of sq.nearFriendMarks) {
+      const p = mk.pos;
+      this.sqLine(p.x - 0.5, p.y, p.z, p.x + 0.5, p.y, p.z, [1, 0.2, 1]);
+      this.sqLine(p.x, p.y - 0.5, p.z, p.x, p.y + 0.5, p.z, [1, 0.2, 1]);
+      this.sqLine(p.x, p.y, p.z - 0.5, p.x, p.y, p.z + 0.5, [1, 0.2, 1]);
+    }
+    this.sqGeo.setDrawRange(0, this.sqN * 2);
+    this.sqGeo.attributes.position.needsUpdate = true;
+    this.sqGeo.attributes.color.needsUpdate = true;
+  }
+
+  // 플레이어 시선(눈 → dir, dist 까지)의 위험 범위 안 아군 (사격 전환 규칙과 같은 판정)
+  membersInLine(eye, dir, dist) {
+    const S = CONFIG.squad.shiftFire;
+    const tan = Math.tan((S.angleDeg * Math.PI) / 180);
+    const out = [];
+    const hx = eye.x + dir.x * dist;
+    const hy = eye.y + dir.y * dist;
+    const hz = eye.z + dir.z * dist;
+    for (const m of this.game.squad.members) {
+      if (!m.alive) continue;
+      m.s.getChestPos(_v);
+      if (Math.hypot(_v.x - hx, _v.y - hy, _v.z - hz) < S.targetDist) {
+        out.push(m);
+        continue;
+      }
+      _v.sub(eye);
+      const along = _v.dot(dir);
+      if (along < S.minRange || along > dist + 5) continue;
+      const perp = Math.sqrt(Math.max(0, _v.lengthSq() - along * along));
+      if (perp < S.lineDist || perp < along * tan) out.push(m);
+    }
+    return out;
   }
 
   updateLabels(ais) {
@@ -350,6 +518,44 @@ export class DebugOverlay {
       fill.style.width = `${sup.value}%`;
       fill.style.background = ai.s.alive ? LEVEL_COLORS[lvl] : '#555';
       shown.push({ el, x: ((_v.x + 1) / 2) * W, y: ((1 - _v.y) / 2) * H, d: dist, w: 0, h: 0 });
+    }
+    // 2단계 아군 (청록 이름표·막대)
+    const sq = this.game.squad;
+    if (sq && sq.active) {
+      const blockers = this.squadInfo ? this.squadInfo.blockers : [];
+      for (const ai of blockers) {
+        const el = this.labels.get(ai);
+        if (el && el.style.display !== 'none') el.firstElementChild.textContent += ' · 약진 막음';
+      }
+      for (const m of sq.members) {
+        seen.add(m);
+        let el = this.labels.get(m);
+        if (!el) {
+          el = document.createElement('div');
+          el.className = 'dbg-label';
+          el.style.color = '#8ff0e6';
+          el.innerHTML = `<div class="t"></div><div class="dbg-bar"><div class="dbg-bar-fill"></div>
+            <div class="dbg-bar-tick" style="left:25%"></div><div class="dbg-bar-tick" style="left:50%"></div><div class="dbg-bar-tick" style="left:80%"></div></div>`;
+          this.labelsEl.appendChild(el);
+          this.labels.set(m, el);
+        }
+        m.s.getHeadPos(_v);
+        _v.y += 0.5;
+        _v.project(cam);
+        if (_v.z > 1 || _v.z < -1) {
+          el.style.display = 'none';
+          continue;
+        }
+        el.style.display = '';
+        const sup = m.s.suppression;
+        const lvl = m.alive ? sup.level : 0;
+        const dist = Math.round(m.pos.distanceTo(this.game.player.pos));
+        el.firstElementChild.textContent = `${m.callName}(${TEAM_NAMES[m.team]}) [${m.statusName()}] ${FRIENDLY_STATE_NAMES[m.state] || m.state} · ${dist}m · 탄 ${m.s.weapon.totalRounds()}`;
+        const fill = el.querySelector('.dbg-bar-fill');
+        fill.style.width = `${sup.value}%`;
+        fill.style.background = m.alive ? FRIEND_COLORS[lvl] : '#555';
+        shown.push({ el, x: ((_v.x + 1) / 2) * W, y: ((1 - _v.y) / 2) * H, d: dist, w: 0, h: 0 });
+      }
     }
     for (const [ai, el] of this.labels) {
       if (!seen.has(ai)) {
@@ -398,6 +604,7 @@ export class DebugOverlay {
     if (plan) planText = `${plan.ai.s.name} → ${plan.to.id} (${plan.state === 'pending' ? '출발 대기' : '이동 중'})`;
     else planText = `다음 시도 ${Math.max(0, g.director.nextAttempt - g.time).toFixed(0)}초 후`;
     const pl = g.player;
+    if (g.squad && g.squad.active) return this.updateSquadPanel(ais);
     const lines = [
       ...this.perfLines(),
       '',
@@ -412,6 +619,67 @@ export class DebugOverlay {
         return `${ai.s.name.padEnd(4)} ${String(Math.round(ai.s.suppression.value)).padStart(3)} ${ai.statusName().padEnd(4)} ${(STATE_NAMES[ai.state] || ai.state).padEnd(5)} ${ai.node ? ai.node.id : '--'}  추정:${p.source} ±${p.effectiveSigma().toFixed(1)}m${p.visible ? ' 보임' : ''}`;
       }),
     ];
+    this.panel.textContent = lines.join('\n');
+  }
+
+  enemyLine(ai) {
+    const p = ai.perception;
+    const tg = p.target === this.game.player ? '플레이어' : p.target.callName || '?';
+    return `${ai.s.name.padEnd(4)} ${String(Math.round(ai.s.suppression.value)).padStart(3)} ${ai.statusName().padEnd(4)} ${(STATE_NAMES[ai.state] || ai.state).padEnd(5)} ${ai.node ? ai.node.id : '--'}  노림:${tg} ${p.has ? `${p.source} ±${p.effectiveSigma().toFixed(1)}m` : '모름'}${p.visible ? ' 보임' : ''}`;
+  }
+
+  updateSquadPanel(ais) {
+    const g = this.game;
+    const sq = g.squad;
+    const m2 = g.mission;
+    const st = sq.stats;
+    const pl = g.player;
+    const now = g.time;
+    const pct = (v) => `${Math.round(v * 100)}%`;
+    const where = (team) => {
+      const n = sq.nodes[sq.route[sq.teamIdx[team]]];
+      const able = sq.ableOf(team).length;
+      return `${TEAM_NAMES[team]} ${n ? n.id : '-'}(${able}명)`;
+    };
+    const lines = [
+      ...this.perfLines(),
+      '',
+      `탄 ${g.ballistics.active.length}  플레이어 제압 ${pl.body.suppression.value.toFixed(0)}  탄창 ${pl.weapon.mag ? pl.weapon.mag.rounds : '-'}${pl.weapon.chambered ? '+1' : ''}  총 ${pl.weapon.totalRounds()}발  상자 ${g.ammoCrate ? g.ammoCrate.rounds : '-'}`,
+      `임무 ${m2.time.toFixed(0)}s / ${CONFIG.advanceMission.timeLimit}  돌격 대기 ${m2.holdTime.toFixed(0)}s  경로 ${sq.route.join('→')}`,
+      `분대: ${where(1)} · ${where(2)}${sq.halted ? ' · 정지(H)' : ''} · 약진 ${st.bounds}회 (G ${st.bounds - st.autoBounds}) · G 요청 ${st.gRequests} (막힘 ${st.gBlocked})`,
+      `위협 제압률 ${st.threatTime > 0 ? pct(st.threatSuppressedTime / st.threatTime) : '-'} (약진 중 ${st.threatTime.toFixed(0)}s)  손실 ${st.losses}  엄호조 피격 ${st.coverTeamHits}`,
+    ];
+    if (sq.bound) {
+      const b = sq.bound;
+      lines.push(`약진 중: ${TEAM_NAMES[b.team]} ${b.fromId}→${b.toId} ${b.requested ? '(G)' : '(자동)'} ${(now - b.start).toFixed(1)}s · ${b.members.map((m) => `${m.callName}:${FRIENDLY_STATE_NAMES[m.state] || m.state}`).join(' ')}`);
+    } else if (sq.block) {
+      const ev = sq.block;
+      const p = ev.plan;
+      const head = `다음 구간: ${TEAM_NAMES[p.team]} ${p.fromId}→${p.toId}${p.lead ? '' : ' (따라잡기)'}${p.branch ? ' (갈림길)' : ''} — `;
+      if (!ev.reasons.length) lines.push(head + '출발 가능');
+      for (const r of ev.reasons) {
+        let d = REASON_NAMES[r.type];
+        if (r.type === 'threat') d += `: ${r.blockers.map((ai) => `${ai.s.name} ${Math.round(ai.s.suppression.value)}`).join(', ')} (사선 ${ev.threats.length}명 중)`;
+        if (r.type === 'suppressed' || r.type === 'near') d += `: ${r.members.map((m) => m.callName).join(', ')}`;
+        if (r.type === 'gap') d += ` ${r.left.toFixed(1)}s`;
+        lines.push(head + d);
+      }
+      if (sq.blockedSince !== null) lines.push(`  막힌 지 ${(now - sq.blockedSince).toFixed(0)}s (${CONFIG.squad.blockedRepeat}s 넘으면 엄호 요청 반복)`);
+    } else lines.push('다음 구간: 없음');
+    if (sq.designation) lines.push(`표적 지시: 방위 ${Math.round(sq.designation.bearing)} 거리 ${Math.round(sq.designation.range)}m (남은 ${(sq.designation.until - now).toFixed(0)}s)`);
+    const li = this.lineInfo;
+    lines.push(
+      `플레이어 사선: 탄착 ${li ? li.dist.toFixed(0) : '-'}m · 위험 범위 안 아군 ${li && li.inLine.length ? li.inLine.map((m) => m.callName).join(', ') : '없음'} · 아군 3m 안 탄 ${st.playerNearFriend}발 · 아군 오사 ${st.friendlyHitsByPlayer} · 사격 전환 콜 ${st.shiftFireCalls}`,
+    );
+    lines.push('');
+    for (const m of sq.members) {
+      const w = m.s.weapon;
+      lines.push(
+        `${m.callName.padEnd(3)} ${TEAM_NAMES[m.team].padEnd(3)} ${String(Math.round(m.s.suppression.value)).padStart(3)} ${m.statusName().padEnd(4)} ${(FRIENDLY_STATE_NAMES[m.state] || m.state).padEnd(6)} ${m.node.padEnd(2)} 탄 ${w.totalRounds()}${m.up ? ' 관측' : ''}${m.aimTrack && m.aimTrack.has ? ` 노림:${m.aimTrack.target.s.name}` : ''}`,
+      );
+    }
+    lines.push('');
+    for (const ai of ais) lines.push(this.enemyLine(ai));
     this.panel.textContent = lines.join('\n');
   }
 }

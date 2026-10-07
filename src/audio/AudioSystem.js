@@ -3,6 +3,9 @@
 //  3D 위치 음향(HRTF), 음속(340m/s) 지연, 거리별 음색(저역 통과)·잔향 비율,
 //  적 탄이 3m 이내를 지나면 총성보다 먼저 들리는 초음속 파열음.
 //  시스템과는 이벤트로만 연결된다.
+//  출력 버스 (2단계): 효과음(sfxBus, 모든 게임 효과음) + 음성(voiceBus, 분대 콜아웃 무전 스켈치) → master(전체) → 리미터.
+//  볼륨 3개(전체·효과음·음성)는 일시정지 메뉴 슬라이더 → setVolumeOf(kind, v), 브라우저에 저장 (CONFIG.audioMix).
+//  분대 콜아웃(EV.CALLOUT, radio !== false) → 무전 스켈치. 선택: 브라우저 음성 합성(ko-KR)으로 읽기 (기본 끔, setSpeechEnabled)
 // =============================================================================
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
@@ -11,7 +14,7 @@ import { buildSoundBank } from './SoundBank.js';
 import { SR, buf, rng, noise, lowpass, toBuffer } from './dsp.js';
 import { rand, randRange } from '../core/Random.js';
 
-const VOLUME_KEY = 'vftgrf.volume';
+const VOLUME_KINDS = ['master', 'sfx', 'voice'];
 // 새 재질 이름 → 비슷한 탄착음
 const IMPACT_ALIAS = { subsoil: 'dirt', hay: 'sand', rubber: 'mud', fabric: 'sand', sandbag: 'sand', earth: 'dirt' };
 const _f = new THREE.Vector3();
@@ -27,13 +30,13 @@ export class AudioSystem {
     this.error = null;
     this.pausedByGame = false;
     this.activeCount = 0;
-    this.volume = CONFIG.audio.defaultVolume;
-    try {
-      const v = parseFloat(window.localStorage.getItem(VOLUME_KEY));
-      if (Number.isFinite(v)) this.volume = Math.max(0, Math.min(1, v));
-    } catch {
-      // 저장소를 못 쓰면 기본 볼륨
-    }
+    // 볼륨 (0~1): 전체 / 효과음 / 음성. 저장소를 못 쓰면 기본값
+    const MX = CONFIG.audioMix;
+    this.volume = this.loadVolume('master', CONFIG.audio.defaultVolume);
+    this.sfxVolume = this.loadVolume('sfx', MX.defaultSfx);
+    this.voiceVolume = this.loadVolume('voice', MX.defaultVoice);
+    this.lastSquelch = -1e9;
+    this.initSpeech();
     this.installUnlock();
     this.nextArtillery = 5;
     this.nextDistantFire = 9;
@@ -54,6 +57,15 @@ export class AudioSystem {
     ev.on(EV.FOOTSTEP, (e) => this.onStep(e));
     ev.on(EV.UNIT_HIT, (e) => {
       if (e.unit === game.player.body) this.onPlayerHit(e);
+    });
+    // 2단계: 분대 콜아웃 (무전 스켈치 + 선택 음성), 탄약 상자 탄창 채우기 소리
+    ev.on(EV.CALLOUT, (c) => this.onCallout(c));
+    ev.on(EV.AMMO_REFILL, (e) => this.onRefill(e));
+    // 임무 시작·끝, 플레이어 전투 불능: 읽던·대기 중인 음성을 버린다
+    ev.on(EV.MISSION_START, () => this.cancelSpeech());
+    ev.on(EV.MISSION_END, () => this.cancelSpeech());
+    ev.on(EV.UNIT_INCAPACITATED, (e) => {
+      if (e.unit === game.player.body) this.cancelSpeech();
     });
   }
 
@@ -93,7 +105,7 @@ export class AudioSystem {
     }
   }
 
-  // 출력 체인: master(볼륨) → muffle(피격 시 먹먹함) → compressor → destination
+  // 출력 체인: [sfxBus(효과음) | voiceBus(음성)] → master(전체 볼륨) → muffle(피격 시 먹먹함) → compressor → limiter → destination
   buildOutput() {
     const ctx = this.ctx;
     this.comp = ctx.createDynamicsCompressor();
@@ -113,6 +125,12 @@ export class AudioSystem {
     this.limiter.ratio.value = 20;
     this.limiter.attack.value = 0.001;
     this.limiter.release.value = 0.12;
+    this.sfxBus = ctx.createGain();
+    this.sfxBus.gain.value = this.sfxVolume;
+    this.voiceBus = ctx.createGain();
+    this.voiceBus.gain.value = this.voiceVolume;
+    this.sfxBus.connect(this.master);
+    this.voiceBus.connect(this.master);
     this.master.connect(this.muffle);
     this.muffle.connect(this.comp);
     this.comp.connect(this.limiter);
@@ -133,7 +151,7 @@ export class AudioSystem {
       this.reverbGain = ctx.createGain();
       this.reverbGain.gain.value = 0.8;
       this.reverb.connect(this.reverbGain);
-      this.reverbGain.connect(this.master);
+      this.reverbGain.connect(this.sfxBus);
       this.startAmbience();
       this.ready = true;
     }
@@ -152,35 +170,75 @@ export class AudioSystem {
     }
   }
 
-  // 전체 볼륨 0~1 (일시정지 메뉴 슬라이더). 브라우저에 저장한다
-  setVolume(v) {
-    this.volume = Math.max(0, Math.min(1, v));
-    if (this.master) {
-      const g = this.master.gain;
-      const target = CONFIG.audio.master * this.volume;
-      // 일시정지 중(컨텍스트 멈춤)에는 시간이 흐르지 않아 램프가 진행되지 않으므로 바로 넣는다
-      if (this.ctx.state === 'running') g.setTargetAtTime(target, this.ctx.currentTime, 0.02);
-      else {
-        g.cancelScheduledValues(0);
-        g.value = target;
-      }
-    }
+  // ------------------------------------------------------------------ 볼륨 (전체·효과음·음성)
+  loadVolume(kind, def) {
     try {
-      window.localStorage.setItem(VOLUME_KEY, String(this.volume));
+      const raw = window.localStorage.getItem(CONFIG.audioMix.storageKeys[kind]);
+      const v = raw === null ? NaN : parseFloat(raw);
+      if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+    } catch {
+      // 저장소를 못 쓰면 기본 볼륨
+    }
+    return def;
+  }
+
+  // kind: 'master' | 'sfx' | 'voice' → 0~1
+  getVolumeOf(kind) {
+    return kind === 'sfx' ? this.sfxVolume : kind === 'voice' ? this.voiceVolume : this.volume;
+  }
+
+  // 볼륨 0~1 (일시정지 메뉴 슬라이더). 브라우저에 저장한다
+  setVolumeOf(kind, v) {
+    if (!VOLUME_KINDS.includes(kind)) return;
+    v = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+    if (kind === 'sfx') {
+      this.sfxVolume = v;
+      this.rampGain(this.sfxBus, v);
+    } else if (kind === 'voice') {
+      this.voiceVolume = v;
+      this.rampGain(this.voiceBus, v);
+    } else {
+      this.volume = v;
+      this.rampGain(this.master, CONFIG.audio.master * v);
+    }
+    // 읽고 있는 음성 합성은 다음 문장부터 새 음량 (전체 × 음성)
+    try {
+      window.localStorage.setItem(CONFIG.audioMix.storageKeys[kind], String(v));
     } catch {
       // 저장소를 못 쓰는 환경 (사생활 보호 모드 등)
     }
   }
 
-  // F3 디버그 표시용
+  // 전체 볼륨 (예전 API, 슬라이더 하나일 때)
+  setVolume(v) {
+    this.setVolumeOf('master', v);
+  }
+
+  rampGain(node, target) {
+    if (!node || !this.ctx) return;
+    const g = node.gain;
+    // 일시정지 중(컨텍스트 멈춤)에는 시간이 흐르지 않아 램프가 진행되지 않으므로 바로 넣는다
+    if (this.ctx.state === 'running') g.setTargetAtTime(target, this.ctx.currentTime, 0.02);
+    else {
+      g.cancelScheduledValues(0);
+      g.value = target;
+    }
+  }
+
+  // F3 디버그 표시용 (+ 일시정지 메뉴 오디오 상태 줄)
   status() {
     const c = this.ctx;
+    const sp = this.speech;
     return {
       state: c ? c.state : this.error || '아직 없음 (첫 클릭 전)',
       active: this.activeCount,
       sampleRate: c ? c.sampleRate : 0,
       volume: this.volume,
+      sfx: this.sfxVolume,
+      voice: this.voiceVolume,
       ready: this.ready,
+      speech: sp.supported ? (sp.enabled ? (sp.busy ? '읽는 중' : '켬') : '끔') : '지원 안 함',
+      speechVoice: sp.voice ? sp.voice.name : null,
     };
   }
 
@@ -217,9 +275,10 @@ export class AudioSystem {
     return toBuffer(this.ctx, chans);
   }
 
-  // 일시정지 메뉴가 열려 있는 동안만 멈춘다 (이때는 클릭해도 다시 켜지 않는다)
+  // 일시정지 메뉴가 열려 있는 동안만 멈춘다 (이때는 클릭해도 다시 켜지 않는다). 읽던·대기 중인 음성도 버린다
   suspend() {
     this.pausedByGame = true;
+    this.cancelSpeech();
     if (this.ctx && this.ctx.state === 'running') this.ctx.suspend();
   }
 
@@ -259,7 +318,7 @@ export class AudioSystem {
     src.connect(g);
     g.connect(f);
     f.connect(p);
-    p.connect(this.master);
+    p.connect(this.sfxBus);
     if (reverb > 0) {
       const s = ctx.createGain();
       s.gain.value = reverb * gain;
@@ -280,13 +339,28 @@ export class AudioSystem {
     const g = ctx.createGain();
     g.gain.value = gain;
     src.connect(g);
-    g.connect(this.master);
+    g.connect(this.sfxBus);
     if (reverb > 0) {
       const s = ctx.createGain();
       s.gain.value = reverb * gain;
       g.connect(s);
       s.connect(this.reverb);
     }
+    src.start(ctx.currentTime + delay);
+    this.track(src);
+  }
+
+  // 음성 버스 소리 (무전 스켈치): 잔향 없음, 효과음 볼륨과 무관
+  playVoice(name, gain = 1, delay = 0) {
+    if (!this.ready || !this.bank[name]) return;
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.pick(name);
+    src.playbackRate.value = 0.97 + Math.random() * 0.06;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(g);
+    g.connect(this.voiceBus);
     src.start(ctx.currentTime + delay);
     this.track(src);
   }
@@ -398,7 +472,7 @@ export class AudioSystem {
     lfo2Gain.connect(f.frequency);
     src.connect(f);
     f.connect(g);
-    g.connect(this.master);
+    g.connect(this.sfxBus);
     src.start();
     lfo.start();
     lfo2.start();
@@ -406,7 +480,201 @@ export class AudioSystem {
     this.wind = { src, g };
   }
 
+  // ------------------------------------------------------------------ 2단계: 분대 콜아웃 (무전 스켈치 + 음성 합성)
+  playerDown() {
+    const pl = this.game.player;
+    return !!(pl && pl.body.damage.incapacitated);
+  }
+
+  onCallout(c) {
+    if (!c || !c.text || this.playerDown()) return;
+    const MX = CONFIG.audioMix;
+    if (c.radio !== false && this.ready) {
+      // 같은 순간 여러 개가 오면 스켈치는 한 번만
+      const now = this.ctx.currentTime;
+      if (now - this.lastSquelch >= MX.squelchMinInterval) {
+        this.lastSquelch = now;
+        this.playVoice('radioOpen', MX.squelchGain);
+      }
+    }
+    this.speakCallout(c);
+  }
+
+  onRefill(e) {
+    if (e.owner !== this.game.player.body) return;
+    const G = CONFIG.audioMix.refillGain;
+    if (e.step === 'clip') {
+      const name = e.phase === 'in' ? 'clipIn' : e.phase === 'press' ? 'clipPress' : e.phase === 'out' ? 'clipOut' : 'pouch';
+      this.playUI(name, G * (e.phase === 'take' ? 0.8 : 1));
+    } else if (e.step === 'mag') this.playUI('pouch', G * 0.8);
+    else if (e.step === 'stop' && e.mag >= 0 && e.reason !== 'done' && e.reason !== 'empty') this.playUI('pouch', G * 0.6);
+  }
+
+  // 음성 합성 (speechSynthesis). 모든 호출은 지원 여부를 확인하고 try/catch 로 감싼다 (지원하지 않거나 막혀도 게임은 그대로)
+  initSpeech() {
+    const sp = { supported: false, enabled: false, voice: null, voiceCount: 0, hasKorean: false, queued: null, utter: null, busy: false, startedAt: 0 };
+    this.speech = sp;
+    try {
+      const synth = window.speechSynthesis;
+      sp.supported = !!synth && typeof synth.speak === 'function' && typeof window.SpeechSynthesisUtterance === 'function';
+      if (!sp.supported) return;
+      sp.synth = synth;
+      const pick = () => this.pickVoice();
+      if (typeof synth.addEventListener === 'function') synth.addEventListener('voiceschanged', pick);
+      else synth.onvoiceschanged = pick;
+      pick();
+      // 페이지를 떠날 때 읽던 것을 끊는다 (일부 브라우저는 새로 고친 뒤에도 계속 읽음)
+      window.addEventListener('pagehide', () => this.cancelSpeech());
+    } catch {
+      sp.supported = false;
+    }
+    try {
+      sp.enabled = sp.supported && window.localStorage.getItem(CONFIG.audioMix.storageKeys.speech) === '1';
+    } catch {
+      sp.enabled = false;
+    }
+  }
+
+  // 한국어 음성 고르기 (목록은 늦게 채워질 수 있다: voiceschanged)
+  pickVoice() {
+    const sp = this.speech;
+    try {
+      const list = sp.synth.getVoices() || [];
+      sp.voiceCount = list.length;
+      const lang = CONFIG.audioMix.speech.lang.toLowerCase();
+      const ko = list.filter((v) => v && typeof v.lang === 'string' && v.lang.toLowerCase().replace('_', '-').startsWith(lang.slice(0, 2)));
+      sp.voice = ko.find((v) => v.lang.toLowerCase().replace('_', '-') === lang && v.localService) || ko.find((v) => v.lang.toLowerCase().replace('_', '-') === lang) || ko[0] || null;
+      sp.hasKorean = !!sp.voice;
+    } catch {
+      sp.voice = null;
+    }
+  }
+
+  // 일시정지 메뉴용: {supported, enabled, hasKorean, voiceName, voicesKnown}
+  speechInfo() {
+    const sp = this.speech;
+    return { supported: sp.supported, enabled: sp.enabled, hasKorean: sp.hasKorean, voiceName: sp.voice ? sp.voice.name : null, voicesKnown: sp.voiceCount > 0 };
+  }
+
+  setSpeechEnabled(on) {
+    const sp = this.speech;
+    sp.enabled = !!on && sp.supported;
+    if (!sp.enabled) this.cancelSpeech();
+    else if (!sp.voice) this.pickVoice();
+    try {
+      window.localStorage.setItem(CONFIG.audioMix.storageKeys.speech, sp.enabled ? '1' : '0');
+    } catch {
+      // 저장소를 못 쓰면 이번 실행에만
+    }
+    return sp.enabled;
+  }
+
+  speakCallout(c) {
+    const sp = this.speech;
+    if (!sp.supported || !sp.enabled || this.game.state !== 'playing') return;
+    // 음성 목록을 알고 있는데 한국어 음성이 없으면 읽지 않는다 (다른 언어 음성으로 한글을 읽으면 알아들을 수 없다)
+    if (sp.voiceCount > 0 && !sp.hasKorean) return;
+    const S = CONFIG.audioMix.speech;
+    const item = { text: String(c.text), radio: c.radio !== false, at: performance.now() / 1000 };
+    // 대기는 하나만: 새 문장이 대기 중인 것을 바꾼다. 경고(alert)는 읽던 것을 끊고 바로
+    sp.queued = item;
+    if (c.kind === 'alert' && S.alertInterrupts && sp.busy) this.stopUtterance();
+    this.pumpSpeech();
+  }
+
+  pumpSpeech() {
+    const sp = this.speech;
+    if (!sp.queued || sp.busy || !sp.enabled) return;
+    const S = CONFIG.audioMix.speech;
+    const item = sp.queued;
+    sp.queued = null;
+    const now = performance.now() / 1000;
+    if (now - item.at > S.maxAge || this.game.state !== 'playing') return;
+    try {
+      const synth = sp.synth;
+      // 우리 것이 아닌 대기(다른 탭 등)가 쌓여 있으면 비운다
+      if (synth.pending) synth.cancel();
+      const u = new window.SpeechSynthesisUtterance(item.text);
+      u.lang = S.lang;
+      if (sp.voice) u.voice = sp.voice;
+      u.rate = S.rate;
+      u.pitch = S.pitch;
+      u.volume = Math.max(0, Math.min(1, this.volume * this.voiceVolume));
+      const done = () => {
+        if (sp.utter !== u) return;
+        sp.utter = null;
+        sp.busy = false;
+        // 송신 끝 스켈치
+        if (item.radio && this.ready && !this.pausedByGame) this.playVoice('radioClose', CONFIG.audioMix.squelchGain * 0.8);
+        this.pumpSpeech();
+      };
+      u.onend = done;
+      u.onerror = done;
+      sp.utter = u;
+      sp.busy = true;
+      sp.startedAt = now;
+      synth.speak(u);
+    } catch {
+      sp.utter = null;
+      sp.busy = false;
+    }
+  }
+
+  // 지금 읽는 문장만 끊는다 (대기 중인 것은 남김)
+  stopUtterance() {
+    const sp = this.speech;
+    const u = sp.utter;
+    sp.utter = null;
+    sp.busy = false;
+    if (u) {
+      u.onend = null;
+      u.onerror = null;
+    }
+    try {
+      if (sp.synth) sp.synth.cancel();
+    } catch {
+      // 무시
+    }
+  }
+
+  // 읽던 것과 대기 중인 것을 모두 버린다 (일시정지·임무 끝·전투 불능)
+  cancelSpeech() {
+    const sp = this.speech;
+    if (!sp) return;
+    sp.queued = null;
+    if (sp.busy || sp.utter) this.stopUtterance();
+    else {
+      try {
+        if (sp.synth && (sp.synth.speaking || sp.synth.pending)) sp.synth.cancel();
+      } catch {
+        // 무시
+      }
+    }
+  }
+
+  // 매 프레임: 끝 알림이 오지 않는 브라우저 대비 (읽기가 끝났거나 너무 오래되면 다음 문장으로)
+  updateSpeech() {
+    const sp = this.speech;
+    if (!sp.supported || (!sp.busy && !sp.queued)) return;
+    const now = performance.now() / 1000;
+    if (sp.busy) {
+      let speaking = true;
+      try {
+        speaking = sp.synth.speaking;
+      } catch {
+        speaking = false;
+      }
+      const age = now - sp.startedAt;
+      if ((!speaking && age > 0.5) || age > CONFIG.audioMix.speech.stuckTimeout) {
+        sp.utter = null;
+        sp.busy = false;
+      }
+    }
+    this.pumpSpeech();
+  }
+
   update(dt) {
+    this.updateSpeech();
     if (!this.ready) return;
     const ctx = this.ctx;
     // 청취자 위치·방향

@@ -19,11 +19,17 @@ import { Player } from '../player/Player.js';
 import { Effects } from '../effects/Effects.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
 import { Mission } from '../mission/Mission.js';
+import { AdvanceMission } from '../mission/AdvanceMission.js';
+import { Squad } from '../ai/SquadLeader.js';
+import { AmmoCrate } from '../world/AmmoCrate.js';
+import { SQUAD_MAP } from '../world/mapData.js';
+import { runSimulations, formatSummary } from '../sim/SimRunner.js';
 import { HUD } from '../ui/HUD.js';
 import { Screens } from '../ui/Screens.js';
 import { ScreenFX } from '../ui/ScreenFX.js';
 import { DebugOverlay } from '../ui/DebugOverlay.js';
 import { ViewPoints } from '../ui/ViewPoints.js';
+import { SquadPanel } from '../ui/SquadPanel.js';
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 const _fwd = new THREE.Vector3();
@@ -34,7 +40,9 @@ export class Game {
     this.events = new EventBus();
     this.state = 'loading';
     this.time = 0;
-    this.units = []; // 탄도·제압 판정 대상 (플레이어 몸 + 적)
+    this.units = []; // 탄도·제압 판정 대상 (플레이어 몸 + 적 + 2단계 아군 분대원)
+    this.targets = []; // 적이 노릴 수 있는 대상 (플레이어, 2단계: + 아군 분대원)
+    this.missionId = 'hold'; // 'hold' = 1단계 이동 저지, 'advance' = 2단계 약진 엄호
     this.ready = false;
   }
 
@@ -88,11 +96,16 @@ export class Game {
     this.effects = new Effects(this);
     this.audio = new AudioSystem(this);
     this.director = new AIDirector(this, this.nav);
-    this.mission = new Mission(this);
+    this.squad = new Squad(this);
+    this.ammoCrate = new AmmoCrate(this);
+    this.missions = { hold: new Mission(this), advance: new AdvanceMission(this) };
+    this.mission = this.missions.hold;
+    this.refreshTargets();
     this.hud = new HUD(this);
     this.screenFx = new ScreenFX(this);
     this.debug = new DebugOverlay(this);
     this.viewPoints = new ViewPoints(this);
+    this.squadPanel = new SquadPanel(this);
     this.freezeSim = false;
 
     this.events.on(EV.MISSION_END, (r) => this.onMissionEnd(r));
@@ -108,15 +121,66 @@ export class Game {
     // 셰이더 미리 컴파일 (첫 프레임 끊김 방지)
     this.renderer.compile(this.scene, this.camera);
     this.state = 'briefing';
-    this.screens.showBriefing(() => this.startMission());
+    this.screens.showBriefing((id) => this.startMission(id));
     this.ready = true;
     this.clock = new THREE.Timer();
     this.renderer.setAnimationLoop((t) => this.frame(t));
+    // 시뮬레이션 모드: 주소에 ?sim=횟수&bot=good|random|none&mission=advance|hold
+    const q = new window.URLSearchParams(window.location.search);
+    if (q.has('sim')) this.runSim(Number(q.get('sim')) || 10, q.get('bot') || 'good', q.get('mission') || 'advance');
+  }
+
+  // ------------------------------------------------------------------ 시뮬레이션 모드 (렌더 없이 N회, 자동 사격 봇)
+  startSimRun(id) {
+    this.selectMission(id);
+    this.restartWorldState();
+    this.mission.start();
+    this.state = 'playing';
+  }
+
+  async runSim(runs = 10, bot = 'good', mission = 'advance') {
+    if (this.simMode || !this.ready) return null;
+    this.screens.hideAll();
+    this.hud.show(false);
+    const box = document.createElement('div');
+    box.id = 'sim-overlay';
+    box.style.cssText =
+      'position:fixed;inset:0;z-index:50;background:rgba(10,12,10,0.92);color:#d8e0d0;font:14px/1.6 monospace;padding:28px;white-space:pre-wrap;overflow:auto';
+    document.body.appendChild(box);
+    const head = `시뮬레이션 모드 — 임무 ${mission}, 봇 ${bot}, ${runs}회 (화면 렌더 없음)\n`;
+    const log = [];
+    box.textContent = head;
+    const summary = await runSimulations(this, {
+      runs,
+      bot,
+      mission,
+      onProgress: (i, n, r) => {
+        const t = Math.round(r.time);
+        log.push(
+          `${String(i).padStart(3)}/${n} ${r.success ? '성공' : '실패'} ${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')} ${r.reason}` +
+            (r.threatRate !== undefined ? ` · 위협 제압률 ${Math.round(r.threatRate * 100)}% · 손실 ${r.losses} · 약진 ${r.bounds}` : ''),
+        );
+        box.textContent = head + log.join('\n');
+      },
+    });
+    const text = formatSummary(summary);
+    console.log(text);
+    box.textContent = `${head}${log.join('\n')}\n\n${text}\n\n(클릭하면 브리핑으로)`;
+    box.onclick = () => {
+      box.remove();
+      this.state = 'briefing';
+      this.selectMission(this.missionId);
+      this.restartWorldState();
+      this.screens.showBriefing((id) => this.startMission(id));
+    };
+    this.state = 'briefing';
+    return summary;
   }
 
   // ------------------------------------------------------------------ 상태 전환
-  async startMission() {
+  async startMission(id = this.missionId) {
     this.screens.hideAll();
+    this.selectMission(id);
     this.restartWorldState();
     this.mission.start();
     this.state = 'playing';
@@ -129,12 +193,45 @@ export class Game {
     }
   }
 
+  // 임무별 준비: 적 배치·행동 설정, 아군 분대·탄약 상자 켜고 끄기
+  selectMission(id) {
+    if (!Object.hasOwn(this.missions, id)) id = 'hold';
+    this.missionId = id;
+    this.mission = this.missions[id];
+    const adv = id === 'advance';
+    if (adv) {
+      this.director.configure({
+        advances: false,
+        initial: SQUAD_MAP.enemyInitial,
+        prior: false,
+        reinforcementMax: CONFIG.advanceMission.reinforcementMax,
+      });
+    } else this.director.configure({});
+    this.squad.setActive(adv);
+    this.ammoCrate.setActive(adv);
+  }
+
+  // 적이 노릴 수 있는 대상 목록 (분대를 켜고 끌 때 다시 만든다)
+  refreshTargets() {
+    this.targets.length = 0;
+    this.targets.push(this.player);
+    if (this.squad && this.squad.active) this.targets.push(...this.squad.targets);
+  }
+
+  // 병사(Soldier) → 대상 (플레이어 또는 아군 분대원). 적이면 null
+  targetOf(unit) {
+    if (unit === this.player.body) return this.player;
+    return this.squad && this.squad.active ? this.squad.memberOf(unit) : null;
+  }
+
   restartWorldState() {
     this.time = 0;
     this.ballistics.reset();
     this.effects.reset();
     this.director.reset();
     this.player.reset();
+    this.squad.reset();
+    this.ammoCrate.reset();
     this.screenFx.reset();
     this.debug.reset();
     this.hud.reset();
@@ -169,6 +266,7 @@ export class Game {
 
   onMissionEnd(r) {
     this.state = 'result';
+    if (this.simMode) return;
     this.hud.show(false);
     this.input.releaseLock();
     setTimeout(() => {
@@ -299,18 +397,23 @@ export class Game {
     this.time += dt;
     this.player.update(dt, this.input);
     this.director.update(dt);
+    this.squad.update(dt);
     this.ballistics.update(dt);
     this.suppression.update(dt);
     this.mission.update(dt);
   }
 
   frame(t) {
+    // 시뮬레이션 모드 중에는 그리지도, 실제 입력으로 진행하지도 않는다
+    if (this.simMode) return;
     this.clock.update(t);
     const rawDt = this.clock.getDelta();
     const dt = Math.min(0.05, rawDt);
     const input = this.input;
     input.pollLock();
     if (input.wasPressed('F3')) this.debug.toggle();
+    // 브리핑 화면에서 F8: 약진 엄호 시뮬레이션 10회 (숙련 봇)
+    if (input.wasPressed('F8') && this.state === 'briefing') this.runSim(10, 'good', 'advance');
     // 점검용 고정 시점 순환 (디버그 모드에서만)
     if (input.wasPressed('F4') && this.debug.enabled && this.state === 'playing') this.viewPoints.next();
 
@@ -336,6 +439,7 @@ export class Game {
       this.hud.update(dt);
       this.screenFx.update(dt);
     }
+    this.squadPanel.update(dt);
     this.debug.update(rawDt);
     input.endFrame();
 

@@ -42,7 +42,9 @@ export class EnemyAI {
     this.director = director;
     this.nav = director.nav;
     this.s = soldier;
-    this.perception = new Perception(game, soldier);
+    // 대상별 추정 (플레이어, 2단계에서는 아군 각각). this.perception 은 지금 노리는 대상의 추정
+    this.tracks = new Map();
+    this.perception = this.trackFor(game.player);
     this.state = 'cover';
     this.stateT = 0;
     this.timer = 0;
@@ -66,10 +68,51 @@ export class EnemyAI {
     this.shotTimer = 0;
     this.burstIndex = 0;
     this.lineBlocked = false; // 마지막 사격이 자기 엄폐물에 막혀 취소됐는지
+    this.lastShotTime = -99;
   }
 
   get level() {
     return this.s.suppression.level;
+  }
+
+  // 대상(플레이어·아군)의 추정 기록. 없으면 만든다
+  trackFor(target) {
+    let t = this.tracks.get(target);
+    if (!t) {
+      t = new Perception(this.game, this.s, target, { prior: this.director.opts.prior && target === this.game.player });
+      this.tracks.set(target, t);
+    }
+    return t;
+  }
+
+  // 노릴 대상 고르기: 지금 보이는(노출된) 대상 > 최근 확인한 대상, 가깝고 움직이는 대상 우선.
+  // 사격 중에는 바꾸지 않는다 (점사 도중 표적 전환 없음)
+  selectTarget() {
+    const targets = this.game.targets;
+    if (targets.length === 1 && this.tracks.size === 1) return; // 1단계: 플레이어뿐
+    const now = this.game.time;
+    for (const tg of targets) if (tg.alive) this.trackFor(tg);
+    if (this.state === 'fire' || this.state === 'blindfire') return;
+    const T = CONFIG.ai.targeting;
+    let best = null;
+    let bs = -Infinity;
+    for (const [tg, p] of this.tracks) {
+      if (!tg.alive || !p.has) continue;
+      let sc = 0;
+      if (p.visible && now - p.lastSeen < 2.5) sc += T.visibleBonus + (T.motionBonus[tg.speedClass] || 0);
+      else if (p.source === 'visual' || p.source === 'flash') sc += Math.max(0, T.recentBonus - p.age(now));
+      else if (p.source === 'sound' || p.source === 'shared') sc += T.soundBonus;
+      sc -= this.pos.distanceTo(p.estimate) * T.distancePenalty;
+      if (p === this.perception) sc += T.stickiness;
+      if (sc > bs) {
+        bs = sc;
+        best = p;
+      }
+    }
+    if (best && best !== this.perception) {
+      this.perception = best;
+      this.decidedFire = null;
+    }
   }
 
   get covering() {
@@ -78,6 +121,39 @@ export class EnemyAI {
 
   get pos() {
     return this.s.position;
+  }
+
+  // ---- 대상 인터페이스 (2단계: 아군이 이 적을 추정할 때 쓴다) ----
+  get body() {
+    return this.s;
+  }
+
+  get alive() {
+    return this.s.alive;
+  }
+
+  get eye() {
+    return this.s.getEyePos(this.eyeV || (this.eyeV = new THREE.Vector3()));
+  }
+
+  get posture() {
+    const pose = this.s.model.pose;
+    if (pose.startsWith('prone') || pose === 'crawl' || pose.startsWith('dead')) return 'prone';
+    if (pose.startsWith('kneel') || pose === 'duck' || pose === 'curl' || pose === 'crouchWalk' || pose === 'blindFire') return 'crouch';
+    return 'stand';
+  }
+
+  get speedClass() {
+    if (this.state === 'advance' && this.phase === 'rush') return 'sprint';
+    return this.isMoving() ? 'walk' : 'still';
+  }
+
+  visibilityPoints(out) {
+    const m = this.s.model;
+    m.getHeadPos(out[0]);
+    m.getChestPos(out[1]);
+    m.getHipsPos(out[2]);
+    return out;
   }
 
   isMoving() {
@@ -223,8 +299,9 @@ export class EnemyAI {
     }
   }
 
-  onPlayerShot(e) {
-    this.perception.onPlayerShot(e, this.exposed);
+  // 플레이어·아군의 사격: 쏜 대상의 추정을 갱신 (총구 화염·총성)
+  onHostileShot(e, target) {
+    this.trackFor(target).onShot(e, this.exposed);
   }
 
   die() {
@@ -280,12 +357,16 @@ export class EnemyAI {
     const w = s.weapon;
     if (!w.chambered && !w.reloading && this.state !== 'fire') w.startReload();
 
-    this.perception.update(dt, this.exposed, this.state === 'advance' ? 0.4 : 1);
-    // 새로 발견하면 분대원에게 알린다 (지연·오차 추가)
-    if (this.perception.lastSeen !== this.lastSharedSeen && this.perception.source === 'visual') {
-      this.lastSharedSeen = this.perception.lastSeen;
-      this.director.share(this, this.perception.estimate, this.perception.sigma);
+    const rateMul = this.state === 'advance' ? 0.4 : 1;
+    for (const [tg, p] of this.tracks) {
+      p.update(dt, this.exposed, rateMul);
+      // 새로 발견하면 분대원에게 알린다 (지연·오차 추가)
+      if (p.lastSeen !== p.lastSharedSeen && p.source === 'visual') {
+        p.lastSharedSeen = p.lastSeen;
+        this.director.share(this, p.estimate, p.sigma, tg);
+      }
     }
+    this.selectTarget();
 
     let moveSpeed = 0;
     switch (this.state) {
@@ -352,7 +433,7 @@ export class EnemyAI {
       s.model.slopePitch *= Math.exp(-8 * dt);
     }
     // 조준 피치
-    if (this.state === 'fire' || this.state === 'observe') {
+    if ((this.state === 'fire' || this.state === 'observe') && this.perception.has) {
       s.getEyePos(_v);
       const tgt = this.aimPointV && this.state === 'fire' ? this.aimPointV : this.perception.estimate;
       const dy = tgt.y - _v.y;
@@ -364,6 +445,10 @@ export class EnemyAI {
 
   // 사격 위치의 정면에서 ±70° 안이면 추정 방향을 본다
   faceEstimate() {
+    if (!this.perception.has) {
+      this.targetYaw = this.fp ? this.fp.yaw : this.yaw;
+      return;
+    }
     const est = this.perception.estimate;
     const yawTo = Math.atan2(est.x - this.pos.x, est.z - this.pos.z);
     const base = this.fp ? this.fp.yaw : this.yaw;
@@ -378,7 +463,8 @@ export class EnemyAI {
     if (lvl >= LEVEL.SUPPRESSED) {
       // 고개를 들지 못한다: 가끔 맹목 사격만
       this.blindTimer -= dt * (this.covering ? 2 : 1);
-      const canBlind = this.fp && this.fp.fire !== 'prone' && !this.fp.temp;
+      // 대상 위치를 전혀 모르면(2단계: 아직 발견 전) 맹목 사격도 하지 않는다
+      const canBlind = this.fp && this.fp.fire !== 'prone' && !this.fp.temp && this.perception.has;
       if (this.blindTimer <= 0 && canBlind && this.s.weapon.chambered && !this.s.weapon.reloading) {
         this.blindTimer = randRange(A.blindFireInterval);
         this.setState('blindfire');
@@ -515,7 +601,7 @@ export class EnemyAI {
       sigma *= 1 + A.burstClimbMul * this.burstIndex;
       const fire = this.fp ? this.fp.fire : 'stand';
       sigma *= fire === 'prone' ? 0.75 : fire === 'kneel' ? 0.9 : 1;
-      if (this.game.player.speedClass !== 'still' && this.perception.visible) sigma *= 1.4;
+      if (this.perception.target.speedClass !== 'still' && this.perception.visible) sigma *= 1.4;
     }
     applyDispersion(_dir, sigma);
     // 섬광·총구 먼지 위치: 모델 총구가 탄 출발점에서 많이 벗어나 있으면(자세 전환 중) 출발점을 쓴다
@@ -527,6 +613,7 @@ export class EnemyAI {
     const ahead = this.game.world.terrain.heightAt(fxPos.x + fx * 0.6, fxPos.z + fz * 0.6);
     const nearGround = fxPos.y - Math.max(ground, ahead) < CONFIG.effects.muzzleDustHeight;
     w.discharge(_origin.clone(), _dir, { muzzle: fxPos.clone(), muzzleNearGround: nearGround });
+    this.lastShotTime = this.game.time;
     return true;
   }
 

@@ -1,5 +1,7 @@
 // =============================================================================
-// Perception — 적은 플레이어의 정확한 위치가 아니라 '추정 위치'를 기억한다.
+// Perception — 병사는 상대의 정확한 위치가 아니라 '추정 위치'를 기억한다 (대상 하나당 하나).
+//  대상(target): 플레이어 또는 AI 병사. {body, alive, eye, posture, speedClass, lastShotTime, visibilityPoints(out)}
+//  2단계: 적은 플레이어와 아군 각각을, 아군은 적 각각을 이 방식으로 추정한다.
 //  갱신: 관측 중 시야에 들어올 때(거리·자세·움직임·은폐·안개에 따른 확률),
 //        플레이어가 쏠 때(총구 화염을 보면 정확, 총성만 들으면 거리 비례 오차).
 //  시간이 지나면 오차가 커지고, 오래되면 '수로 어딘가'라는 처음 추정으로 돌아간다.
@@ -15,19 +17,33 @@ const W = [0.35, 0.4, 0.25];
 const SOURCE_RANK = { prior: 0, shared: 1, sound: 2, flash: 3, visual: 4 };
 
 export class Perception {
-  constructor(game, soldier) {
+  // opts.prior: 처음부터 '수로 어딘가'라는 추정을 갖는다 (1단계 적). false 면 발견·사격을 받을 때까지 모른다
+  constructor(game, soldier, target = game.player, opts = {}) {
     this.game = game;
     this.soldier = soldier;
+    this.target = target;
+    this.usePrior = opts.prior !== false;
     this.estimate = new THREE.Vector3();
     this.has = false;
+    this.source = 'none';
+    this.sigma = 999;
+    this.time = -999;
     this.visible = false;
     this.visibleFrac = 0;
     this.timer = Math.random() * 0.2;
     this.lastSeen = -999;
-    this.setPrior();
+    if (this.usePrior) this.setPrior();
+  }
+
+  // 모르는 상태로 (추정 없음)
+  forget() {
+    this.has = false;
+    this.source = 'none';
+    this.visible = false;
   }
 
   setPrior() {
+    if (!this.usePrior) return this.forget();
     const Z = AI_MAP.priorZone;
     const x = rand(Z.x0, Z.x1);
     const z = Z.z;
@@ -50,7 +66,7 @@ export class Perception {
   update(dt, exposed, rateMul = 1) {
     const A = CONFIG.ai;
     const now = this.game.time;
-    if (this.source !== 'prior' && now - this.time > A.estimateForgetTime) this.setPrior();
+    if (this.has && this.source !== 'prior' && now - this.time > A.estimateForgetTime) this.setPrior();
     this.timer -= dt;
     if (!exposed) {
       this.visible = false;
@@ -58,7 +74,7 @@ export class Perception {
     }
     if (this.timer > 0) return;
     this.timer = A.perceptionInterval;
-    const pl = this.game.player;
+    const pl = this.target;
     if (!pl.alive) {
       this.visible = false;
       return;
@@ -127,8 +143,8 @@ export class Perception {
     return true;
   }
 
-  // 플레이어 사격: 총구 화염(보이면) 또는 총성
-  onPlayerShot(e, exposed) {
+  // 대상의 사격: 총구 화염(보이면) 또는 총성
+  onShot(e, exposed) {
     const A = CONFIG.ai;
     const now = this.game.time;
     this.soldier.getEyePos(_eye);
@@ -150,7 +166,7 @@ export class Perception {
 
   // 조준점: 지금 보이면 실제 위치 근처, 아니면 추정 위치 주변
   aimPoint(out, spreadMul = 1) {
-    const pl = this.game.player;
+    const pl = this.target;
     const A = CONFIG.ai;
     if (this.visible && this.game.time - this.lastSeen < 2.5 && pl.alive) {
       pl.visibilityPoints(_pts);

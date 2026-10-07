@@ -164,12 +164,44 @@ export class CollisionWorld {
     }
   }
 
+  // 충돌체 빼기 / 다시 넣기 — 임무에 따라 생기고 없어지는 물체용 (2단계 탄약 상자: AmmoCrate.setActive).
+  // 뺀 충돌체는 탄도·시야·이동 판정에서 모두 빠진다. 이미 빠져 있거나 들어 있으면 아무것도 하지 않고 false
+  removeCollider(c) {
+    const i = this.colliders.indexOf(c);
+    if (i < 0) return false;
+    this.colliders.splice(i, 1);
+    if (c.tag && this.byTag.has(c.tag)) {
+      const list = this.byTag.get(c.tag);
+      const k = list.indexOf(c);
+      if (k >= 0) list.splice(k, 1);
+    }
+    const i0 = this.cellIndex(c.min[0]);
+    const i1 = this.cellIndex(c.max[0]);
+    const j0 = this.cellIndex(c.min[2]);
+    const j1 = this.cellIndex(c.max[2]);
+    for (let j = j0; j <= j1; j++) {
+      for (let n = i0; n <= i1; n++) {
+        const cell = this.grid[j * this.dim + n];
+        const k = cell ? cell.indexOf(c) : -1;
+        if (k >= 0) cell.splice(k, 1);
+      }
+    }
+    return true;
+  }
+
+  restoreCollider(c) {
+    if (this.colliders.includes(c)) return false;
+    this.insert(c);
+    return true;
+  }
+
   cellIndex(v) {
     return Math.max(0, Math.min(this.dim - 1, Math.floor((v + this.half) / this.cell)));
   }
 
   // 선분과 충돌체 교차 (가장 가까운 것). out: {t, nx, ny, nz, collider, tExit}
-  castColliders(ax, ay, az, bx, by, bz, out, ignore = null) {
+  // solidOnly: 관통되는 재질(나무판·함석·건초 등)은 건너뛴다 (2단계: 약진 경로에 적 사선이 닿는지)
+  castColliders(ax, ay, az, bx, by, bz, out, ignore = null, solidOnly = false) {
     const dx = bx - ax;
     const dy = by - ay;
     const dz = bz - az;
@@ -199,6 +231,7 @@ export class CollisionWorld {
           if (c.stamp === stamp) continue;
           c.stamp = stamp;
           if (c === ignore) continue;
+          if (solidOnly && c.mat.penetrable) continue;
           if (c.max[0] < minX || c.min[0] > maxX || c.max[1] < minY || c.min[1] > maxY || c.max[2] < minZ || c.min[2] > maxZ) continue;
           if (c.type === 'box') {
             const R = c.R;
@@ -340,6 +373,15 @@ export class CollisionWorld {
     if (this.terrain.raycast(ax, ay, az, bx, by, bz, tr) && tr.t < 0.995) return true;
     const cr = this._cr2 || (this._cr2 = {});
     if (this.castColliders(ax, ay, az, bx, by, bz, cr) && cr.t < 0.995) return true;
+    return false;
+  }
+
+  // 관통 불가 엄폐물(지형·흙·벽돌·장갑 등)만 막는 사선: 은폐·관통 재질 너머로는 탄이 온다고 본다
+  solidLineBlocked(ax, ay, az, bx, by, bz) {
+    const tr = this._tr3 || (this._tr3 = {});
+    if (this.terrain.raycast(ax, ay, az, bx, by, bz, tr) && tr.t < 0.995) return true;
+    const cr = this._cr3 || (this._cr3 = {});
+    if (this.castColliders(ax, ay, az, bx, by, bz, cr, null, true) && cr.t < 0.995) return true;
     return false;
   }
 

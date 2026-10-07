@@ -1140,6 +1140,8 @@ export class ViewModel {
     b.ads = pl.ads;
     b.sprint = damp(b.sprint, pl.sprinting ? 1 : 0, BR.sprint, dt || 1);
     b.reload = damp(b.reload, w.reloading ? 1 : 0, BR.reload, dt || 1);
+    // 2단계: 탄약 상자에서 탄창을 채우는 동안 총을 몸 앞에 낮춰 든다 (ammoCrate.viewPose)
+    b.refill = damp(b.refill || 0, pl.refill && pl.refill.active ? 1 : 0, BR.sprint, dt || 1);
 
     // 자세 섞기 (조준 자세는 원점: 가늠쇠 끝 = 화면 중앙)
     const P = V.poses;
@@ -1158,6 +1160,7 @@ export class ViewModel {
       }
     };
     blendIn(P.sprint, b.sprint);
+    blendIn(CONFIG.ammoCrate.viewPose, b.refill);
     blendIn(P.reload, b.reload);
     b.bolt = w.reloading ? this.boltPose : damp(b.bolt, 0, BR.reload, dt || 1);
     blendIn(P.bolt, b.bolt * b.reload);

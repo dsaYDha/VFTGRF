@@ -10,6 +10,7 @@ import { Soldier } from '../units/Soldier.js';
 import { clamp, damp, DEG } from '../core/mathUtils.js';
 import { elevationFor } from '../weapons/zeroing.js';
 import { PLAYER_POSE } from '../units/poses.js';
+import { AmmoRefill } from '../world/AmmoCrate.js';
 
 const _f = new THREE.Vector3();
 const _r = new THREE.Vector3();
@@ -31,6 +32,8 @@ export class Player {
     this.vel = new THREE.Vector3();
     this.eye = new THREE.Vector3();
     this.lastInside = new THREE.Vector3();
+    // 2단계: 탄약 상자에서 예비 탄창 채우기 (F)
+    this.refill = new AmmoRefill(this);
     this.reset();
   }
 
@@ -92,6 +95,7 @@ export class Player {
     this.body.inCover = true;
     this.body.coverFacing.set(0, 0, -1);
     this.body.weapon.reset();
+    this.refill.reset();
     // 시작 자세로 바로 (서 있다가 앉는 모습이 첫 프레임에 적에게 보이지 않게)
     this.body.model.snapPose(PLAYER_POSE[this.posture]);
     this.updateBody(0);
@@ -143,6 +147,8 @@ export class Player {
     } else {
       input.consumeWheel();
     }
+    // 탄약 상자에서 탄창 채우기 (F 시작·중단). 재장전·방아쇠·달리기·멀어짐·쓰러짐이면 멈춘다
+    this.refill.update(dt, input, canAct);
     if (this.transT < 1) this.transT = Math.min(1, this.transT + dt / this.transDur);
 
     // 기울이기
@@ -155,7 +161,7 @@ export class Player {
     // 조준 (우클릭)
     const reloading = this.weapon.reloading;
     if (input.clicked?.right) this.forceAds = false; // 점검 시점(F4)의 고정 조준은 우클릭으로 해제
-    const adsTarget = canAct && (input.buttons.right || this.forceAds) && !this.sprinting && !reloading ? 1 : 0;
+    const adsTarget = canAct && (input.buttons.right || this.forceAds) && !this.sprinting && !reloading && !this.refill.lowered ? 1 : 0;
     this.ads = damp(this.ads, adsTarget, 1 / CONFIG.render.adsTransitionTime * 2.3, dt);
 
     // 스태미나·숨참
@@ -182,7 +188,8 @@ export class Player {
     // 사격
     const w = this.weapon;
     const proneTrans = this.transT < 1 && (this.posture === 'prone' || this.transFrom === 'prone');
-    const canShoot = canAct && !this.sprinting && this.sprintCooldown <= 0 && !proneTrans;
+    // 탄창을 채우는 동안(총을 내림)과 다시 드는 동안은 방아쇠를 무시한다
+    const canShoot = canAct && !this.sprinting && this.sprintCooldown <= 0 && !proneTrans && !this.refill.blocksFire();
     if (w.triggerWantsShot(canShoot && input.buttons.left)) this.fire();
 
     // 반동 회복

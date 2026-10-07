@@ -22,9 +22,15 @@ export class AIDirector {
     this.reinforcements = [];
     this.attemptSeq = 0;
     this.nameSeq = 0;
+    this.reinforcementsSent = 0;
+    // 임무별 설정 (1단계 기본값). configure() 로 바꾼다
+    this.opts = { advances: true, initial: AI_MAP.initial, prior: true, reinforcementMax: Infinity };
     const ev = game.events;
     ev.on(EV.SHOT_FIRED, (e) => {
-      if (e.shooter === game.player.body) for (const ai of this.ais) if (ai.s.alive) ai.onPlayerShot(e);
+      if (e.team === 'enemy') return;
+      // 플레이어·아군의 사격 → 쏜 대상의 추정 갱신
+      const target = game.targetOf(e.shooter);
+      if (target) for (const ai of this.ais) if (ai.s.alive) ai.onHostileShot(e, target);
     });
     ev.on(EV.UNIT_SUPPRESSED, (e) => {
       const ai = this.byUnit(e.unit);
@@ -41,7 +47,9 @@ export class AIDirector {
         this.game.events.emit(moving ? EV.ADVANCE_STOPPED : EV.ADVANCE_DETERRED, { unit: ai.s, to: plan.to.id, attempt: plan.id, killed: true });
       }
       ai.die();
-      this.reinforcements.push({ at: game.time + randRange(CONFIG.mission.reinforcementDelay) });
+      if (this.reinforcementsSent + this.reinforcements.length < this.opts.reinforcementMax) {
+        this.reinforcements.push({ at: game.time + randRange(CONFIG.mission.reinforcementDelay) });
+      }
     });
   }
 
@@ -52,6 +60,11 @@ export class AIDirector {
 
   get alive() {
     return this.ais.filter((a) => a.s.alive);
+  }
+
+  // 임무별 설정: {advances: 적 전진 시도, initial: 처음 배치, prior: 처음부터 '수로 어딘가' 추정, reinforcementMax: 증원 최대 횟수}
+  configure(opts = {}) {
+    this.opts = { advances: true, initial: AI_MAP.initial, prior: true, reinforcementMax: Infinity, ...opts };
   }
 
   reset() {
@@ -71,9 +84,10 @@ export class AIDirector {
     this.reinforcements = [];
     this.attemptSeq = 0;
     this.nameSeq = 0;
+    this.reinforcementsSent = 0;
     const M = CONFIG.mission;
     this.nextAttempt = this.game.time + randRange(M.firstAdvanceDelay);
-    for (const init of AI_MAP.initial) {
+    for (const init of this.opts.initial) {
       const node = this.nav.nodes[init.node];
       const fp = node.fps[init.fp];
       const ai = this.spawn();
@@ -89,10 +103,10 @@ export class AIDirector {
     return ai;
   }
 
-  // 발견 정보 공유 (외침: 지연 + 오차)
-  share(from, pos, sigma) {
+  // 발견 정보 공유 (외침: 지연 + 오차). target: 누구의 위치인지 (플레이어 또는 아군)
+  share(from, pos, sigma, target = this.game.player) {
     if (!CONFIG.ai.shareDelay) return;
-    this.pendingShares.push({ from, at: this.game.time + randRange(CONFIG.ai.shareDelay), pos: pos.clone(), sigma });
+    this.pendingShares.push({ from, target, at: this.game.time + randRange(CONFIG.ai.shareDelay), pos: pos.clone(), sigma });
   }
 
   // ------------------------------------------------------------------ 이동 시도 계획
@@ -249,17 +263,21 @@ export class AIDirector {
       const sh = this.pendingShares[i];
       if (now < sh.at) continue;
       this.pendingShares.splice(i, 1);
-      for (const ai of this.ais) if (ai !== sh.from && ai.s.alive) ai.perception.receiveShared(sh.pos, sh.sigma);
+      if (!sh.target.alive) continue;
+      for (const ai of this.ais) if (ai !== sh.from && ai.s.alive) ai.trackFor(sh.target).receiveShared(sh.pos, sh.sigma);
     }
     // 증원
     for (let i = this.reinforcements.length - 1; i >= 0; i--) {
       if (now >= this.reinforcements[i].at && this.alive.length < CONFIG.ai.maxEnemies) {
-        if (this.spawnReinforcement()) this.reinforcements.splice(i, 1);
+        if (this.spawnReinforcement()) {
+          this.reinforcements.splice(i, 1);
+          this.reinforcementsSent++;
+        }
         else this.reinforcements[i].at = now + 5;
       }
     }
     // 이동 시도
-    if (!this.plan && now >= this.nextAttempt) {
+    if (this.opts.advances && !this.plan && now >= this.nextAttempt) {
       if (!this.planAttempt()) this.nextAttempt = now + 5;
     }
     const plan = this.plan;

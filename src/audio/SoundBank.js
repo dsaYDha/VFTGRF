@@ -225,6 +225,80 @@ function casing(r) {
   return fadeOut(out);
 }
 
+// ------------------------------------------------------------------ 탄창 채우기 (탄약 상자, 클립 장전)
+// 클립을 탄창 장전 가이드에 꽂는 소리: 금속 딸깍 + 짧은 둔탁음
+function clipIn(r) {
+  const out = buf(0.18);
+  add(out, click(r, 3800 + r() * 500, 0.004, 1.3));
+  add(out, env(lowpass(noise(buf(0.08), 1, r), 900), 0.001, 0.015), 0.8, 0.004);
+  add(out, click(r, 2400, 0.006, 0.6), 1, 0.05 + r() * 0.02);
+  normalize(out, 0.7);
+  return fadeOut(out);
+}
+// 엄지로 탄을 눌러 내리는 소리: 탄 10발이 차례로 탄창에 걸리는 딸깍 + 스프링 긁힘 (점점 빨라짐)
+function clipPress(r) {
+  const dur = 1.25;
+  const out = buf(dur);
+  let t = 0.03;
+  for (let k = 0; k < 10; k++) {
+    const f = 2700 + r() * 900;
+    add(out, click(r, f, 0.003 + r() * 0.002, 0.8 + r() * 0.4), 1, t);
+    add(out, env(bandpass(noise(buf(0.06), 1, r), 1700 + r() * 400, 1.5), 0.004, 0.018), 0.25, t + 0.008);
+    t += (0.125 - k * 0.006) * (0.85 + r() * 0.3);
+  }
+  // 손가락·클립 마찰 (낮게 깔리는 긁힘)
+  const rub = bandpass(noise(buf(dur), 1, r), 1200, 0.8);
+  for (let i = 0; i < rub.length; i++) rub[i] *= 0.12 * Math.min(1, (i / SR) * 8) * Math.exp(-(i / SR) / 0.9);
+  add(out, rub, 1);
+  normalize(out, 0.65);
+  return fadeOut(out, 0.03);
+}
+// 빈 클립을 빼서 버리는 소리: 긁힘 + 땅에 떨어지는 가벼운 금속음
+function clipOut(r) {
+  const out = buf(0.55);
+  add(out, env(bandpass(noise(buf(0.12), 1, r), (t) => 1800 + t * 14000, 2), 0.01, 0.03), 0.9);
+  const ping = buf(0.3);
+  const f = 3300 + r() * 900;
+  sine(ping, f, f, 0.35, 0.03);
+  sine(ping, f * 1.52, f * 1.52, 0.2, 0.02);
+  add(ping, env(lowpass(noise(buf(0.05), 1, r), 700), 0.001, 0.012), 0.6);
+  add(out, ping, 1, 0.24 + r() * 0.06);
+  normalize(out, 0.55);
+  return fadeOut(out);
+}
+
+// ------------------------------------------------------------------ 무전기 (분대 콜아웃)
+// 송신 시작 스켈치: 딸깍 + 짧은 대역 제한 잡음 버스트 (지직) + 드문 튀는 잡음
+function radioOpen(r) {
+  const dur = 0.24;
+  const out = buf(dur);
+  add(out, click(r, 1700 + r() * 400, 0.003, 1.4));
+  const st = noise(buf(dur), 1, r);
+  // 드문 크래클 (튀는 잡음)
+  for (let i = 0; i < st.length; i++) if (r() < 0.003) st[i] += (r() < 0.5 ? -1 : 1) * (3 + r() * 4);
+  highpass(st, 420, 2);
+  lowpass(st, 3000, 2);
+  env(st, 0.004, 0.035 + r() * 0.015, 0.012, 0.07 + r() * 0.04);
+  add(out, st, 1.1, 0.006);
+  softClip(out, 2.2);
+  normalize(out, 0.7);
+  return fadeOut(out, 0.02);
+}
+// 송신 끝 스켈치 꼬리: 잡음이 잠깐 열렸다 딸깍 닫힘
+function radioClose(r) {
+  const dur = 0.2;
+  const out = buf(dur);
+  const st = noise(buf(0.14), 1, r);
+  highpass(st, 500, 2);
+  lowpass(st, 3200, 2);
+  env(st, 0.003, 0.03, 0, 0.06 + r() * 0.03);
+  add(out, st, 1.0);
+  add(out, click(r, 1500 + r() * 300, 0.003, 1.1), 1, 0.1 + r() * 0.02);
+  softClip(out, 2);
+  normalize(out, 0.6);
+  return fadeOut(out, 0.015);
+}
+
 // ------------------------------------------------------------------ 발소리
 function stepMud(r) {
   const out = buf(0.35);
@@ -330,6 +404,13 @@ export function buildSoundBank(ctx) {
     step_hard: variants(3, stepHard).map(B),
     wind: [B(windLoop(rng(77)))],
     artillery: variants(3, artillery).map(B),
+    // 2단계: 탄약 상자에서 탄창 채우기 (클립 장전)
+    clipIn: variants(2, clipIn).map(B),
+    clipPress: variants(3, clipPress).map(B),
+    clipOut: variants(2, clipOut).map(B),
+    // 2단계: 무전 스켈치 (음성 버스로 재생)
+    radioOpen: variants(3, radioOpen).map(B),
+    radioClose: variants(2, radioClose).map(B),
   };
   return bank;
 }

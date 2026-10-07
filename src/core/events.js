@@ -36,5 +36,12 @@ export const EV = {
   MISSION_START: 'missionStart',
   MISSION_END: 'missionEnd', // {success, reason, stats}
   MESSAGE: 'hudMessage', // {text, kind}
+  // 2단계: 분대 (사격과 기동)
+  CALLOUT: 'callout', // {speaker, text, key, kind: 'info'|'warn'|'alert', radio: bool} — 화면 아래 자막 + 무전 잡음 (+ 선택: 음성 합성)
+  SQUAD_BOUND_START: 'squadBoundStart', // {team, members, from, to, requested}
+  SQUAD_BOUND_END: 'squadBoundEnd', // {team, members, node}
+  SQUAD_REQUEST: 'squadRequest', // {ok, reason} — G 요청 결과
+  SQUAD_DESIGNATE: 'squadDesignate', // {point, bearing, range} — X 표적 지시
+  AMMO_REFILL: 'ammoRefill', // {owner, step: 'start'|'mag'|'stop', mags, crateRounds}
   DEBUG_TOGGLE: 'debugToggle',
 };

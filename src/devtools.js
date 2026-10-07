@@ -52,7 +52,8 @@ export function installDevTools(game) {
       return {
         time: +game.time.toFixed(1),
         state: game.state,
-        mission: { ...game.mission.stats, advances: game.mission.advances },
+        mission: { id: game.missionId, ...game.mission.stats, advances: game.mission.advances },
+        squad: game.squad && game.squad.active ? game.squad.members.map((m) => ({ n: m.callName, st: m.state, node: m.node, sup: +m.s.suppression.value.toFixed(0), alive: m.alive })) : null,
         player: { sup: +game.player.body.suppression.value.toFixed(1), hp: game.player.body.damage.state, rounds: game.player.weapon.totalRounds() },
         ais: game.director.ais.map((a) => ({
           n: a.s.name,
@@ -71,5 +72,7 @@ export function installDevTools(game) {
     THREE,
   };
   window.__test = T;
+  // 시뮬레이션 모드 (렌더 없이 N회): __sim(20, 'good' | 'random' | 'none', 'advance' | 'hold')
+  window.__sim = (runs, bot, mission) => game.runSim(runs, bot, mission);
   return T;
 }

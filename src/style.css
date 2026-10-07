@@ -158,6 +158,101 @@ body {
   color: #ffb070;
 }
 
+/* 2단계: 분대 콜아웃 자막 — 화면 아래 가운데, 새 줄이 아래 (최대 2줄, CONFIG.callouts).
+   밝은 하늘·어두운 땅 모두에서 읽히게 반투명 어두운 바탕 + 진한 그림자. 왼쪽 띠 색 = 종류(info/warn/alert),
+   [말한 사람] 은 청록(아군 식별 테이프 색 계열). #hud-messages(위 64%)·오른쪽 아래 무기 표시와 겹치지 않게 폭을 좁힌다 */
+#hud-callouts {
+  position: absolute;
+  left: 50%;
+  bottom: 7.5%;
+  transform: translateX(-50%);
+  width: min(680px, 52vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+#hud-callouts .callout {
+  --accent: #a7c99c;
+  max-width: 100%;
+  padding: 3px 12px 4px 10px;
+  font-size: 17px;
+  line-height: 1.35;
+  text-align: center;
+  color: #f3efe3;
+  background: rgba(10, 11, 10, 0.52);
+  border-left: 3px solid var(--accent);
+  border-radius: 2px;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.95);
+  animation: callout-in 0.18s ease-out;
+  transition-property: opacity;
+  transition-duration: 0.45s;
+}
+#hud-callouts .callout .spk {
+  color: #98d8cc;
+  font-weight: 600;
+}
+#hud-callouts .callout.warn {
+  --accent: #e9b25e;
+}
+#hud-callouts .callout.alert {
+  --accent: #ff6e52;
+  color: #ffe6dc;
+  background: rgba(30, 10, 6, 0.56);
+}
+/* 무전이 아닌 육성 (radio: false) */
+#hud-callouts .callout.voice {
+  border-left-style: dotted;
+}
+#hud-callouts .callout.out {
+  opacity: 0;
+}
+@keyframes callout-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 2단계: 탄약 상자 탄창 채우기 안내·진행 (오른쪽 아래, 잔탄 확인 위) */
+#hud-refill {
+  font-size: 14px;
+  color: #ece6d2;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+#hud-refill.show {
+  opacity: 1;
+}
+#hud-refill .key {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 5px;
+  margin-right: 6px;
+  border: 1px solid rgba(240, 232, 205, 0.75);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.38);
+  font-family: Consolas, monospace;
+  text-align: center;
+  color: #fff6dc;
+}
+#hud-bottom-right #hud-refill-bar {
+  width: 150px;
+  height: 3px;
+  margin: 4px 0 0 auto;
+  background: rgba(0, 0, 0, 0.4);
+}
+#hud-bottom-right #hud-refill-fill {
+  height: 100%;
+  width: 0;
+  margin: 0;
+  background: rgba(228, 216, 172, 0.85);
+}
+
 #fx-vignette {
   position: fixed;
   inset: 0;
@@ -324,6 +419,51 @@ body {
   min-width: 86px;
   color: #e9dfbd;
   font-family: Consolas, monospace;
+}
+/* 2단계 임무에서만 쓰는 키 표시 (약진 엄호) */
+.keys div .key-note {
+  display: inline;
+  min-width: 0;
+  margin-left: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: #8fc9bf;
+}
+
+/* 일시정지 메뉴: 소리 (전체·효과음·음성 슬라이더 + 음성 콜아웃 읽기) */
+.vol-grid {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 280px) 3.4em;
+  justify-content: center;
+  align-items: center;
+  gap: 6px 12px;
+}
+.vol-grid label {
+  text-align: right;
+}
+.vol-grid input[type='range'] {
+  width: 100%;
+  accent-color: #c8b878;
+}
+.vol-grid .vol-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.speech-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  cursor: pointer;
+}
+.speech-toggle input {
+  accent-color: #c8b878;
+  width: 16px;
+  height: 16px;
+}
+.speech-toggle.disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 .btn {
   margin-top: 20px;

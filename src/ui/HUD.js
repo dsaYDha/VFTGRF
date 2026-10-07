@@ -1,6 +1,7 @@
 // =============================================================================
 // HUD (최소한) — 나침반 띠, 잔탄 확인(대략), 사격 모드, 가늠자 거리, 자세, 부상, 남은 시간, 짧은 메시지
 // 적 위치 표시·미니맵·크로스헤어는 없다.
+// 2단계: 분대 콜아웃 자막 (화면 아래 가운데, EV.CALLOUT), 탄약 상자 탄창 채우기 안내·진행 (오른쪽 아래)
 // =============================================================================
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
@@ -15,6 +16,16 @@ const AMMO_TEXT = {
   none: '탄창 없음',
 };
 const ZONE_TEXT = { arm: '팔', leg: '다리' };
+// 탄창 채우기가 멈춘 이유 → 메시지 (없으면 표시 안 함)
+const REFILL_STOP_TEXT = {
+  done: ['예비 탄창을 모두 채웠다', 'info'],
+  empty: ['탄약 상자가 비었다', 'warn'],
+  cancel: ['탄창 채우기 중단', 'info'],
+  moved: ['탄약 상자에서 멀어졌다 — 탄창 채우기 중단', 'info'],
+  sprint: ['탄창 채우기 중단', 'info'],
+  fire: ['탄창 채우기 중단', 'info'],
+  reload: ['탄창 채우기 중단', 'info'],
+};
 
 export class HUD {
   constructor(game) {
@@ -34,6 +45,13 @@ export class HUD {
     this.rested = $('hud-rested');
     this.messages = $('hud-messages');
     this.boundary = $('hud-boundary');
+    this.calloutBox = $('hud-callouts');
+    this.calloutLines = []; // {el, speaker, text, until, fading, removeAt}
+    this.refillBox = $('hud-refill');
+    this.refillKey = $('hud-refill-key');
+    this.refillText = $('hud-refill-text');
+    this.refillBar = $('hud-refill-bar');
+    this.refillFill = $('hud-refill-fill');
     this.lastBearing = -999;
     this.ammoTimer = 0;
     this.ammoPending = null;
@@ -63,6 +81,13 @@ export class HUD {
     ev.on(EV.UNIT_INCAPACITATED, (e) => {
       if (e.unit === game.player.body) this.clearSituational();
     });
+    // 2단계: 분대 콜아웃 자막, 탄창 채우기 결과
+    ev.on(EV.CALLOUT, (c) => this.callout(c));
+    ev.on(EV.AMMO_REFILL, (e) => {
+      if (e.owner !== game.player.body || e.step !== 'stop') return;
+      const m = REFILL_STOP_TEXT[e.reason];
+      if (m) this.message(m[0], m[1], 2.2);
+    });
   }
 
   // 플레이어 전투 불능 (이후 상황 메시지를 띄우지 않는다)
@@ -77,6 +102,8 @@ export class HUD {
     this.boundary.textContent = '';
     this.messages.textContent = '';
     this.rested.classList.remove('show');
+    this.clearCallouts();
+    this.hideRefill();
   }
 
   show(v) {
@@ -91,6 +118,118 @@ export class HUD {
     this.boundary.textContent = '';
     this.messages.textContent = '';
     this.rested.classList.remove('show');
+    this.clearCallouts();
+    this.hideRefill();
+  }
+
+  // ------------------------------------------------------------------ 2단계: 분대 콜아웃 자막
+  // "[분대장] 2조 이동!" — 새 줄이 아래, 최대 callouts.maxLines 줄 (넘치면 가장 오래된 줄을 바로 뺀다).
+  // 같은 줄이 연달아 오면 새 줄을 만들지 않고 시간만 늘린다. 시간은 게임 시간 (일시정지 중에는 멈춤)
+  callout(c) {
+    if (!c || !c.text || this.playerDown()) return;
+    const C = CONFIG.callouts;
+    const now = this.game.time;
+    const speaker = c.speaker ? String(c.speaker) : '';
+    const text = String(c.text);
+    const lines = this.calloutLines;
+    const last = lines[lines.length - 1];
+    if (last && last.speaker === speaker && last.text === text) {
+      last.until = now + C.time;
+      if (last.fading) {
+        last.fading = false;
+        last.el.classList.remove('out');
+      }
+      return;
+    }
+    const kind = c.kind === 'warn' || c.kind === 'alert' ? c.kind : 'info';
+    const el = document.createElement('div');
+    el.className = `callout ${kind}${c.radio === false ? ' voice' : ' radio'}`;
+    el.style.transitionDuration = `${C.fade}s`;
+    if (speaker) {
+      const s = document.createElement('span');
+      s.className = 'spk';
+      s.textContent = `[${speaker}]`;
+      el.appendChild(s);
+      el.appendChild(document.createTextNode(' '));
+    }
+    const t = document.createElement('span');
+    t.className = 'txt';
+    t.textContent = text;
+    el.appendChild(t);
+    this.calloutBox.appendChild(el);
+    lines.push({ el, speaker, text, until: now + C.time, fading: false, removeAt: 0 });
+    while (lines.length > C.maxLines) lines.shift().el.remove();
+  }
+
+  updateCallouts() {
+    const lines = this.calloutLines;
+    if (!lines.length) return;
+    const now = this.game.time;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const L = lines[i];
+      if (!L.fading) {
+        if (now >= L.until) {
+          L.fading = true;
+          L.removeAt = now + CONFIG.callouts.fade;
+          L.el.classList.add('out');
+        }
+      } else if (now >= L.removeAt) {
+        L.el.remove();
+        lines.splice(i, 1);
+      }
+    }
+  }
+
+  clearCallouts() {
+    for (const L of this.calloutLines) L.el.remove();
+    this.calloutLines.length = 0;
+    this.calloutBox.textContent = '';
+  }
+
+  hideRefill() {
+    this.refillBox.classList.remove('show');
+    this.cache.refillShow = false;
+  }
+
+  // ------------------------------------------------------------------ 2단계: 탄약 상자 (오른쪽 아래)
+  // 채우는 중: "탄창 채우는 중 2/7 · 상자 270발" + 지금 탄창 진행 막대 / 상자 옆(채울 탄창이 있을 때): "F 탄창 채우기 (상자 300발)"
+  updateRefill() {
+    const g = this.game;
+    const pl = g.player;
+    const rf = pl.refill;
+    const crate = g.ammoCrate && g.ammoCrate.active ? g.ammoCrate : null;
+    let text = '';
+    let prompt = false;
+    let prog = -1;
+    if (rf && crate && !this.playerDown()) {
+      if (rf.active) {
+        const total = Math.max(1, rf.toFill);
+        text = `탄창 채우는 중 ${Math.min(rf.filled + 1, total)}/${total} · 상자 ${crate.rounds}발`;
+        prog = rf.currentMagRounds() / pl.weapon.def.magCapacity;
+      } else if (rf.near && pl.weapon.spareNeedsRefill()) {
+        if (crate.rounds > 0) {
+          text = `탄창 채우기 (상자 ${crate.rounds}발)`;
+          prompt = true;
+        } else text = '탄약 상자 비었음';
+      }
+    }
+    const show = text !== '';
+    if (this.cache.refillShow !== show) {
+      this.cache.refillShow = show;
+      this.refillBox.classList.toggle('show', show);
+    }
+    if (!show) return;
+    this.set(this.refillText, 'refill', text);
+    if (this.cache.refillPrompt !== prompt) {
+      this.cache.refillPrompt = prompt;
+      this.refillKey.classList.toggle('hidden', !prompt);
+    }
+    const bar = prog >= 0;
+    if (this.cache.refillBar !== bar) {
+      this.cache.refillBar = bar;
+      this.refillBar.classList.toggle('hidden', !bar);
+    }
+    if (bar) this.refillFill.style.width = `${Math.round(Math.min(1, prog) * 100)}%`;
   }
 
   set(el, key, text) {
@@ -149,6 +288,8 @@ export class HUD {
       this.ammoTimer -= dt;
       if (this.ammoTimer <= 0) this.ammo.classList.remove('show');
     }
+    this.updateCallouts();
+    this.updateRefill();
     this.drawCompass();
   }
 

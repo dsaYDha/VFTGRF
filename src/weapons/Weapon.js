@@ -242,4 +242,41 @@ export class Weapon {
     for (const m of this.mags) n += m.rounds;
     return n;
   }
+
+  // ------------------------------------------------------------------ 탄창 채우기 (2단계 탄약 상자, world/AmmoCrate.js)
+  // 총에 꽂힌 탄창은 채우지 않는다. 재장전 중(탄창이 빠져 있는 동안)에는 아무것도 하지 않는다
+
+  // 가장 덜 찬 예비 탄창 번호 (가득 차지 않은 것 중), 없으면 -1
+  emptiestSpareMag() {
+    if (this.reload) return -1;
+    const cap = this.def.magCapacity;
+    let best = -1;
+    for (let i = 0; i < this.mags.length; i++) {
+      if (i === this.magIndex || this.mags[i].rounds >= cap) continue;
+      if (best < 0 || this.mags[i].rounds < this.mags[best].rounds) best = i;
+    }
+    return best;
+  }
+
+  // 예비 탄창에 탄 n 발을 넣는다 (기본: 가장 덜 찬 예비 탄창). 탄창 용량까지만 → 실제로 넣은 수
+  addRoundsToMag(n, index = this.emptiestSpareMag()) {
+    if (this.reload || index < 0 || index === this.magIndex || !this.mags[index]) return 0;
+    const m = this.mags[index];
+    const k = Math.max(0, Math.min(Math.floor(n), this.def.magCapacity - m.rounds));
+    m.rounds += k;
+    return k;
+  }
+
+  // 가득 차지 않은 예비 탄창이 있는지
+  spareNeedsRefill() {
+    return this.emptiestSpareMag() >= 0;
+  }
+
+  // 가득 차지 않은 예비 탄창 수
+  spareMagsNotFull() {
+    const cap = this.def.magCapacity;
+    let n = 0;
+    for (let i = 0; i < this.mags.length; i++) if (i !== this.magIndex && this.mags[i].rounds < cap) n++;
+    return n;
+  }
 }

@@ -61,6 +61,7 @@ export class Ballistics {
     b.ricochets = 0;
     b.lastIgnore = null;
     b.nearCounted = false;
+    b.nearFriendCounted = false; // 2단계: 아군 3m 안을 지난 플레이어 탄 (한 발에 한 번)
     b.records.clear();
     b.trail.length = 0;
     if (this.recordTrails) b.trail.push(origin.x, origin.y, origin.z);
@@ -124,8 +125,9 @@ export class Ballistics {
     for (let i = 0; i < units.length; i++) {
       const u = units[i];
       if (u === b.shooter || !u.alive) continue;
-      // 같은 편 오사는 끔 (앞쪽 아군 머리 위로 쏘는 사격 규율을 단순화)
-      if (!ff && u.team === b.team) continue;
+      // 같은 편 오사는 끔 (앞쪽 아군 머리 위로 쏘는 사격 규율을 단순화).
+      // 단, 플레이어 탄은 아군 분대원에게도 맞는다 (2단계: 사격 전환 — CONFIG.squad.playerFriendlyFire)
+      if (!ff && u.team === b.team && !(b.shooter && b.shooter.isPlayer && CONFIG.squad.playerFriendlyFire)) continue;
       if (u.testBulletHit(ax, ay, az, bx, by, bz, uh) && uh.t < unitT && uh.t < worldT) {
         unitT = uh.t;
         unit = u;

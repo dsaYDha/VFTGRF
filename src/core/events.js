@@ -42,6 +42,8 @@ export const EV = {
   SQUAD_BOUND_END: 'squadBoundEnd', // {team, members, node}
   SQUAD_REQUEST: 'squadRequest', // {ok, reason} — G 요청 결과
   SQUAD_DESIGNATE: 'squadDesignate', // {point, bearing, range} — X 표적 지시
-  AMMO_REFILL: 'ammoRefill', // {owner, step: 'start'|'mag'|'stop', mags, crateRounds}
+  // {owner, step: 'start'|'clip'|'mag'|'stop', mags, magsTotal, crateRounds, mag, rounds, capacity}
+  //  clip: phase 'take'|'in'|'press'|'out' (소리용), stop: reason 'done'|'empty'|'cancel'|'moved'|'sprint'|'fire'|'reload'|'incap'|'inactive'
+  AMMO_REFILL: 'ammoRefill',
   DEBUG_TOGGLE: 'debugToggle',
 };

@@ -1161,7 +1161,8 @@ export const CONFIG = {
     designateMatch: 18, // 지시 지점에서 이 거리 안의 적 추정을 지시 지점으로 갱신
     designateSigma: 4,
     // 사격 전환 (플레이어 사선과 아군)
-    shiftFire: { angleDeg: 5, lineDist: 3, targetDist: 30, recentShot: 1.5, minRange: 8 },
+    // angleDeg·lineDist: 사선 둘레, targetDist: 탄착점 둘레 (탄착이 minTargetRange 보다 멀 때만), minRange: 이보다 가까운 사선 구간은 보지 않음
+    shiftFire: { angleDeg: 5, lineDist: 3, targetDist: 30, minTargetRange: 25, minRange: 8 },
     friendlyNearDist: 3, // 플레이어 탄이 아군 이 거리 안을 지나면 '아군이다! 사격 중지!'
     playerFriendlyFire: true, // 플레이어 탄은 아군에게 피해·제압
     // 콜아웃

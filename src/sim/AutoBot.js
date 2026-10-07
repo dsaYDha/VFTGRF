@@ -289,7 +289,7 @@ export class AutoBot {
     for (const m of sq.members) {
       if (!m.alive) continue;
       m.s.getChestPos(_v);
-      if (_v.distanceTo(aim) < S.targetDist) return true;
+      if (range >= S.minTargetRange && _v.distanceTo(aim) < S.targetDist) return true;
       _v.sub(e);
       const along = _v.dot(_d);
       if (along < S.minRange || along > range + 5) continue;

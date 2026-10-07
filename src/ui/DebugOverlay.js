@@ -469,7 +469,7 @@ export class DebugOverlay {
     for (const m of this.game.squad.members) {
       if (!m.alive) continue;
       m.s.getChestPos(_v);
-      if (Math.hypot(_v.x - hx, _v.y - hy, _v.z - hz) < S.targetDist) {
+      if (dist >= S.minTargetRange && Math.hypot(_v.x - hx, _v.y - hy, _v.z - hz) < S.targetDist) {
         out.push(m);
         continue;
       }

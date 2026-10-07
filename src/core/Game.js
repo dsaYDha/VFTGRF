@@ -270,10 +270,17 @@ export class Game {
     this.hud.show(false);
     this.input.releaseLock();
     setTimeout(() => {
-      this.screens.showResult(r, () => {
-        this.screens.hideAll();
-        this.startMission();
-      });
+      this.screens.showResult(
+        r,
+        () => {
+          this.screens.hideAll();
+          this.startMission();
+        },
+        () => {
+          this.state = 'briefing';
+          this.screens.showBriefing((id) => this.startMission(id));
+        },
+      );
     }, 400);
   }
 

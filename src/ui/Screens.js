@@ -1,7 +1,12 @@
-// 로딩·브리핑·일시정지·결과 화면
+// 로딩·브리핑(임무 선택)·일시정지·결과 화면
 import { CONFIG } from '../config.js';
+import { BRIEFING_ADVANCE } from '../mission/AdvanceMission.js';
 
-// [키, 동작, (선택) 그 키를 쓰는 임무 — 2단계 '약진 엄호' 에서만 쓰는 키에 작게 표시]
+// 브리핑에서 고른 임무 (브라우저에 기억): 'hold' = 이동 저지(1단계), 'advance' = 약진 엄호(2단계)
+const MISSION_KEY = 'vftgrf.mission';
+const MISSIONS = ['hold', 'advance'];
+
+// [키, 동작, (선택) 그 키를 쓰는 임무] — 임무 표시가 있는 키는 목록 끝에 '2단계 임무 (약진 엄호)' 머리줄 아래로 모아 보인다
 const SQUAD = '약진 엄호';
 const KEYS = [
   ['W A S D', '이동'],
@@ -15,19 +20,27 @@ const KEYS = [
   ['B', '단발 / 연발 전환'],
   ['마우스 휠', '가늠자 거리 100~600m'],
   ['T', '잔탄 확인'],
-  ['F', '탄약 상자에서 탄창 채우기', SQUAD],
+  ['F3', '디버그 / 성능 표시'],
+  ['F4', '점검 시점 (디버그 중)'],
+  ['Esc', '일시정지'],
   ['G', '약진 요청 ("엄호한다, 이동!")', SQUAD],
   ['H', '정지 (다음 약진 보류)', SQUAD],
   ['X', '표적 지시 (조준점)', SQUAD],
   ['Tab', '분대 상태 (누르는 동안)', SQUAD],
-  ['F3', '디버그 / 성능 표시'],
-  ['F4', '점검 시점 (디버그 중)'],
-  ['Esc', '일시정지'],
+  ['F', '탄약 상자에서 탄창 채우기', SQUAD],
 ];
 
 function keysHtml() {
-  const row = ([k, v, note]) => `<div><span>${k}</span>${v}${note ? `<span class="key-note">(${note})</span>` : ''}</div>`;
-  return `<div class="keys">${KEYS.map(row).join('')}</div>`;
+  const row = ([k, v]) => `<div><span>${k}</span>${v}</div>`;
+  let html = '';
+  let group = null;
+  for (const key of KEYS) {
+    const note = key[2] || null;
+    if (note && note !== group) html += `<div class="keys-head">2단계 임무 (${note}) 에서만</div>`;
+    group = note;
+    html += row(key);
+  }
+  return `<div class="keys">${html}</div>`;
 }
 
 // 일시정지 메뉴 소리 칸: 볼륨 슬라이더 3개 (AudioSystem.setVolumeOf) — [종류, 이름, 슬라이더 id]
@@ -153,9 +166,16 @@ export class Screens {
 
   buildBriefing() {
     const M = CONFIG.mission;
+    const A = CONFIG.advanceMission;
     const W = CONFIG.weapons.ak545;
+    const S = CONFIG.soldierTypes.squadRifleman;
     this.briefing.innerHTML = `
       <div class="panel">
+        <div class="mission-tabs">
+          <div class="mission-tab" data-mission="hold"><b>이동 저지</b><span>1단계 · 혼자서 ${Math.round(M.duration / 60)}분</span></div>
+          <div class="mission-tab" data-mission="advance"><b>약진 엄호</b><span>2단계 · 분대 6명 · 사격과 기동</span></div>
+        </div>
+        <div class="mission-brief" data-brief="hold">
         <h1>이동 저지</h1>
         <div class="sub">1단계 테스트 임무 · 늦가을, 동부 스텝의 폐허가 된 집단농장 · 시정 약 600m</div>
         <div class="brief">적은 집단농장 축사와 그 앞 참호에 있다. 놈들이 개활지를 건너오지 못하게 ${Math.round(M.duration / 60)}분간 묶어둬라.</div>
@@ -176,12 +196,65 @@ export class Screens {
           <li>탄약은 30발 탄창 ${W.spareMags + 1}개뿐이다. 탄창 마지막 ${W.tracerLastRounds}발은 예광탄이다.</li>
           <li>사살은 평가하지 않는다. 쓰러뜨려도 증원이 온다.</li>
         </ul>
+        </div>
+        <div class="mission-brief" data-brief="advance">
+        <h1>약진 엄호</h1>
+        <div class="sub">2단계 임무 · 같은 집단농장 · 분대 6명 · 제한 시간 ${Math.round(A.timeLimit / 60)}분</div>
+        <div class="brief">${BRIEFING_ADVANCE}</div>
+        <h2>상황</h2>
+        <ul>
+          <li>분대: <b>1조</b> 분대장·1번, <b>2조</b> 2번·3번이 기동조. <b>너와 4번</b>(네 오른쪽)이 엄호조. 모두 수로에서 시작하고, 적은 아직 우리를 모른다.</li>
+          <li>기동조는 포탄 구덩이를 이어 서쪽으로 돌아 <b>돌격 대기 위치</b>(참호 앞 약 50m 구덩이 지대)까지 두 조가 번갈아 약진한다.
+            기동조 ${A.minAtAssault}명 이상이 그곳에서 <b>${A.assaultHoldTime}초</b> 버티면 성공.</li>
+          <li>적: 참호 2, 축사 2, 잔해 더미 1 (증원 최대 ${A.reinforcementMax}명). 드러나고 가깝고 움직이는 사람을 먼저 노린다 — 뛰는 아군도, 너도.</li>
+          <li>실패: 기동조 ${A.maxMobileLosses}명 전투 불능 · 네가 전투 불능 · <b>네 탄에 아군이 쓰러짐</b> · ${Math.round(A.timeLimit / 60)}분 초과.</li>
+          <li>식별: 아군은 <span style="color:#3fd0c0">청록색 테이프</span>, 적은 <span style="color:#f0904a">주황색 테이프</span>. 머리 위 표시는 없다 (Tab).</li>
+        </ul>
+        <h2>요령</h2>
+        <ul>
+          <li>분대장은 다음 구간에 <b>사선이 닿는 적이 모두 고개를 숙였을 때</b>만 조를 뛰게 한다. 그 적들을 돌아가며 눌러라. 사살하면 그 적은 더 막지 않는다.</li>
+          <li><b>G</b>: 약진 요청. 조건이 되면 바로 출발, 안 되면 분대장이 이유를 말한다. <b>H</b>: 다음 약진 보류. <b>X</b>: 조준점 표적 지시 — 분대가 15초 동안 그곳에 집중 사격.</li>
+          <li>후반 구간은 네 사선 가까이를 지난다. <b>"사격 전환!"</b>이 들리면 그 방향 사격을 멈추고 다른 적으로 옮겨라. 네 탄은 아군에게도 맞는다.</li>
+          <li>탄약: 30발 탄창 ${W.spareMags + 1}개 + 시작 위치 옆 <b>탄약 상자 ${CONFIG.ammoCrate.totalRounds}발</b> (F, 탄창 하나 약 8초, 그동안 사격 불가). 분대원은 각자 탄창 ${S.spareMags + 1}개.</li>
+          <li>콜아웃의 방위는 북쪽 000° 기준, 네 위치에서 잰 값이다. <b>Tab</b> 을 누르면 분대 상태와 위치 표지가 보인다.</li>
+        </ul>
+        </div>
         <h2>조작</h2>
         ${keysHtml()}
         ${qualityHtml()}
         <div style="text-align:center"><div class="btn" id="btn-start">작전 개시</div></div>
         <div class="sub" style="text-align:center;margin-top:8px">클릭하면 마우스가 화면에 고정됩니다 (Esc 로 해제). 소리를 켜 두세요.</div>
       </div>`;
+    for (const tab of this.briefing.querySelectorAll('[data-mission]')) {
+      tab.onclick = (e) => {
+        e.stopPropagation();
+        this.selectMission(tab.dataset.mission);
+      };
+    }
+    this.selectMission(this.loadMission());
+  }
+
+  loadMission() {
+    try {
+      const v = window.localStorage.getItem(MISSION_KEY);
+      if (MISSIONS.includes(v)) return v;
+    } catch {
+      // 저장소를 쓸 수 없으면 기본값
+    }
+    return 'advance';
+  }
+
+  // 브리핑의 임무 탭 선택 (내용 바꾸고 기억)
+  selectMission(id) {
+    if (!MISSIONS.includes(id)) id = 'advance';
+    this.mission = id;
+    try {
+      window.localStorage.setItem(MISSION_KEY, id);
+    } catch {
+      // 기억하지 못해도 이번 선택은 적용
+    }
+    for (const t of this.briefing.querySelectorAll('[data-mission]')) t.classList.toggle('active', t.dataset.mission === id);
+    for (const b of this.briefing.querySelectorAll('[data-brief]')) b.classList.toggle('hidden', b.dataset.brief !== id);
   }
 
   buildPause() {
@@ -205,11 +278,12 @@ export class Screens {
       </div>`;
   }
 
+  // onStart(missionId)
   showBriefing(onStart) {
     this.hideAll();
     this.refreshQuality();
     this.briefing.classList.remove('hidden');
-    document.getElementById('btn-start').onclick = onStart;
+    document.getElementById('btn-start').onclick = () => onStart(this.mission);
   }
 
   showPause(onResume, onRestart) {
@@ -228,14 +302,26 @@ export class Screens {
     this.pause.classList.add('hidden');
   }
 
-  showResult(r, onRestart) {
+  // onRestart: 같은 임무 다시, onMenu: 브리핑(임무 선택)으로
+  showResult(r, onRestart, onMenu) {
     const pct = (v) => `${Math.round(v * 100)}%`;
     const t = Math.round(r.time);
+    const body = r.mission === 'advance' ? this.advanceResultHtml(r, pct) : this.holdResultHtml(r, pct);
     this.result.innerHTML = `
-      <div class="panel" style="width:min(620px,92vw)">
+      <div class="panel" style="width:min(640px,92vw)">
         <div class="result-banner ${r.success ? 'ok' : 'fail'}">${r.success ? '임무 성공' : '임무 실패'}</div>
-        <div class="sub">${r.reason} · 경과 ${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</div>
-        <table class="result-table">
+        <div class="sub">${r.mission === 'advance' ? '약진 엄호' : '이동 저지'} · ${r.reason} · 경과 ${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}</div>
+        ${body}
+        <div class="result-kills">참고: 사살 ${r.kills}</div>
+        <div style="text-align:center"><div class="btn" id="btn-restart">다시 하기</div><div class="btn" id="btn-menu" style="margin-left:10px;background:#4a4840">임무 선택</div></div>
+      </div>`;
+    this.result.classList.remove('hidden');
+    document.getElementById('btn-restart').onclick = onRestart;
+    document.getElementById('btn-menu').onclick = onMenu || onRestart;
+  }
+
+  holdResultHtml(r, pct) {
+    return `<table class="result-table">
           <tr><td>평균 제압 유지율 <span class="sub">(살아 있는 적이 '압박' 이상이었던 시간 비율)</span></td><td>${pct(r.uptime)}</td></tr>
           <tr><td>적 이동 시도 / 저지</td><td>${r.attempts}회 / ${r.blocked}회</td></tr>
           <tr><td class="sub">&nbsp;&nbsp;저지 내역: 출발 포기 ${r.deterred} · 이동 중 고착 ${r.stopped}</td><td></td></tr>
@@ -243,11 +329,18 @@ export class Screens {
           <tr><td>사용 탄약</td><td>${r.shotsFired}발 (탄창 ${r.magsUsed.toFixed(1)}개 분량)</td></tr>
           <tr><td>근접탄 비율 <span class="sub">(적 3m 이내를 지나거나 떨어진 탄)</span></td><td>${pct(r.nearRatio)}</td></tr>
           <tr><td>피격 횟수</td><td>${r.hitsTaken}</td></tr>
-        </table>
-        <div class="result-kills">참고: 사살 ${r.kills}</div>
-        <div style="text-align:center"><div class="btn" id="btn-restart">다시 하기</div></div>
-      </div>`;
-    this.result.classList.remove('hidden');
-    document.getElementById('btn-restart').onclick = onRestart;
+        </table>`;
+  }
+
+  advanceResultHtml(r, pct) {
+    return `<table class="result-table">
+          <tr class="key-metric"><td>약진 중 위협 제압률 <span class="sub">(아군이 뛰는 동안 그 구간에 사선이 닿는 적이 '압박' 이상이었던 시간 비율)</span></td><td>${r.threatTime > 0 ? pct(r.threatRate) : '-'}</td></tr>
+          <tr><td>약진 / 막힌 G 요청</td><td>${r.bounds}회 / ${r.gBlocked}회 <span class="sub">(G ${r.gRequests}회)</span></td></tr>
+          <tr><td>아군 손실 <span class="sub">(전투 불능)</span></td><td>${r.losses}명 <span class="sub">(기동조 ${r.mobileLosses})</span></td></tr>
+          <tr><td>엄호조 피격 <span class="sub">(너 + 4번)</span></td><td>${r.coverTeamHits}</td></tr>
+          <tr><td>아군 3m 안을 지난 내 탄 / 아군 오사</td><td>${r.playerNearFriend}발 / ${r.friendlyHitsByPlayer}회</td></tr>
+          <tr><td>사용 탄약</td><td>${r.shotsFired}발 (탄창 ${r.magsUsed.toFixed(1)}개 분량) · 남은 탄 ${r.roundsLeft}발</td></tr>
+          <tr><td>근접탄 비율 <span class="sub">(적 3m 이내를 지나거나 떨어진 탄)</span></td><td>${pct(r.nearRatio)}</td></tr>
+        </table>`;
   }
 }

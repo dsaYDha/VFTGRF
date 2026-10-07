@@ -44,6 +44,13 @@ export function fmtBearing(deg) {
   return String(Math.round(deg) % 360).padStart(3, '0');
 }
 
+// 조사: 받침이 있으면 a('이'), 없으면 b('가') — '1조가', '4번이', '분대장이'
+export function josa(word, a = '이', b = '가') {
+  const c = word.charCodeAt(word.length - 1);
+  const has = c >= 0xac00 && c <= 0xd7a3 ? (c - 0xac00) % 28 !== 0 : false;
+  return word + (has ? a : b);
+}
+
 export function fmtRange(d) {
   return d >= 100 ? String(Math.round(d / 10) * 10) : String(Math.max(5, Math.round(d / 5) * 5));
 }
@@ -646,7 +653,8 @@ export class Squad {
       const dy = _v.y - o.y;
       const dz = _v.z - o.z;
       const along = dx * dir.x + dy * dir.y + dz * dir.z;
-      const nearTarget = _v.distanceTo(_w) < S.targetDist;
+      // 탄착점 30m 규칙은 탄이 멀리(앞 둔덕이 아니라 적 쪽) 떨어질 때만
+      const nearTarget = hitDist >= S.minTargetRange && _v.distanceTo(_w) < S.targetDist;
       let line = false;
       if (along > S.minRange && along < hitDist + 5) {
         const perp = Math.sqrt(Math.max(0, dx * dx + dy * dy + dz * dz - along * along));
@@ -658,7 +666,7 @@ export class Squad {
     if (!inLine.length) return;
     const who = inLine[0].m;
     const team = who.team ? TEAM_NAMES[who.team] : who.callName;
-    const text = inLine[0].line ? `사격 전환! ${team}이 사선에 있다!` : `사격 옮겨! 그 근처에 ${team}이 있다!`;
+    const text = inLine[0].line ? `사격 전환! ${josa(team)} 사선에 있다!` : `사격 옮겨! 그 근처에 ${josa(team)} 있다!`;
     if (this.say(this.speaker(), text, 'shift-fire', 'alert', true)) this.stats.shiftFireCalls++;
   }
 
@@ -780,7 +788,7 @@ export class Squad {
       if (pos) return `${this.placeText(pos)} 쪽 놈이 아직 고개를 든다${more}`;
       return `적이 아직 고개를 들고 있다${more ? `, ${list.length}곳` : ''} — 계속 눌러줘`;
     }
-    if (r.type === 'suppressed') return `${r.members[0].callName}이 묶였다, 고개를 못 든다`;
+    if (r.type === 'suppressed') return `${josa(r.members[0].callName)} 묶였다, 고개를 못 든다`;
     if (r.type === 'near') return `${r.members[0].callName} 옆에 탄이 떨어진다`;
     if (r.type === 'gap') return '자리 잡는 중이다';
     return '';

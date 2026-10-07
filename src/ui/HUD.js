@@ -260,7 +260,8 @@ export class HUD {
     // 남은 시간·진출 횟수
     const rem = Math.ceil(m.remaining);
     this.set(this.timer, 'timer', `${Math.floor(rem / 60)}:${String(rem % 60).padStart(2, '0')}`);
-    this.set(this.advances, 'adv', `적 진출 ${m.advances} / ${CONFIG.mission.maxAdvances}`);
+    // 오른쪽 위 임무 상태 (1단계: 적 진출 횟수, 2단계: 약진·조 위치·돌격 대기 시간)
+    this.set(this.advances, 'adv', m.statusText);
     // 자세·부상·스태미나
     let pst = pl.postureName();
     if (Math.abs(pl.lean) > 0.4) pst += pl.lean > 0 ? ' · 오른쪽 기울임' : ' · 왼쪽 기울임';

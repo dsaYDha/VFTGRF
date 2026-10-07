@@ -7,6 +7,7 @@
 // =============================================================================
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
+import { josa } from '../ai/SquadLeader.js';
 
 export const BRIEFING_ADVANCE =
   '기동조가 개활지를 건너 적 참호 앞 구덩이 지대까지 약진한다. 너와 4번은 수로에서 엄호한다. 놈들이 고개를 못 들게 해라. 아군이 사선에 들어오면 사격을 옮겨라.';
@@ -46,7 +47,7 @@ export class AdvanceMission {
       const m = sq.memberOf(e.unit);
       if (!m) return;
       if (e.bullet && isPlayer(e.bullet.shooter)) {
-        this.finishLater(false, `내 탄에 ${m.callName}이 쓰러졌다`);
+        this.finishLater(false, `내 탄에 ${josa(m.callName)} 쓰러졌다`);
         return;
       }
       const lost = sq.mobile.filter((x) => !x.alive).length;

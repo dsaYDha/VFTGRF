@@ -420,14 +420,13 @@ body {
   color: #e9dfbd;
   font-family: Consolas, monospace;
 }
-/* 2단계 임무에서만 쓰는 키 표시 (약진 엄호) */
-.keys div .key-note {
-  display: inline;
-  min-width: 0;
-  margin-left: 6px;
-  font-family: inherit;
+/* 2단계 임무에서만 쓰는 키 묶음의 머리줄 (약진 엄호) — 두 칸을 가로질러 */
+.keys .keys-head {
+  grid-column: 1 / -1;
+  margin-top: 6px;
   font-size: 12px;
   color: #8fc9bf;
+  border-bottom: 1px solid rgba(143, 201, 191, 0.25);
 }
 
 /* 일시정지 메뉴: 소리 (전체·효과음·음성 슬라이더 + 음성 콜아웃 읽기) */
@@ -512,4 +511,42 @@ body {
 }
 .result-banner.fail {
   color: #f0a080;
+}
+
+/* 2단계: 브리핑 임무 선택 탭 */
+.mission-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.mission-tab {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid rgba(200, 200, 180, 0.25);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.mission-tab b {
+  display: block;
+  font-size: 17px;
+}
+.mission-tab span {
+  font-size: 12.5px;
+  opacity: 0.75;
+}
+.mission-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.mission-tab.active {
+  border-color: #c9b26a;
+  background: rgba(201, 178, 106, 0.16);
+}
+.mission-brief.hidden {
+  display: none;
+}
+.result-table tr.key-metric td {
+  font-weight: 600;
+  color: #f0e2b0;
 }

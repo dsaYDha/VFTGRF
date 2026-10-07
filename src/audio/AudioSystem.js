@@ -41,7 +41,8 @@ export class AudioSystem {
     this.nextArtillery = 5;
     this.nextDistantFire = 9;
     this.pendingCasing = [];
-    const ev = game.events;
+    // 시뮬레이션 모드(렌더 없이 수백 배 빠르게 진행) 중에는 소리를 내지 않는다
+    const ev = { on: (type, fn) => game.events.on(type, (e) => game.simMode || fn(e)) };
     ev.on(EV.SHOT_FIRED, (e) => this.onShot(e));
     ev.on(EV.BULLET_IMPACT, (e) => this.onImpact(e));
     ev.on(EV.BULLET_NEAR_MISS, (e) => this.onNearMiss(e));

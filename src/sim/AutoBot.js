@@ -177,7 +177,7 @@ export class AutoBot {
     this.keepPosture('crouch');
     if (pl.posture !== 'crouch' || pl.transT < 1) return;
     // 표적 지시: 가장 오래 못 누른 위협을 15초마다
-    if (sq && wanted.length && now - this.lastX > CONFIG.squad.designateTime) {
+    if (sq && sq.active && wanted.length && now - this.lastX > CONFIG.squad.designateTime) {
       const ai = wanted[0];
       ai.s.getHeadPos(_v);
       sq.designate(_v.set(_v.x + gauss() * 1.5, _v.y, _v.z + gauss() * 1.5));
@@ -214,12 +214,12 @@ export class AutoBot {
       }
     }
     // 위협을 한 바퀴 다 눌렀으면 약진 요청 (G)
-    if (sq && !sq.bound && wanted.length && now - this.lastG > 4) {
+    if (sq && sq.active && !sq.bound && wanted.length && now - this.lastG > 4) {
       const allFresh = wanted.every((ai) => now - (this.engaged.get(ai) ?? -99) < 3.0);
       if (allFresh) {
         this.lastG = now;
         this.stats.gPresses++;
-        sq.requestBound();
+        this.input.press('KeyG');
       }
     }
   }
@@ -323,10 +323,10 @@ export class AutoBot {
       this.shotsLeft--;
       this.shotTimer = rand(0.2, 0.4);
     }
-    if (g.squad && now - this.lastG > 15) {
+    if (g.squad && g.squad.active && now - this.lastG > 15) {
       this.lastG = now;
       this.stats.gPresses++;
-      g.squad.requestBound();
+      this.input.press('KeyG');
     }
   }
 }

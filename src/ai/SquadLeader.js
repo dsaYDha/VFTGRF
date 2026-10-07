@@ -415,6 +415,14 @@ export class Squad {
 
   autoCheck() {
     const now = this.game.time;
+    const b = this.bound;
+    if (b) {
+      // 약진 중: 뛰는 조의 구간에 사선이 닿는 미제압 적을 엄호 사격 우선 표적으로
+      this.threats = this.segmentThreats(b.fromId, b.toId).filter((ai) => ai.s.suppression.value < CONFIG.squad.threatMinSuppression);
+      this.block = null;
+      this.blockedSince = null;
+      return;
+    }
     const plan = this.nextPlan();
     this.threats = [];
     if (!plan) {
@@ -667,7 +675,7 @@ export class Squad {
     const who = inLine[0].m;
     const team = who.team ? TEAM_NAMES[who.team] : who.callName;
     const text = inLine[0].line ? `사격 전환! ${josa(team)} 사선에 있다!` : `사격 옮겨! 그 근처에 ${josa(team)} 있다!`;
-    if (this.say(this.speaker(), text, 'shift-fire', 'alert', true)) this.stats.shiftFireCalls++;
+    if (this.say(this.speaker(), text, 'shift-fire', 'alert')) this.stats.shiftFireCalls++;
   }
 
   onNearMiss(e) {
@@ -679,7 +687,7 @@ export class Squad {
     e.bullet.nearFriendCounted = true;
     this.stats.playerNearFriend++;
     this.nearFriendMarks.push({ pos: e.point.clone(), time: this.game.time, member: m });
-    this.say(m, '아군이다! 사격 중지!', 'friendly-near', 'alert', true);
+    this.say(m, '아군이다! 사격 중지!', 'friendly-near', 'alert');
   }
 
   onUnitHit(e) {
@@ -694,7 +702,7 @@ export class Squad {
     if (m.team === 0) this.stats.coverTeamHits++;
     if (fromPlayer) {
       this.stats.friendlyHitsByPlayer++;
-      this.say(m, '아군 오사! 사격 중지! 사격 중지!', 'friendly-hit', 'alert', true);
+      this.say(m, '아군 오사! 사격 중지! 사격 중지!', 'friendly-hit', 'alert');
     }
     m.onHit(e);
     if (e.result === 'wounded') this.say(this.speaker(m), `${m.callName} 부상!`, `wounded-${m.role}`, 'alert');

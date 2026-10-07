@@ -112,7 +112,7 @@ export class Game {
     this.input.onLockChange = (locked, failed) => this.onLockChange(locked, failed);
     window.addEventListener('resize', () => this.onResize());
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden && this.state === 'playing') this.pause();
+      if (document.hidden && this.state === 'playing' && !this.simMode) this.pause();
     });
 
     this.director.reset();
@@ -139,7 +139,7 @@ export class Game {
   }
 
   async runSim(runs = 10, bot = 'good', mission = 'advance') {
-    if (this.simMode || !this.ready) return null;
+    if (this.simMode || !this.ready || document.getElementById('sim-overlay')) return null;
     this.screens.hideAll();
     this.hud.show(false);
     const box = document.createElement('div');
@@ -163,6 +163,8 @@ export class Game {
         box.textContent = head + log.join('\n');
       },
     });
+    // 시뮬레이션 동안 눌린 키(F8 등)는 버린다
+    this.input.pressed.clear();
     const text = formatSummary(summary);
     console.log(text);
     box.textContent = `${head}${log.join('\n')}\n\n${text}\n\n(클릭하면 브리핑으로)`;
@@ -238,7 +240,7 @@ export class Game {
   }
 
   pause() {
-    if (this.state !== 'playing') return;
+    if (this.state !== 'playing' || this.simMode) return;
     this.state = 'paused';
     this.audio.suspend();
     this.screens.showPause(
@@ -261,7 +263,7 @@ export class Game {
   // 잠금이 풀리거나 잠금 요청이 거절되면(Esc 직후 너무 빨리 다시 누른 경우 등) 일시정지 화면으로.
   // 잠금 없이 계속 진행되면 조준·사격·일시정지를 할 수 없는 상태로 적 사격만 받게 된다.
   onLockChange(locked) {
-    if (!locked && this.state === 'playing') this.pause();
+    if (!locked && this.state === 'playing' && !this.simMode) this.pause();
   }
 
   onMissionEnd(r) {

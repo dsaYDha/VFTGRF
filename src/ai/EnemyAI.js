@@ -109,6 +109,8 @@ export class EnemyAI {
         best = p;
       }
     }
+    // 노릴 만한 대상이 없고 지금 대상이 쓰러졌으면 플레이어 추정으로 (쓰러진 사람에게 계속 쏘지 않게)
+    if (!best && !this.perception.target.alive) best = this.trackFor(this.game.player);
     if (best && best !== this.perception) {
       this.perception = best;
       this.decidedFire = null;

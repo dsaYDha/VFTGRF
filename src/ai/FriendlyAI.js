@@ -161,7 +161,9 @@ export class FriendlyAI {
   // 근접탄·피격 (제압 시스템 이벤트)
   onSuppressed(e) {
     const S = CONFIG.squad;
-    if (e.distance <= S.nearRoundDist || e.impactDist <= S.nearRoundDist) this.lastNearRound = this.game.time;
+    // 출발 조건 3 의 '근접탄' 은 적 탄만 (플레이어 탄은 사격 전환 콜아웃으로 따로 다룬다)
+    const enemyRound = e.bullet && e.bullet.team === 'enemy';
+    if (enemyRound && (e.distance <= S.nearRoundDist || e.impactDist <= S.nearRoundDist)) this.lastNearRound = this.game.time;
     if (this.state === 'bound') this.takeCover();
     else if (this.up && this.level >= LEVEL.SUPPRESSED) this.setUp(false);
   }
@@ -398,7 +400,11 @@ export class FriendlyAI {
   updateHalted(dt) {
     const S = CONFIG.squad;
     const now = this.game.time;
-    // 구덩이로 뛰어드는 중
+    // 구덩이로 뛰어드는 중 (고착이면 그 자리에 엎드린 채 움직이지 못한다)
+    if (this.halt && this.halt.dive && this.level >= LEVEL.PINNED) {
+      this.halt.dive = null;
+      this.s.model.setPose('proneLow', 12);
+    }
     if (this.halt && this.halt.dive) {
       const p = this.halt.dive;
       const dx = p.x - this.pos.x;

@@ -191,7 +191,9 @@ export class Game {
     try {
       await this.audio.init();
     } catch (e) {
+      // 조용히 실패하지 않게 화면에도 알린다 (F3 오디오 줄에도 '소리 준비 전'으로 남는다)
       console.warn('audio init failed', e);
+      this.events.emit(EV.MESSAGE, { text: `소리를 켜지 못했다: ${e && e.message ? e.message : e}`, kind: 'warn' });
     }
   }
 

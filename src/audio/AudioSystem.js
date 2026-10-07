@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { EV } from '../core/events.js';
 import { buildSoundBank } from './SoundBank.js';
-import { SR, buf, rng, noise, lowpass, toBuffer } from './dsp.js';
+import { SR, rng, noise, lowpass } from './dsp.js';
 import { rand, randRange } from '../core/Random.js';
 
 const VOLUME_KINDS = ['master', 'sfx', 'voice'];
@@ -146,15 +146,25 @@ export class AudioSystem {
     if (!ctx) return;
     if (!this.bank) {
       this.bank = buildSoundBank(ctx);
-      // 잔향 (합성 임펄스 응답)
-      this.reverb = ctx.createConvolver();
-      this.reverb.buffer = this.makeIR();
-      this.reverbGain = ctx.createGain();
-      this.reverbGain.gain.value = 0.8;
-      this.reverb.connect(this.reverbGain);
-      this.reverbGain.connect(this.sfxBus);
-      this.startAmbience();
+      // 잔향 (합성 임펄스 응답). 잔향이 실패해도 나머지 소리는 나야 한다
+      try {
+        const rv = ctx.createConvolver();
+        rv.buffer = this.makeIR();
+        this.reverbGain = ctx.createGain();
+        this.reverbGain.gain.value = 0.8;
+        rv.connect(this.reverbGain);
+        this.reverbGain.connect(this.sfxBus);
+        this.reverb = rv;
+      } catch (e) {
+        this.reverb = null;
+        console.warn('reverb disabled', e);
+      }
       this.ready = true;
+      try {
+        this.startAmbience();
+      } catch (e) {
+        console.warn('ambience failed', e);
+      }
     }
     if (ctx.state !== 'running') await ctx.resume().catch(() => {});
   }
@@ -251,14 +261,20 @@ export class AudioSystem {
     };
   }
 
+  // 잔향 임펄스 응답. ConvolverNode 는 버퍼 샘플레이트가 컨텍스트(출력 장치, 보통 48kHz)와 같아야 하므로
+  // 합성 표준 레이트(44.1kHz)가 아니라 컨텍스트 레이트로 만든다 (다르면 브라우저가 거부해 소리 전체가 꺼졌었다)
   makeIR() {
+    const ctx = this.ctx;
+    const rate = ctx.sampleRate;
     const dur = 2.6;
     const r = rng(4242);
-    const chans = [0, 1].map(() => {
-      const a = noise(buf(dur), 1, r);
-      lowpass(a, 2400);
+    const len = Math.ceil(dur * rate);
+    const out = ctx.createBuffer(2, len, rate);
+    for (let ch = 0; ch < 2; ch++) {
+      const a = noise(new Float32Array(len), 1, r);
+      lowpass(a, (2400 * SR) / rate); // dsp.lowpass 는 SR 기준 → 같은 실제 차단 주파수
       for (let i = 0; i < a.length; i++) {
-        const t = i / SR;
+        const t = i / rate;
         a[i] *= Math.exp(-t / 0.55) * Math.min(1, t * 60);
       }
       // 이른 반사 (지면·건물)
@@ -268,12 +284,12 @@ export class AudioSystem {
         [0.12, 0.2],
         [0.34, 0.12],
       ]) {
-        const k = Math.floor((dt + r() * 0.01) * SR);
+        const k = Math.floor((dt + r() * 0.01) * rate);
         if (k < a.length) a[k] += g;
       }
-      return a;
-    });
-    return toBuffer(this.ctx, chans);
+      out.copyToChannel(a, ch);
+    }
+    return out;
   }
 
   // 일시정지 메뉴가 열려 있는 동안만 멈춘다 (이때는 클릭해도 다시 켜지 않는다). 읽던·대기 중인 음성도 버린다
@@ -320,7 +336,7 @@ export class AudioSystem {
     g.connect(f);
     f.connect(p);
     p.connect(this.sfxBus);
-    if (reverb > 0) {
+    if (reverb > 0 && this.reverb) {
       const s = ctx.createGain();
       s.gain.value = reverb * gain;
       f.connect(s);
@@ -341,7 +357,7 @@ export class AudioSystem {
     g.gain.value = gain;
     src.connect(g);
     g.connect(this.sfxBus);
-    if (reverb > 0) {
+    if (reverb > 0 && this.reverb) {
       const s = ctx.createGain();
       s.gain.value = reverb * gain;
       g.connect(s);

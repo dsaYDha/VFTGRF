@@ -260,6 +260,33 @@ BALANCE_PLACEHOLDER
 | 반동 | `weapons.ak545.recoil` | 발당 0.95°, 영구 45% |
 | 조준 흔들림 | `player.sway` | 기본 3.4 mrad, 거치 ×0.22 |
 | 적 조준 분산 | `soldierTypes.rifleman.aimDispersionMrad` | 4.8 mrad |
+
+### 2단계 수치 (`squad`, `advanceMission`, `ai.targeting`, `ammoCrate`, `audioMix`, `callouts`)
+
+| 항목 | 키 | 기본값 |
+| --- | --- | --- |
+| 출발 조건: 사선이 닿는 적 최소 제압 / 뛸 조원 최대 제압 | `squad.threatMinSuppression`, `departMaxSuppression` | 25 / 25 미만 |
+| 출발 조건: 근접탄 없는 시간 / 근접탄 거리 | `squad.departQuietTime`, `nearRoundDist` | 2초 / 3m |
+| 약진 사이 최소 대기 (G 면 생략) / 판단 간격 | `squad.minBoundGap`, `checkInterval` | 8초 / 1초 |
+| 엄호 요청 반복 (막힌 시간) | `squad.blockedRepeat` | 20초 |
+| 구간 사선 검사 간격·높이 / 적 눈높이 | `squad.losStep`, `losRunnerHeight`, `enemyEyeHeights` | 2.5m · 1.2m / 서 1.55, 무릎 1.05, 엎드림 0.35 |
+| 질주 속도 / 한 번에 뛰는 시간 / 중간 엎드림 | `squad.sprintSpeed`, `runTime`, `dropTime` | 4.6m/s / 3~5초 / 0.9~1.8초 |
+| 멈춘 뒤 다시 뛰기 / 뛰어들 구덩이 거리 | `squad.resumeQuiet`, `diveCraterRadius` | 2초 / 6m |
+| 엄호 위치 관측 / 숙임 시간 | `squad.upTime`, `downTime` | 2.5~5초 / 1.2~3초 |
+| 아군 사격 간격 / 사거리 / 추정 유효 시간 | `squad.fireInterval`, `fireRange`, `estimateMaxAge` | 2~5초 / 420m / 40초 |
+| 아군 사선 비우기 (다른 아군과) | `squad.lineClearance`, `lineClearanceDeg` | 2m / 2.5° |
+| 표적 지시 시간·분산·적 맞춤 거리 | `squad.designateTime`, `designateSpread`, `designateMatch` | 15초 · 1.4m · 18m |
+| 사격 전환 범위 | `squad.shiftFire` | 5° · 3m, 탄착점 30m (탄착 25m 이상일 때) |
+| '아군이다! 사격 중지!' 거리 / 플레이어 탄 오사 | `squad.friendlyNearDist`, `playerFriendlyFire` | 3m / 켬 |
+| 같은 콜아웃 반복 간격 / Tab 표지 시간 | `squad.calloutGap`, `markerTime` | 6초 / 2초 |
+| 구덩이 엎드릴 자리 | `squad.slotCount`, `slotSpacing`, `slotRimBelow` | 4곳, 1m 간격, 테두리 0.3m 아래 |
+| 아군 탄창 / 명중률 | `soldierTypes.squadRifleman.spareMags`, `aimDispersionMrad` | 예비 7 (모두 8개) / 4.8 mrad (적과 같음) |
+| 제한 시간 / 돌격 대기 시간·반경·인원 | `advanceMission.timeLimit`, `assaultHoldTime`, `assaultRadius`, `minAtAssault` | 12분 / 30초 · 9m · 2명 |
+| 실패 기동조 손실 / 적 증원 상한 | `advanceMission.maxMobileLosses`, `reinforcementMax` | 3명 / 2명 |
+| 적 대상 고르기 | `ai.targeting` | 보임 +100, 움직임 걷기 +10·질주 +25, 최근 확인 +30, 총성 +8, m 당 -0.06, 유지 +6 |
+| 탄약 상자 / 손 닿는 거리 | `ammoCrate.totalRounds`, `useRadius`, `leaveRadius` | 300발 / 2.2m (2.5m 벗어나면 멈춤) |
+| 콜아웃 자막 | `callouts.time`, `fade`, `maxLines` | 3.5초, 0.45초, 2줄 |
+| 볼륨 기본값 / 음성 합성 | `audioMix.defaultSfx`, `defaultVoice`, `audioMix.speech` | 1.0, 0.85 / ko-KR, 기본 끔 |
 | 적 첫 발 견착 시간 / 자기 엄폐물 넘겨 쏘기 | `ai.firstShotDelay`, `ai.ownCoverClear` | 0.3~0.5초 / 3.5m 앞까지 검사, 최대 0.21m 들어 올림 |
 | 적 엄폐·관측 시간 | `ai.coverWait`, `ai.observeTime` | 2.5~6초, 1~3초 |
 | 적 발견률 | `ai.detectBaseRate` 등 | 0.22/초 (100m, 완전 노출 기준) |
